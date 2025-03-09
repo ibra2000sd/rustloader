@@ -1,0 +1,23 @@
+[package]
+name = "rustloader"
+version = "0.1.0"
+edition = "2021"
+authors = ["Ibrahim Mohamed"]
+description = "Advanced video downloader for various content sources"
+
+[dependencies]
+reqwest = { version = "0.12", features = ["blocking", "json"] }
+clap = "4.5"
+thiserror = "1.0"
+tokio = { version = "1.32", features = ["full"] }
+dirs-next = "2.0.0"
+indicatif = "0.17"
+home = "0.5"
+scraper = "0.22.0"
+regex = "1.11"
+colored = "2.0"
+daemonize = "0.5.0"
+notify-rust = "4.11.3"
+[[bin]]
+name = "rustloader"
+path = "src/main.rs"
