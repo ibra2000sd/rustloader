@@ -1,6 +1,13 @@
 # Rustloader
 
+<div align="center">
+
 **Advanced Video Downloader built with Rust**
+
+[![GitHub license](https://img.shields.io/github/license/ibra2000sd/rustloader)](https://github.com/ibra2000sd/rustloader/blob/main/LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/ibra2000sd/rustloader)](https://github.com/ibra2000sd/rustloader/stargazers)
+
+</div>
 
 Rustloader is a powerful, versatile command-line tool for downloading videos and audio from various online platforms. Built with Rust for maximum performance and reliability.
 
@@ -15,16 +22,41 @@ Rustloader is a powerful, versatile command-line tool for downloading videos and
 - Desktop notifications when downloads complete
 - Automatic dependency checking and updates
 
-## Requirements
+## Required Dependencies
 
 Rustloader depends on these external tools:
 
 - **yt-dlp** - For video extraction
 - **ffmpeg** - For media processing
 
+The automatic installation script will install these for you. If you're installing manually, see the Manual Dependencies Installation section below.
+
 ## Installation
 
-### Method 1: Install from Source
+### Method 1: Automatic Installation Script (Recommended)
+
+For Linux and macOS users, we provide an automatic installation script that handles everything for you:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/ibra2000sd/rustloader/main/install.sh | bash
+```
+
+This script will:
+- Install Rust if not already installed
+- Install all dependencies (yt-dlp and ffmpeg)
+- Build and install rustloader
+- Add rustloader to your system PATH
+- Verify the installation works correctly
+
+For security-conscious users, you can download the script first, review it, and then run it:
+
+```bash
+curl -O https://raw.githubusercontent.com/ibra2000sd/rustloader/main/install.sh
+chmod +x install.sh
+./install.sh
+```
+
+### Method 2: Install from Source
 
 1. **Install Rust and Cargo** (if not already installed):
    ```bash
@@ -42,7 +74,7 @@ Rustloader depends on these external tools:
    cargo install --path .
    ```
 
-### Method 2: Install Dependencies
+### Method 3: Manual Dependencies Installation
 
 Rustloader will check for and notify you about missing dependencies, but you can install them ahead of time:
 
