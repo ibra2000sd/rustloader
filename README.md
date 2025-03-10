@@ -13,14 +13,23 @@ Rustloader is a powerful, versatile command-line tool for downloading videos and
 
 ## Features
 
-- Download videos in various quality options (480p, 720p, 1080p)
-- Extract audio in MP3 format
+### Free Version
+- Download videos up to 720p quality
+- Extract MP3 audio at 128kbps
 - Download specific segments using start and end time markers
 - Download entire playlists
 - Automatically fetch subtitles
 - Progress bar tracking
 - Desktop notifications when downloads complete
 - Automatic dependency checking and updates
+
+### Pro Version
+- High quality video downloads (1080p, 4K, 8K)
+- High-fidelity audio extraction (320kbps, FLAC)
+- No daily download limits
+- Multi-threaded downloads for maximum speed
+- Priority updates and support
+- Unlimited downloads
 
 ## Required Dependencies
 
@@ -182,6 +191,20 @@ This displays a comprehensive help message with all available options, arguments
    rustloader https://www.youtube.com/watch?v=dQw4w9WgXcQ --output-dir ~/Videos/music
    ```
 
+### Pro Version Activation
+
+If you have purchased a Pro license, you can activate it with:
+
+```bash
+rustloader --activate YOUR_LICENSE_KEY
+```
+
+To check your license status:
+
+```bash
+rustloader --license
+```
+
 ### Available Options
 
 | Option | Short | Description |
@@ -196,8 +219,14 @@ This displays a comprehensive help message with all available options, arguments
 | `--subs` | | Download subtitles if available |
 | `--output-dir` | `-o` | Specify custom output directory |
 | `--bitrate` | | Set video bitrate (e.g., 1000K) |
+| `--activate` | | Activate a Pro license |
+| `--license` | | Display license information |
 
 ## Troubleshooting
+
+### Daily Download Limit
+
+Free version users are limited to 5 downloads per day. To remove this limitation, consider upgrading to the Pro version.
 
 ### 403 Forbidden Errors
 
@@ -212,6 +241,15 @@ Solutions:
 - Make sure both yt-dlp and ffmpeg are installed and in your PATH
 - Check that you have write permissions for the download directory
 - Verify that your internet connection is stable
+
+## Security Features
+
+Rustloader includes several security features:
+- Secure license verification system
+- Path validation to prevent directory traversal
+- Input sanitization for command arguments
+- Safe file operations
+- Anti-tampering protections
 
 ## License
 
