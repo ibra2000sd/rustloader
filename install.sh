@@ -68,15 +68,15 @@ install_dependencies() {
             if command_exists apt; then
                 echo -e "${YELLOW}Using apt package manager...${NC}"
                 sudo apt update
-                sudo apt install -y python3 python3-pip ffmpeg
+                sudo apt install -y python3 python3-pip ffmpeg libssl-dev pkg-config
             elif command_exists dnf; then
                 echo -e "${YELLOW}Using dnf package manager...${NC}"
-                sudo dnf install -y python3 python3-pip ffmpeg
+                sudo dnf install -y python3 python3-pip ffmpeg openssl-devel pkgconfig
             elif command_exists pacman; then
                 echo -e "${YELLOW}Using pacman package manager...${NC}"
-                sudo pacman -Sy python python-pip ffmpeg
+                sudo pacman -Sy python python-pip ffmpeg openssl pkg-config
             else
-                echo -e "${RED}Unsupported Linux distribution. Please install Python, pip, and ffmpeg manually.${NC}"
+                echo -e "${RED}Unsupported Linux distribution. Please install Python, pip, ffmpeg, openssl-dev and pkg-config manually.${NC}"
                 exit 1
             fi
             
@@ -91,7 +91,12 @@ install_dependencies() {
             fi
             
             echo -e "${YELLOW}Installing dependencies with Homebrew...${NC}"
-            brew install python ffmpeg yt-dlp
+            brew install python ffmpeg yt-dlp openssl@3 pkg-config
+            
+            # Set up environment for OpenSSL
+            export OPENSSL_DIR=$(brew --prefix openssl@3)
+            echo "export OPENSSL_DIR=$(brew --prefix openssl@3)" >> ~/.bash_profile
+            echo "export OPENSSL_DIR=$(brew --prefix openssl@3)" >> ~/.zshrc
             ;;
             
         "Windows")
@@ -103,7 +108,7 @@ install_dependencies() {
                 exit 1
             fi
             
-            choco install -y python ffmpeg
+            choco install -y python ffmpeg openssl
             pip install --user --upgrade yt-dlp
             ;;
             
@@ -217,6 +222,49 @@ test_installation() {
     fi
 }
 
+# Clean up existing download counter if it exists
+cleanup_existing_data() {
+    echo -e "${BLUE}Checking for existing data...${NC}"
+    
+    # Define paths based on OS
+    local data_dir=""
+    if [[ "$OS" == "Linux" ]]; then
+        data_dir="$HOME/.local/share/rustloader"
+    elif [[ "$OS" == "macOS" ]]; then
+        data_dir="$HOME/Library/Application Support/rustloader"
+    elif [[ "$OS" == "Windows" ]]; then
+        data_dir="$APPDATA/rustloader"
+    fi
+    
+    if [[ -d "$data_dir" ]]; then
+        echo -e "${YELLOW}Found existing rustloader data directory: $data_dir${NC}"
+        read -p "Would you like to clean up old data files? (Recommended for updates) (y/n) " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            echo -e "${YELLOW}Removing old data files...${NC}"
+            rm -f "$data_dir/download_counter.dat"
+            echo -e "${GREEN}Old data files removed.${NC}"
+        fi
+    fi
+}
+
+# Display final instructions
+display_instructions() {
+    echo -e "${BLUE}========================================${NC}"
+    echo -e "${GREEN}Rustloader has been successfully installed!${NC}"
+    echo -e "${GREEN}You can now use it by running 'rustloader' in your terminal.${NC}"
+    echo -e "${YELLOW}Basic Usage:${NC}"
+    echo -e "  rustloader [URL] [OPTIONS]"
+    echo -e "${YELLOW}Examples:${NC}"
+    echo -e "  rustloader https://www.youtube.com/watch?v=dQw4w9WgXcQ                  # Download video"
+    echo -e "  rustloader https://www.youtube.com/watch?v=dQw4w9WgXcQ --format mp3     # Download audio"
+    echo -e "  rustloader --help                                                        # Show all options"
+    echo -e "${YELLOW}Pro Version:${NC}"
+    echo -e "  rustloader --activate YOUR_LICENSE_KEY                                   # Activate Pro"
+    echo -e "  rustloader --license                                                     # Show license info"
+    echo -e "${BLUE}========================================${NC}"
+}
+
 # Main installation process
 main() {
     echo -e "${BLUE}Starting installation...${NC}"
@@ -231,12 +279,9 @@ main() {
     
     install_rustloader
     setup_path
+    cleanup_existing_data
     test_installation
-    
-    echo -e "${BLUE}========================================${NC}"
-    echo -e "${GREEN}Rustloader has been successfully installed!${NC}"
-    echo -e "${GREEN}You can now use it by running 'rustloader' in your terminal.${NC}"
-    echo -e "${BLUE}========================================${NC}"
+    display_instructions
 }
 
 # Run the installation
