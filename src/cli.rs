@@ -1,15 +1,17 @@
+// src/cli.rs
+
 use clap::{Arg, ArgAction, Command};
 
 /// Build the command-line interface for the application
 pub fn build_cli() -> Command {
-    Command::new("rustloader")
+    let mut app = Command::new("rustloader")
         .version("1.0.0")
         .author("Ibrahim Mohamed")
         .about("Advanced video downloader for various content sources")
         .arg(
             Arg::new("url")
                 .help("The URL of the video or playlist to download")
-                .required(true)
+                .required_unless_present_any(["activate-license", "license-info"])
                 .index(1),
         )
         .arg(
@@ -66,4 +68,31 @@ pub fn build_cli() -> Command {
                 .help("Set video bitrate (e.g., 1000K)")
                 .value_name("BITRATE"),
         )
+        // Add license activation argument
+        .arg(
+            Arg::new("activate-license")
+                .long("activate")
+                .help("Activate a Pro license using the provided key")
+                .value_name("LICENSE_KEY"),
+        )
+        // Add license info display argument
+        .arg(
+            Arg::new("license-info")
+                .long("license")
+                .help("Display current license information")
+                .action(ArgAction::SetTrue),
+        );
+    
+    // Only include the force flag in debug builds
+    #[cfg(debug_assertions)]
+    {
+        app = app.arg(
+            Arg::new("force")
+                .long("force")
+                .help("Force download, ignoring daily limits (development use only)")
+                .action(ArgAction::SetTrue),
+        );
+    }
+    
+    app
 }
