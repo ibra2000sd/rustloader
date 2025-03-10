@@ -1,5 +1,9 @@
+// src/error.rs
+
 use std::io;
 use thiserror::Error;
+use reqwest::Error as ReqwestError;
+use serde_json::Error as SerdeError;
 
 /// Custom error types for the application
 #[derive(Error, Debug)]
@@ -31,6 +35,30 @@ pub enum AppError {
     /// General application errors
     #[error("Application error: {0}")]
     General(String),
+    
+    /// Error for when daily download limit is exceeded
+    #[error("Daily download limit exceeded")]
+    DailyLimitExceeded,
+    
+    /// Error for when a feature requires the Pro version
+    #[error("Premium feature: {0}")]
+    PremiumFeature(String),
+    
+    /// Error for security violations (tampering, path traversal, etc.)
+    #[error("Security violation detected. If this is unexpected, please report this issue.")]
+    SecurityViolation,
+    
+    /// HTTP client errors 
+    #[error("HTTP error: {0}")]
+    HttpError(#[from] ReqwestError),
+    
+    /// JSON parsing errors
+    #[error("JSON parsing error: {0}")]
+    JsonError(#[from] SerdeError),
+    
+    /// License errors
+    #[error("License error: {0}")]
+    LicenseError(String),
 }
 
 /// Convert a string error to AppError::General
