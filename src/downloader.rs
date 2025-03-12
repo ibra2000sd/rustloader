@@ -1,12 +1,11 @@
 // src/downloader.rs
 
 use crate::error::AppError;
-use crate::youtube_dl_wrapper::{YoutubeDlWrapper, DownloadConfig, ProgressCallback};
-use crate::ffmpeg_wrapper;
+use crate::youtube_dl_wrapper::{YoutubeDlWrapper, DownloadConfig};
 use crate::utils::{initialize_download_dir, validate_bitrate, validate_time_format, validate_url};
 use colored::*;
 use notify_rust::Notification;
-use std::path::PathBuf;
+use std::path::{PathBuf, Path};
 use std::sync::Arc;
 use rand::Rng;
 use std::fs;
@@ -17,11 +16,9 @@ use base64::{Engine as _, engine::general_purpose};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Instant, Duration};
 use std::sync::Mutex;
-use std::io::{self, Write};
+use std::io;
 use humansize::{format_size, BINARY};
-use std::path::Path;
-use std::fs::File;
-use dialoguer::{Confirm, Select};
+use dialoguer::Select;
 use indicatif::{ProgressBar, ProgressStyle};
 
 // Constants for free version limitations
@@ -384,9 +381,11 @@ impl DownloadCounter {
                     // Check if date has changed
                     let today = Local::now().format("%Y-%m-%d").to_string();
                     if date != today {
-                        return Ok(Self::new()); // Reset counter for new day
+                        // Reset counter for new day
+                        return Ok(Self::new());
                     }
                     
+                    // Return counter with today's date and count
                     Ok(Self {
                         today_count: count,
                         date,
@@ -394,21 +393,13 @@ impl DownloadCounter {
                     })
                 },
                 Err(_) => {
-                    // If decryption fails, assume tampering and create a new counter
-                    // with max downloads already used (as a penalty for tampering)
+                    // If decryption fails, create a new counter
                     println!("{}", "Warning: Download counter validation failed. Counter has been reset.".yellow());
-                    let mut counter = Self::new();
-                    counter.today_count = counter.max_daily_downloads; // Use up all downloads as penalty
-                    
-                    // Save the new counter immediately
-                    if let Err(e) = counter.save_to_disk() {
-                        println!("{}: {}", "Error saving counter".red(), e);
-                    }
-                    
-                    Ok(counter)
+                    Ok(Self::new())
                 }
             }
         } else {
+            // If no counter file exists, create a new one
             Ok(Self::new())
         }
     }
@@ -489,9 +480,6 @@ fn limit_video_quality(requested_quality: &str, is_pro: bool) -> &str {
                 format!("⭐ Rustloader Free is limited to {}p. Upgrade to Pro for higher quality. ⭐", MAX_FREE_QUALITY)
                 .yellow());
         
-        // Just reference the PremiumFeature error type to fix the warning
-        let _unused = AppError::PremiumFeature("High quality video".to_string());
-        
         MAX_FREE_QUALITY
     } else {
         requested_quality
@@ -559,8 +547,56 @@ fn handle_existing_file(path: &Path) -> Result<PathBuf, AppError> {
     }
 }
 
+/// Handle HTTP 416 errors (file already exists)
+async fn handle_http_416_error<F, Fut, T>(f: F) -> Result<T, AppError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<T, AppError>>,
+{
+    match f().await {
+        Err(AppError::DownloadError(msg)) if msg.contains("HTTP 416") => {
+            println!("{}", "File already exists (HTTP 416 error).".yellow());
+            
+            // Ask user what to do
+            let options = vec!["Use existing file", "Try with new filename", "Abort download"];
+            
+            let selection = Select::new()
+                .with_prompt("What would you like to do?")
+                .default(0)
+                .items(&options)
+                .interact()
+                .map_err(|e| AppError::IoError(io::Error::new(io::ErrorKind::Other, e)))?;
+            
+            match selection {
+                0 => {
+                    // Use existing file - return success
+                    println!("{}", "Using existing file...".green());
+                    Err(AppError::General("Use existing file".to_string()))
+                },
+                1 => {
+                    // Try with a new filename by adding a timestamp
+                    println!("{}", "Retrying with new filename...".green());
+                    
+                    // Generate a timestamp for uniqueness
+                    let timestamp = chrono::Local::now().format("%Y%m%d%H%M%S").to_string();
+                    
+                    // We'll return an error with special message that can be handled by the caller
+                    // The caller should retry with a new filename based on the timestamp
+                    Err(AppError::DownloadError(format!("Retry with new filename: {}", timestamp)))
+                },
+                _ => {
+                    // Abort
+                    println!("{}", "Download aborted.".red());
+                    Err(AppError::General("Download aborted by user".to_string()))
+                }
+            }
+        },
+        result => result,
+    }
+}
+
 /// Main download function - now using YouTube-DL and FFmpeg libraries
-pub async fn download_video_free(
+pub async fn download_video_free<F>(
     url: &str,
     quality: Option<&str>,
     format: &str,
@@ -571,8 +607,11 @@ pub async fn download_video_free(
     output_dir: Option<&String>,
     force_download: bool,
     bitrate: Option<&String>,
-    progress_callback: Option<impl Fn(u64, u64) -> bool + Send + Sync + 'static>,
-) -> Result<(), AppError> {
+    progress_callback: Option<F>,
+) -> Result<(), AppError>
+where
+    F: Fn(u64, u64) -> bool + Send + Sync + 'static,
+{
     // Validate URL more strictly
     validate_url(url)?;
 
@@ -639,7 +678,6 @@ pub async fn download_video_free(
 
     // Create enhanced progress tracking
     let progress = Arc::new(DownloadProgress::new());
-    let progress_clone = Arc::clone(&progress);
 
     // Create progress bar with more detailed template
     let pb = ProgressBar::new(100);
@@ -664,7 +702,7 @@ pub async fn download_video_free(
         let progress_ref = Arc::clone(&progress);
         let pb_clone = pb.clone();
         
-        Arc::new(move |downloaded, total| {
+        let wrapper: Arc<dyn Fn(u64, u64) -> bool + Send + Sync> = Arc::new(move |downloaded, total| {
             // Update our progress tracker
             progress_ref.update(downloaded, total);
             
@@ -680,7 +718,9 @@ pub async fn download_video_free(
             
             // Call original callback
             callback(downloaded, total)
-        })
+        });
+        
+        wrapper
     });
 
     // Create download configuration
@@ -699,17 +739,10 @@ pub async fn download_video_free(
     // Create downloader
     let downloader = YoutubeDlWrapper::new(download_config, progress_wrapper);
 
-    // If force download, ensure we don't use existing files
-    let force_flag = if force_download {
-        "--force-overwrites"
-    } else {
-        ""
-    };
-
     // Start download process
     println!("{}", "Starting download...".green());
 
-    let result = match handle_http_416_error(|| downloader.download()).await {
+    let _result = match handle_http_416_error(|| downloader.download()).await {
         Ok(result) => result,
         Err(e) => {
             // Finish the progress bar with error
@@ -753,59 +786,8 @@ pub async fn download_video_free(
     Ok(())
 }
 
-/// Handle HTTP 416 errors (file already exists)
-async fn handle_http_416_error<F, T>(f: F) -> Result<T, AppError>
-where
-    F: FnOnce() -> Result<T, AppError>,
-{
-    match f() {
-        Err(AppError::DownloadError(msg)) if msg.contains("HTTP 416") => {
-            println!("{}", "File already exists (HTTP 416 error).".yellow());
-            
-            // Ask user what to do
-            let options = vec!["Use existing file", "Try with new filename", "Abort download"];
-            
-            let selection = Select::new()
-                .with_prompt("What would you like to do?")
-                .default(0)
-                .items(&options)
-                .interact()
-                .map_err(|e| AppError::IoError(io::Error::new(io::ErrorKind::Other, e)))?;
-            
-            match selection {
-                0 => {
-                    // Use existing file - return success
-                    println!("{}", "Using existing file...".green());
-                    
-                    // Create a dummy success result
-                    // In a real implementation, we would find the existing file and return its path
-                    // For now, we'll just return a success message
-                    Err(AppError::General("Use existing file".to_string()))
-                },
-                1 => {
-                    // Try with a new filename by adding a timestamp
-                    println!("{}", "Retrying with new filename...".green());
-                    
-                    // Generate a timestamp for uniqueness
-                    let timestamp = chrono::Local::now().format("%Y%m%d%H%M%S").to_string();
-                    
-                    // We'll return an error with special message that can be handled by the caller
-                    // The caller should retry with a new filename based on the timestamp
-                    Err(AppError::DownloadError(format!("Retry with new filename: {}", timestamp)))
-                },
-                _ => {
-                    // Abort
-                    println!("{}", "Download aborted.".red());
-                    Err(AppError::General("Download aborted by user".to_string()))
-                }
-            }
-        },
-        result => result,
-    }
-}
-
 /// Pro version download implementation with enhanced features
-pub async fn download_video_pro(
+pub async fn download_video_pro<F>(
     url: &str,
     quality: Option<&str>,
     format: &str,
@@ -814,10 +796,13 @@ pub async fn download_video_pro(
     use_playlist: bool,
     download_subtitles: bool,
     output_dir: Option<&String>,
-    force_download: bool,
+    _force_download: bool,
     bitrate: Option<&String>,
-    progress_callback: Option<impl Fn(u64, u64) -> bool + Send + Sync + 'static>,
-) -> Result<(), AppError> {
+    progress_callback: Option<F>,
+) -> Result<(), AppError>
+where
+    F: Fn(u64, u64) -> bool + Send + Sync + 'static,
+{
     // In Pro version, we allow all qualities without limitation
     
     // Validate URL
@@ -869,7 +854,7 @@ pub async fn download_video_pro(
         let progress_ref = Arc::clone(&progress);
         let pb_clone = pb.clone();
         
-        Arc::new(move |downloaded, total| {
+        let wrapper: Arc<dyn Fn(u64, u64) -> bool + Send + Sync> = Arc::new(move |downloaded, total| {
             // Update our progress tracker
             progress_ref.update(downloaded, total);
             
@@ -885,7 +870,9 @@ pub async fn download_video_pro(
             
             // Call original callback
             callback(downloaded, total)
-        })
+        });
+        
+        wrapper
     });
     
     // Create download configuration
@@ -907,7 +894,7 @@ pub async fn download_video_pro(
     // Start download process with parallel downloads enabled
     println!("{}", "Starting Pro download with enhanced features...".green());
     
-    let result = match handle_http_416_error(|| downloader.download()).await {
+    let _result = match handle_http_416_error(|| downloader.download()).await {
         Ok(result) => result,
         Err(e) => {
             // Finish the progress bar with error

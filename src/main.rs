@@ -15,7 +15,6 @@ use colored::*;
 use dependency_validator::{validate_dependencies, install_or_update_dependency};
 use downloader::{download_video_free, download_video_pro};
 use error::AppError;
-use security;
 use utils::check_for_updates;
 use license::{is_pro_version, display_license_info, activate_license, LicenseStatus};
 use rand::Rng;
@@ -213,8 +212,8 @@ async fn main() -> Result<(), AppError> {
 
     // Use different download function based on license status
     if is_pro {
-        // For Pro users, use the enhanced Pro download function
-        match download_video_pro(
+        // For Pro users, use the enhanced Pro download function with explicit type parameter
+        match download_video_pro::<fn(u64, u64) -> bool>(
             url, 
             quality, 
             format, 
@@ -234,8 +233,8 @@ async fn main() -> Result<(), AppError> {
             }
         }
     } else {
-        // For Free users, use the standard function
-        match download_video_free(
+        // For Free users, use the standard function with explicit type parameter
+        match download_video_free::<fn(u64, u64) -> bool>(
             url, 
             quality, 
             format, 
