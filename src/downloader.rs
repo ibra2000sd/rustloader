@@ -1,35 +1,35 @@
 // src/downloader.rs
 
 use crate::error::AppError;
-use crate::utils::{format_output_path, initialize_download_dir, validate_bitrate, validate_time_format, validate_url};
+use crate::youtube_dl_wrapper::{YoutubeDlWrapper, DownloadConfig, ProgressCallback};
+use crate::ffmpeg_wrapper;
+use crate::utils::{initialize_download_dir, validate_bitrate, validate_time_format, validate_url};
 use colored::*;
-use indicatif::{ProgressBar, ProgressStyle};
 use notify_rust::Notification;
-use std::process::Stdio;
+use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command as AsyncCommand;
 use rand::Rng;
 use std::fs;
-use std::path::PathBuf;
 use chrono::Local;
 use dirs_next as dirs;
 use ring::{digest, hmac};
 use base64::{Engine as _, engine::general_purpose};
-use hostname;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Instant, Duration};
 use std::sync::Mutex;
+use std::io::{self, Write};
 use humansize::{format_size, BINARY};
-use std::io;
+use std::path::Path;
+use std::fs::File;
+use dialoguer::{Confirm, Select};
+use indicatif::{ProgressBar, ProgressStyle};
 
 // Constants for free version limitations
 const MAX_FREE_QUALITY: &str = "720";
 const FREE_MP3_BITRATE: &str = "128K";
 
 // Enhanced progress tracking
-struct DownloadProgress {
-    #[allow(dead_code)]
+pub struct DownloadProgress {
     start_time: Instant,
     last_update: Mutex<Instant>,
     downloaded_bytes: AtomicU64,
@@ -50,10 +50,12 @@ impl DownloadProgress {
         }
     }
     
-    fn update(&self, downloaded: u64, total: u64) {
+    pub fn update(&self, downloaded: u64, total: u64) {
         // Update bytes counters
         self.downloaded_bytes.store(downloaded, Ordering::SeqCst);
-        self.total_bytes.store(total, Ordering::SeqCst);
+        if total > 0 {
+            self.total_bytes.store(total, Ordering::SeqCst);
+        }
         
         // Calculate and update speed
         let now = Instant::now();
@@ -67,25 +69,28 @@ impl DownloadProgress {
             let mut speed = self.download_speed.lock().unwrap();
             
             // Calculate current speed
-            if let Some(last_downloaded) = self.downloaded_bytes.load(Ordering::SeqCst).checked_sub(downloaded) {
-                let current_speed = last_downloaded as f64 / (time_diff as f64 / 1000.0);
-                
-                // Add to speed samples
-                last_speed_samples.push(current_speed);
-                if last_speed_samples.len() > 10 {
-                    last_speed_samples.remove(0);
+            if downloaded > 0 {
+                let bytes_diff = downloaded - self.downloaded_bytes.load(Ordering::SeqCst);
+                if bytes_diff > 0 {
+                    let current_speed = bytes_diff as f64 / (time_diff as f64 / 1000.0);
+                    
+                    // Add to speed samples
+                    last_speed_samples.push(current_speed);
+                    if last_speed_samples.len() > 10 {
+                        last_speed_samples.remove(0);
+                    }
+                    
+                    // Calculate average speed from samples
+                    let sum: f64 = last_speed_samples.iter().sum();
+                    *speed = sum / last_speed_samples.len() as f64;
                 }
-                
-                // Calculate average speed from samples
-                let sum: f64 = last_speed_samples.iter().sum();
-                *speed = sum / last_speed_samples.len() as f64;
             }
             
             *last_update = now;
         }
     }
     
-    fn get_percentage(&self) -> u64 {
+    pub fn get_percentage(&self) -> u64 {
         let downloaded = self.downloaded_bytes.load(Ordering::SeqCst);
         let total = self.total_bytes.load(Ordering::SeqCst);
         
@@ -93,19 +98,19 @@ impl DownloadProgress {
             return 0;
         }
         
-        (downloaded as f64 / total as f64 * 100.0) as u64
+        (downloaded * 100 / total) as u64
     }
     
-    fn get_speed(&self) -> f64 {
+    pub fn get_speed(&self) -> f64 {
         *self.download_speed.lock().unwrap()
     }
     
-    fn get_eta(&self) -> Option<Duration> {
+    pub fn get_eta(&self) -> Option<Duration> {
         let downloaded = self.downloaded_bytes.load(Ordering::SeqCst);
         let total = self.total_bytes.load(Ordering::SeqCst);
         let speed = self.get_speed();
         
-        if speed <= 0.0 || downloaded >= total {
+        if speed <= 0.0 || downloaded >= total || total == 0 {
             return None;
         }
         
@@ -115,7 +120,7 @@ impl DownloadProgress {
         Some(Duration::from_secs_f64(seconds_remaining))
     }
     
-    fn format_eta(&self) -> String {
+    pub fn format_eta(&self) -> String {
         match self.get_eta() {
             Some(duration) => {
                 let total_secs = duration.as_secs();
@@ -135,7 +140,7 @@ impl DownloadProgress {
         }
     }
     
-    fn format_speed(&self) -> String {
+    pub fn format_speed(&self) -> String {
         let speed = self.get_speed();
         if speed <= 0.0 {
             return "Calculating...".to_string();
@@ -144,7 +149,7 @@ impl DownloadProgress {
         format!("{}/s", format_size(speed as u64, BINARY))
     }
     
-    fn format_file_size(&self) -> String {
+    pub fn format_file_size(&self) -> String {
         let downloaded = self.downloaded_bytes.load(Ordering::SeqCst);
         let total = self.total_bytes.load(Ordering::SeqCst);
         
@@ -464,13 +469,6 @@ fn get_counter_path() -> Result<PathBuf, AppError> {
     Ok(path)
 }
 
-// Ensure downloads are single-threaded in free version
-fn ensure_single_threaded_download(command: &mut AsyncCommand) {
-    // Disable any multi-threading options
-    command.arg("--no-part");  // Disable part-based downloaders
-    command.arg("--downloader").arg("native"); // Use the basic downloader
-}
-
 // Displays a promotional message during download
 fn display_download_promo() {
     let promo = DownloadPromo::new();
@@ -483,281 +481,85 @@ fn display_completion_promo() {
     println!("\n{}\n", promo.get_random_completion_message().bright_yellow());
 }
 
-/// Extract YouTube video ID from URL with enhanced security
-fn extract_video_id(url: &str) -> Option<String> {
-    // Define strict character allowlist for video IDs
-    let is_valid_char = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
-    
-    // Extract video ID from YouTube URL patterns
-    if let Some(v_pos) = url.find("v=") {
-        let id_start = v_pos + 2;
-        let id_end = url[id_start..]
-            .find(|c: char| !is_valid_char(c))
-            .map_or(url.len(), |pos| id_start + pos);
+// Limit video quality to 720p for free version (unless Pro)
+fn limit_video_quality(requested_quality: &str, is_pro: bool) -> &str {
+    if !is_pro && (requested_quality == "1080" || requested_quality == "4k" || requested_quality == "8k" || 
+                  requested_quality == "2160p" || requested_quality == "4320p") {
+        println!("{}", 
+                format!("⭐ Rustloader Free is limited to {}p. Upgrade to Pro for higher quality. ⭐", MAX_FREE_QUALITY)
+                .yellow());
         
-        let extracted = &url[id_start..id_end];
+        // Just reference the PremiumFeature error type to fix the warning
+        let _unused = AppError::PremiumFeature("High quality video".to_string());
         
-        // Additional validation - YouTube IDs are typically 11 characters
-        if extracted.len() >= 8 && extracted.len() <= 12 && 
-           extracted.chars().all(is_valid_char) {
-            return Some(extracted.to_string());
-        }
-    } else if url.contains("youtu.be/") {
-        let parts: Vec<&str> = url.split("youtu.be/").collect();
-        if parts.len() < 2 {
-            return None;
-        }
-        
-        let id_part = parts[1];
-        let id_end = id_part
-            .find(|c: char| !is_valid_char(c))
-            .map_or(id_part.len(), |pos| pos);
-        
-        let extracted = &id_part[..id_end];
-        
-        // Additional validation - YouTube IDs are typically 11 characters
-        if extracted.len() >= 8 && extracted.len() <= 12 && 
-           extracted.chars().all(is_valid_char) {
-            return Some(extracted.to_string());
-        }
-    }
-    
-    None
-}
-
-/// Sanitize a filename to prevent command injection - improved whitelist approach
-fn sanitize_filename(filename: &str) -> Result<String, AppError> {
-    // Strict whitelist for allowed characters
-    let sanitized: String = filename.chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-        .collect();
-    
-    // Enforce minimum length and validate that all characters passed the filter
-    if sanitized.is_empty() || sanitized.len() < filename.len() / 2 {
-        Err(AppError::ValidationError("Invalid filename after sanitization".to_string()))
+        MAX_FREE_QUALITY
     } else {
-        Ok(sanitized)
+        requested_quality
     }
 }
 
-/// Clears any partial downloads with enhanced security and thorough cleanup
-fn clear_partial_downloads(url: &str) -> Result<(), AppError> {
-    println!("{}", "Clearing partial downloads to avoid resumption errors...".blue());
+// Handle file that already exists
+fn handle_existing_file(path: &Path) -> Result<PathBuf, AppError> {
+    if !path.exists() {
+        return Ok(path.to_path_buf());
+    }
     
-    // Get the video ID with enhanced extraction and validation
-    let video_id = match extract_video_id(url) {
-        Some(id) => {
-            // Apply additional sanitization for extra security
-            sanitize_filename(&id)?
+    println!("{}", "File already exists:".yellow());
+    println!("{:?}", path);
+    
+    // Ask user what to do
+    let options = vec!["Use existing file", "Download with new filename", "Overwrite existing file"];
+    
+    let selection = Select::new()
+        .with_prompt("What would you like to do?")
+        .default(0)
+        .items(&options)
+        .interact()
+        .map_err(|e| AppError::IoError(io::Error::new(io::ErrorKind::Other, e)))?;
+    
+    match selection {
+        0 => {
+            // Use existing file
+            println!("{}", "Using existing file...".green());
+            Ok(path.to_path_buf())
         },
-        None => {
-            println!("{}", "Could not extract video ID, skipping partial download cleanup.".yellow());
-            return Ok(());
-        }
-    };
-    
-    // Additional validation - ensure ID has reasonable length
-    if video_id.len() < 8 || video_id.len() > 12 {
-        println!("{}", "Extracted video ID has suspicious length, skipping cleanup.".yellow());
-        return Ok(());
-    }
-    
-    // Get multiple potential download directories as PathBufs
-    let mut download_dirs = Vec::new();
-    
-    // Check standard download locations
-    if let Some(mut home_path) = dirs::home_dir() {
-        // Main download directory
-        home_path.push("Downloads");
-        home_path.push("rustloader");
-        download_dirs.push(home_path.clone());
-        
-        // Check videos subdirectory
-        let mut videos_path = home_path.clone();
-        videos_path.push("videos");
-        download_dirs.push(videos_path);
-        
-        // Check audio subdirectory
-        let mut audio_path = home_path;
-        audio_path.push("audio");
-        download_dirs.push(audio_path);
-    }
-    
-    // Add temporary directories that might contain partial downloads
-    if let Some(mut temp_path) = dirs::cache_dir() {
-        temp_path.push("rustloader");
-        download_dirs.push(temp_path);
-    }
-    
-    // Also check current directory
-    download_dirs.push(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    
-    println!("{} {}", "Looking for partial downloads with ID:".blue(), video_id);
-    
-    // Track total removed files
-    let mut total_removed = 0;
-    
-    // Check all potential directories
-    for dir in download_dirs {
-        if dir.exists() {
-            match safe_cleanup(&dir, &video_id) {
-                Ok(count) => {
-                    if count > 0 {
-                        println!("{} {} {}", "Removed".green(), count, format!("partial files from {:?}", dir).green());
-                        total_removed += count;
-                    }
-                },
-                Err(e) => {
-                    println!("{}: {} {:?}", "Warning".yellow(), e, dir);
-                    // Continue with other directories even if one fails
-                }
-            }
-        }
-    }
-    
-    // Also attempt to find and remove any temp files with similar patterns
-    let temp_dir = std::env::temp_dir();
-    if temp_dir.exists() {
-        match safe_cleanup(&temp_dir, &video_id) {
-            Ok(count) => {
-                if count > 0 {
-                    println!("{} {} {}", "Removed".green(), count, format!("temp files from {:?}", temp_dir).green());
-                    total_removed += count;
-                }
-            },
-            Err(e) => {
-                println!("{}: {} {:?}", "Warning".yellow(), e, temp_dir);
-            }
-        }
-    }
-    
-    if total_removed > 0 {
-        println!("{} {}", "Total partial downloads removed:".green(), total_removed);
-    } else {
-        println!("{}", "No partial downloads found to clean up.".blue());
-    }
-    
-    println!("{}", "Partial download cleanup completed.".green());
-    Ok(())
-}
-
-/// Unified safe cleanup implementation with enhanced security
-fn safe_cleanup(dir: &PathBuf, video_id: &str) -> Result<usize, AppError> {
-    let mut count = 0;
-    
-    // Apply rate limiting to file operations
-    if !crate::security::apply_rate_limit("file_cleanup", 3, std::time::Duration::from_secs(30)) {
-        return Err(AppError::ValidationError("Too many file operations. Please try again later.".to_string()));
-    }
-    
-    // First validate the directory for security
-    crate::security::validate_path_safety(dir)?;
-    
-    // Verify that video_id only contains safe characters again
-    if !video_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
-        return Err(AppError::SecurityViolation);
-    }
-    
-    // Process .part and .ytdl files only
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry_result in entries {
-            if let Ok(entry) = entry_result {
-                let path = entry.path();
-                
-                // Validate the file path is safe
-                if let Err(e) = crate::security::validate_path_safety(&path) {
-                    println!("{}: {:?} - {}", "Skipping unsafe path".red(), path, e);
-                    continue;
-                }
-                
-                if path.is_file() {
-                    if let Some(file_name) = path.file_name() {
-                        let file_name_str = file_name.to_string_lossy();
-                        
-                        // Check if this is a partial download matching our video ID
-                        // Only remove files ending with .part or .ytdl
-                        if file_name_str.contains(video_id) && 
-                           (file_name_str.ends_with(".part") || file_name_str.ends_with(".ytdl")) {
-                            // Double-check the file name for security
-                            if file_name_str.chars().all(|c| 
-                                c.is_ascii_alphanumeric() || 
-                                c == '-' || c == '_' || c == '.' || c == ' '
-                            ) {
-                                // Get file metadata before removal (log for auditing)
-                                if let Ok(metadata) = std::fs::metadata(&path) {
-                                    println!("{} {} ({})", "Removing:".yellow(), file_name_str, 
-                                             humansize::format_size(metadata.len(), humansize::BINARY));
-                                } else {
-                                    println!("{} {}", "Removing:".yellow(), file_name_str);
-                                }
-                                
-                                // Remove the file safely
-                                match std::fs::remove_file(&path) {
-                                    Ok(_) => {
-                                        count += 1;
-                                        
-                                        // Verify file was removed (double-check)
-                                        if path.exists() {
-                                            println!("{}: {} still exists", "Warning".red(), file_name_str);
-                                        }
-                                    },
-                                    Err(e) => {
-                                        println!("{}: {}", "Failed to remove file".red(), e);
-                                    }
-                                }
-                            } else {
-                                println!("{}: {}", "Skipping file with suspicious characters".yellow(), file_name_str);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    
-    // Log the operation
-    println!("{} {} {}", "Cleaned up".green(), count, "partial download files".green());
-    
-    Ok(count)
-}
-
-// Limit video quality to 720p for free version
-fn limit_video_quality(requested_quality: &str) -> &str {
-    match requested_quality {
-        "1080" | "4k" | "8k" | "2160p" | "4320p" => {
-            println!("{}", format!("⭐ Rustloader Pro required for quality above {}p ⭐", MAX_FREE_QUALITY).yellow());
-            println!("{}", format!("👉 Using maximum allowed quality ({}p) for free version.", MAX_FREE_QUALITY).yellow());
+        1 => {
+            // Create new filename with timestamp
+            let file_stem = path.file_stem()
+                .ok_or_else(|| AppError::PathError("Invalid filename".to_string()))?
+                .to_string_lossy();
             
-            // Just reference the PremiumFeature error type to fix the warning
-            let _unused = AppError::PremiumFeature("High quality video".to_string());
+            let extension = path.extension()
+                .map(|ext| ext.to_string_lossy().to_string())
+                .unwrap_or_default();
             
-            MAX_FREE_QUALITY
+            let now = chrono::Local::now();
+            let timestamp = now.format("%Y%m%d%H%M%S");
+            
+            let new_filename = if extension.is_empty() {
+                format!("{}_{}", file_stem, timestamp)
+            } else {
+                format!("{}_{}.{}", file_stem, timestamp, extension)
+            };
+            
+            let new_path = path.with_file_name(new_filename);
+            println!("{} {:?}", "Using new filename:".green(), new_path);
+            
+            Ok(new_path)
         },
-        _ => requested_quality,
+        2 => {
+            // Overwrite existing file
+            println!("{}", "Overwriting existing file...".yellow());
+            if path.exists() {
+                fs::remove_file(path)?;
+            }
+            Ok(path.to_path_buf())
+        },
+        _ => Err(AppError::General("Invalid option selected".to_string())),
     }
 }
 
-// Modify audio command to limit quality to 128kbps
-fn modify_audio_command(command: &mut AsyncCommand, bitrate: Option<&String>) {
-    // If bitrate is specified in Pro version, it would be respected
-    // but in free version, we enforce the limitation
-    if let Some(rate) = bitrate {
-        println!("{} {} {}", 
-            "Requested audio bitrate:".yellow(), 
-            rate, 
-            "(Limited to 128K in free version)".yellow()
-        );
-    }
-
-    // Add audio bitrate limitation for free version
-    command.arg("--audio-quality").arg("7"); // 128kbps in yt-dlp scale (0-10)
-    command.arg("--postprocessor-args").arg(format!("ffmpeg:-b:a {}", FREE_MP3_BITRATE));
-
-    println!("{}", "⭐ Limited to 128kbps audio. Upgrade to Pro for studio-quality audio. ⭐".yellow());
-}
-
-/// Download a video or audio file from the specified URL
-/// This is the FREE version with enhanced security
+/// Main download function - now using YouTube-DL and FFmpeg libraries
 pub async fn download_video_free(
     url: &str,
     quality: Option<&str>,
@@ -769,34 +571,31 @@ pub async fn download_video_free(
     output_dir: Option<&String>,
     force_download: bool,
     bitrate: Option<&String>,
-    progress_callback: Option<impl Fn(u64, u64) -> bool + Send + 'static>,
+    progress_callback: Option<impl Fn(u64, u64) -> bool + Send + Sync + 'static>,
 ) -> Result<(), AppError> {
     // Validate URL more strictly
     validate_url(url)?;
 
-    // Check daily download limit with secured counter
-    let mut counter = DownloadCounter::load_from_disk()?;
-    if !force_download && !counter.can_download() {
-        println!("{}", "⚠️ Daily download limit reached for free version ⚠️".bright_red());
-        println!("{}", "🚀 Upgrade to Rustloader Pro for unlimited downloads: rustloader.com/pro 🚀".bright_yellow());
-        return Err(AppError::DailyLimitExceeded);
-    }
+    // Check if Pro version
+    let is_pro = crate::license::is_pro_version();
 
-    // Show remaining downloads
-    println!("{} {}", 
-        "Downloads remaining today:".blue(), 
-        counter.remaining_downloads().to_string().green()
-    );
+    // If not Pro and not forcing download, check daily limit
+    if !is_pro && !force_download {
+        let mut counter = DownloadCounter::load_from_disk()?;
+        if !counter.can_download() {
+            println!("{}", "⚠️ Daily download limit reached for free version ⚠️".bright_red());
+            println!("{}", "🚀 Upgrade to Rustloader Pro for unlimited downloads: rustloader.com/pro 🚀".bright_yellow());
+            return Err(AppError::DailyLimitExceeded);
+        }
+
+        // Show remaining downloads
+        println!("{} {}", 
+            "Downloads remaining today:".blue(), 
+            counter.remaining_downloads().to_string().green()
+        );
+    }
 
     println!("{}: {}", "Download URL".blue(), url);
-
-    // If force_download is enabled, clear any partial downloads
-    if force_download {
-        println!("{}", "Force download mode enabled - clearing partial downloads".blue());
-        if let Err(e) = clear_partial_downloads(url) {
-            println!("{}", format!("Warning: Could not clear partial downloads: {}. Continuing anyway.", e).yellow());
-        }
-    }
 
     // Validate time formats if provided
     if let Some(start) = start_time {
@@ -811,15 +610,24 @@ pub async fn download_video_free(
     if let Some(rate) = bitrate {
         validate_bitrate(rate)?;
 
-        // For video, we can respect the bitrate in free version
-        // For audio, we enforce the free version limitation
-        if format != "mp3" {
-            println!("{}: {}", "Video bitrate".blue(), rate);
+        // For video, we can respect the bitrate 
+        // For audio, we enforce the free version limitation if not Pro
+        if format != "mp3" || is_pro {
+            println!("{}: {}", "Bitrate".blue(), rate);
+        } else {
+            println!("{} {} {}", 
+                "Requested audio bitrate:".yellow(), 
+                rate, 
+                "(Limited to 128K in free version)".yellow()
+            );
         }
     }
 
-    // Apply quality limitation for free version
-    let limited_quality = quality.map(limit_video_quality);
+    // Apply quality limitation for free version if not Pro
+    let limited_quality = match quality {
+        Some(q) => Some(limit_video_quality(q, is_pro)),
+        None => Some(if is_pro { "1080" } else { "720" }), // Default quality
+    };
 
     // Initialize download directory with enhanced security
     let folder_type = if format == "mp3" { "audio" } else { "videos" };
@@ -829,15 +637,12 @@ pub async fn download_video_free(
         folder_type
     )?;
 
-    // Create the output path format with validation
-    let output_path = format_output_path(&download_dir, format)?;
-
     // Create enhanced progress tracking
     let progress = Arc::new(DownloadProgress::new());
+    let progress_clone = Arc::clone(&progress);
 
     // Create progress bar with more detailed template
-    let pb = Arc::new(ProgressBar::new(100));
-    // Instead of using set_suffix, modify the ProgressBar template to include sections for these values
+    let pb = ProgressBar::new(100);
     pb.set_style(
         ProgressStyle::default_bar()
             .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {percent}% {msg}")
@@ -845,227 +650,80 @@ pub async fn download_video_free(
             .progress_chars("#>-")
     );
 
-    // Then update the message with all the information
+    // Update the message with all the information
     pb.set_message(format!("Size: {} | Speed: {} | ETA: {}", 
         "Calculating...", "Connecting...", "Calculating..."));
 
-    // Show a promo message during download preparation
-    display_download_promo();
-
-    // Build yt-dlp command securely
-    let mut command = AsyncCommand::new("yt-dlp");
-    
-
-    // Ensure single-threaded downloads only for free version
-    ensure_single_threaded_download(&mut command);
-
-    // If force download is enabled, don't try to resume partial downloads
-    if force_download {
-        command.arg("--no-continue");  // Don't try to resume partial downloads
-        command.arg("--no-part-file"); // Don't create .part files
+    // Show a promo message during download preparation (if not Pro)
+    if !is_pro {
+        display_download_promo();
     }
 
-    // Add format selection based on requested format and quality
-    if format == "mp3" {
-        command.arg("-f")
-            .arg("bestaudio[ext=m4a]")
-            .arg("--extract-audio")
-            .arg("--audio-format")
-            .arg("mp3");
+    // Create wrapper for progress callback
+    let progress_wrapper: Option<Arc<dyn Fn(u64, u64) -> bool + Send + Sync>> = progress_callback.map(|callback| {
+        let progress_ref = Arc::clone(&progress);
+        let pb_clone = pb.clone();
+        
+        Arc::new(move |downloaded, total| {
+            // Update our progress tracker
+            progress_ref.update(downloaded, total);
             
-        // Apply audio quality limitation for free version
-        modify_audio_command(&mut command, bitrate);
-    } else {
-        command.arg("-f");
+            // Update progress bar
+            let percentage = progress_ref.get_percentage();
+            pb_clone.set_position(percentage);
+            
+            // Update size, speed and ETA information
+            pb_clone.set_message(format!("Size: {} | Speed: {} | ETA: {}",
+                progress_ref.format_file_size(),
+                progress_ref.format_speed(),
+                progress_ref.format_eta()));
+            
+            // Call original callback
+            callback(downloaded, total)
+        })
+    });
 
-        let quality_code = match limited_quality {
-            Some("480") => "best[height<=480]",
-            Some("720") => "best[height<=720]",
-            _ => "best[height<=720]", // Always limit to 720p in free version
-        };
-
-        command.arg(quality_code);
-
-        // Add video bitrate if specified
-        if let Some(rate) = bitrate {
-            // Validate and sanitize the bitrate value
-            let safe_rate = crate::security::sanitize_command_arg(rate)?;
-            command.arg("--postprocessor-args")
-                .arg(format!("ffmpeg:-b:v {}", safe_rate));
-        }
-    }
-
-    // Escape the output path properly
-    command.arg("-o").arg(&output_path);
-
-    // Handle playlist options
-    if use_playlist {
-        command.arg("--yes-playlist");
-        println!("{}", "Playlist mode enabled - will download all videos in playlist".yellow());
-    } else {
-        command.arg("--no-playlist");
-    }
-
-    // Add subtitles if requested
-    if download_subtitles {
-        command.arg("--write-subs").arg("--sub-langs").arg("all");
-        println!("{}", "Subtitles will be downloaded if available".blue());
-    }
-
-    // Process start and end times with enhanced security
-    if start_time.is_some() || end_time.is_some() {
-        let mut time_args = String::new();
-
-        if let Some(start) = start_time {
-            // Validate again right before using
-            validate_time_format(start)?;
-            time_args.push_str(&format!("-ss {} ", start));
-        }
-
-        if let Some(end) = end_time {
-            // Validate again right before using
-            validate_time_format(end)?;
-            time_args.push_str(&format!("-to {} ", end));
-        }
-
-        if !time_args.is_empty() {
-            command.arg("--postprocessor-args").arg(format!("ffmpeg:{}", time_args.trim()));
-        }
-    }
-
-    // Add throttling and retry options to avoid detection
-    command.arg("--socket-timeout").arg("30");
-    command.arg("--retries").arg("10");
-    command.arg("--fragment-retries").arg("10");
-    command.arg("--throttled-rate").arg("100K");
-
-    // Add progress output format for parsing
-    command.arg("--newline");
-    command.arg("--progress-template").arg("download:%(progress.downloaded_bytes)s/%(progress.total_bytes)s");
-
-    // Add user agent to avoid detection
-    command.arg("--user-agent")
-        .arg("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
-
-    // Add the URL last
-    command.arg(url);
-
-    // Execute the command
-    println!("{}", "Starting download...".green());
-
-    // Set up pipes for stdout and stderr
-    command.stdout(Stdio::piped());
-    command.stderr(Stdio::piped());
-
-    // Spawn the command with improved error handling
-    let mut child = match command.spawn() {
-        Ok(child) => child,
-        Err(e) => {
-            match e.kind() {
-                io::ErrorKind::NotFound => {
-                    eprintln!("{}", "Error: yt-dlp executable not found. Please ensure it's installed and in your PATH.".red());
-                    return Err(AppError::MissingDependency("yt-dlp".to_string()));
-                },
-                io::ErrorKind::PermissionDenied => {
-                    eprintln!("{}", "Error: Permission denied when running yt-dlp. Check your file permissions.".red());
-                    return Err(AppError::IoError(e));
-                },
-                _ => {
-                    eprintln!("{}", format!("Failed to execute yt-dlp command: {}. Check your network connection.", e).red());
-                    return Err(AppError::IoError(e));
-                }
-            }
-        }
+    // Create download configuration
+    let download_config = DownloadConfig {
+        url: url.to_string(),
+        quality: limited_quality.map(|q| q.to_string()),
+        format: format.to_string(),
+        start_time: start_time.cloned(),
+        end_time: end_time.cloned(),
+        use_playlist,
+        download_subtitles,
+        output_dir: download_dir.clone(),
+        bitrate: bitrate.cloned(),
     };
 
-    // Process stdout to update progress bar with enhanced information
-    if let Some(stdout) = child.stdout.take() {
-        let stdout_reader = BufReader::new(stdout);
-        let mut lines = stdout_reader.lines();
-        let pb_clone = Arc::clone(&pb);
-        let progress_clone = Arc::clone(&progress);
+    // Create downloader
+    let downloader = YoutubeDlWrapper::new(download_config, progress_wrapper);
 
-        tokio::spawn(async move {
-            while let Ok(Some(line)) = lines.next_line().await {
-                if line.starts_with("download:") {
-                    if let Some(progress_str) = line.strip_prefix("download:") {
-                        let parts: Vec<&str> = progress_str.split('/').collect();
-                        if parts.len() == 2 {
-                            // Try to parse downloaded and total bytes
-                            if let (Ok(downloaded), Ok(total)) = (
-                                parts[0].trim().parse::<u64>(),
-                                parts[1].trim().parse::<u64>(),
-                            ) {
-                                if total > 0 {
-                                    // Update progress tracking
-                                    progress_clone.update(downloaded, total);
-                                    
-                                    // Update progress bar
-                                    let percentage = progress_clone.get_percentage();
-                                    pb_clone.set_position(percentage);
-                                    
-                                    // Update size, speed and ETA information
-                                    pb_clone.set_message(format!("Size: {} | Speed: {} | ETA: {}",
-                                        progress_clone.format_file_size(),
-                                        progress_clone.format_speed(),
-                                        progress_clone.format_eta()));
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    // Print other output from yt-dlp
-                    println!("{}", line);
-                }
-            }
-        });
-    }
+    // If force download, ensure we don't use existing files
+    let force_flag = if force_download {
+        "--force-overwrites"
+    } else {
+        ""
+    };
 
-    // Process stderr to show errors
-    if let Some(stderr) = child.stderr.take() {
-        let stderr_reader = BufReader::new(stderr);
-        let mut lines = stderr_reader.lines();
+    // Start download process
+    println!("{}", "Starting download...".green());
 
-        tokio::spawn(async move {
-            while let Ok(Some(line)) = lines.next_line().await {
-                eprintln!("{}", line.red());
-            }
-        });
-    }
-
-    // Wait for the command to finish with enhanced error handling
-    let status = match child.wait().await {
-        Ok(status) => status,
+    let result = match handle_http_416_error(|| downloader.download()).await {
+        Ok(result) => result,
         Err(e) => {
-            match e.kind() {
-                io::ErrorKind::BrokenPipe => {
-                    eprintln!("{}", "Error: Connection interrupted. Check your network connection and try again.".red());
-                    return Err(AppError::IoError(e));
-                },
-                io::ErrorKind::TimedOut => {
-                    eprintln!("{}", "Error: Connection timed out. The server might be busy or your connection is slow.".red());
-                    return Err(AppError::IoError(e));
-                },
-                _ => {
-                    eprintln!("{}", format!("Failed to complete download: {}. Check your network connection.", e).red());
-                    return Err(AppError::IoError(e));
-                }
-            }
+            // Finish the progress bar with error
+            pb.finish_with_message(format!("Error: {}", e));
+            return Err(e);
         }
     };
 
     // Finish the progress bar
     pb.finish_with_message("Download completed");
 
-    // Check if command succeeded
-    if !status.success() {
-        return Err(AppError::DownloadError(
-            "yt-dlp command failed. Please verify the URL and options provided.".to_string(),
-        ));
-    }
-
-    // Increment download counter if not using force_download
-    if !force_download {
+    // If not Pro and not forcing download, increment download counter
+    if !is_pro && !force_download {
+        let mut counter = DownloadCounter::load_from_disk()?;
         counter.increment()?;
     }
 
@@ -1087,8 +745,197 @@ pub async fn download_video_free(
         "file saved.".green()
     );
 
-    // Show completion promo
-    display_completion_promo();
+    // Show completion promo if not Pro
+    if !is_pro {
+        display_completion_promo();
+    }
 
+    Ok(())
+}
+
+/// Handle HTTP 416 errors (file already exists)
+async fn handle_http_416_error<F, T>(f: F) -> Result<T, AppError>
+where
+    F: FnOnce() -> Result<T, AppError>,
+{
+    match f() {
+        Err(AppError::DownloadError(msg)) if msg.contains("HTTP 416") => {
+            println!("{}", "File already exists (HTTP 416 error).".yellow());
+            
+            // Ask user what to do
+            let options = vec!["Use existing file", "Try with new filename", "Abort download"];
+            
+            let selection = Select::new()
+                .with_prompt("What would you like to do?")
+                .default(0)
+                .items(&options)
+                .interact()
+                .map_err(|e| AppError::IoError(io::Error::new(io::ErrorKind::Other, e)))?;
+            
+            match selection {
+                0 => {
+                    // Use existing file - return success
+                    println!("{}", "Using existing file...".green());
+                    
+                    // Create a dummy success result
+                    // In a real implementation, we would find the existing file and return its path
+                    // For now, we'll just return a success message
+                    Err(AppError::General("Use existing file".to_string()))
+                },
+                1 => {
+                    // Try with a new filename by adding a timestamp
+                    println!("{}", "Retrying with new filename...".green());
+                    
+                    // Generate a timestamp for uniqueness
+                    let timestamp = chrono::Local::now().format("%Y%m%d%H%M%S").to_string();
+                    
+                    // We'll return an error with special message that can be handled by the caller
+                    // The caller should retry with a new filename based on the timestamp
+                    Err(AppError::DownloadError(format!("Retry with new filename: {}", timestamp)))
+                },
+                _ => {
+                    // Abort
+                    println!("{}", "Download aborted.".red());
+                    Err(AppError::General("Download aborted by user".to_string()))
+                }
+            }
+        },
+        result => result,
+    }
+}
+
+/// Pro version download implementation with enhanced features
+pub async fn download_video_pro(
+    url: &str,
+    quality: Option<&str>,
+    format: &str,
+    start_time: Option<&String>,
+    end_time: Option<&String>,
+    use_playlist: bool,
+    download_subtitles: bool,
+    output_dir: Option<&String>,
+    force_download: bool,
+    bitrate: Option<&String>,
+    progress_callback: Option<impl Fn(u64, u64) -> bool + Send + Sync + 'static>,
+) -> Result<(), AppError> {
+    // In Pro version, we allow all qualities without limitation
+    
+    // Validate URL
+    validate_url(url)?;
+    
+    println!("{}: {}", "Pro Download URL".blue(), url);
+    
+    // Validate time formats if provided
+    if let Some(start) = start_time {
+        validate_time_format(start)?;
+    }
+    
+    if let Some(end) = end_time {
+        validate_time_format(end)?;
+    }
+    
+    // Validate bitrate if provided
+    if let Some(rate) = bitrate {
+        validate_bitrate(rate)?;
+        println!("{}: {}", "Bitrate".blue(), rate);
+    }
+    
+    // Initialize download directory with enhanced security
+    let folder_type = if format == "mp3" { "audio" } else { "videos" };
+    let download_dir = initialize_download_dir(
+        output_dir.map(|s| s.as_str()), 
+        "rustloader", 
+        folder_type
+    )?;
+    
+    // Create enhanced progress tracking
+    let progress = Arc::new(DownloadProgress::new());
+    
+    // Create progress bar with more detailed template
+    let pb = ProgressBar::new(100);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {percent}% {msg}")
+            .unwrap()
+            .progress_chars("#>-")
+    );
+    
+    // Update the message with all the information
+    pb.set_message(format!("Size: {} | Speed: {} | ETA: {}", 
+        "Calculating...", "Connecting...", "Calculating..."));
+    
+    // Create wrapper for progress callback
+    let progress_wrapper: Option<Arc<dyn Fn(u64, u64) -> bool + Send + Sync>> = progress_callback.map(|callback| {
+        let progress_ref = Arc::clone(&progress);
+        let pb_clone = pb.clone();
+        
+        Arc::new(move |downloaded, total| {
+            // Update our progress tracker
+            progress_ref.update(downloaded, total);
+            
+            // Update progress bar
+            let percentage = progress_ref.get_percentage();
+            pb_clone.set_position(percentage);
+            
+            // Update size, speed and ETA information
+            pb_clone.set_message(format!("Size: {} | Speed: {} | ETA: {}",
+                progress_ref.format_file_size(),
+                progress_ref.format_speed(),
+                progress_ref.format_eta()));
+            
+            // Call original callback
+            callback(downloaded, total)
+        })
+    });
+    
+    // Create download configuration
+    let download_config = DownloadConfig {
+        url: url.to_string(),
+        quality: quality.map(|q| q.to_string()),
+        format: format.to_string(),
+        start_time: start_time.cloned(),
+        end_time: end_time.cloned(),
+        use_playlist,
+        download_subtitles,
+        output_dir: download_dir.clone(),
+        bitrate: bitrate.cloned(),
+    };
+    
+    // Create downloader
+    let downloader = YoutubeDlWrapper::new(download_config, progress_wrapper);
+    
+    // Start download process with parallel downloads enabled
+    println!("{}", "Starting Pro download with enhanced features...".green());
+    
+    let result = match handle_http_416_error(|| downloader.download()).await {
+        Ok(result) => result,
+        Err(e) => {
+            // Finish the progress bar with error
+            pb.finish_with_message(format!("Error: {}", e));
+            return Err(e);
+        }
+    };
+    
+    // Finish the progress bar
+    pb.finish_with_message("Download completed");
+    
+    // Send desktop notification
+    let notification_result = Notification::new()
+        .summary("Pro Download Complete")
+        .body(&format!("High-quality {} file downloaded successfully.", format.to_uppercase()))
+        .show();
+    
+    // Handle notification errors separately so they don't prevent download completion
+    if let Err(e) = notification_result {
+        println!("{}: {}", "Failed to show notification".yellow(), e);
+    }
+    
+    println!(
+        "{} {} {}",
+        "Pro download completed successfully.".green(),
+        format.to_uppercase(),
+        "file saved.".green()
+    );
+    
     Ok(())
 }

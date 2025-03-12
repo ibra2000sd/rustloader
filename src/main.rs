@@ -4,23 +4,24 @@ mod cli;
 mod downloader;
 mod dependency_validator;
 mod error;
-mod security;  // Module declaration
+mod security;
 mod utils;
 mod license;
+mod youtube_dl_wrapper;
+mod ffmpeg_wrapper;
 
 use cli::build_cli;
 use colored::*;
 use dependency_validator::{validate_dependencies, install_or_update_dependency};
-use downloader::download_video_free;
+use downloader::{download_video_free, download_video_pro};
 use error::AppError;
-// Removed duplicate `use security;` import
-use utils::check_for_updates;  // Removed unnecessary braces
+use security;
+use utils::check_for_updates;
 use license::{is_pro_version, display_license_info, activate_license, LicenseStatus};
 use rand::Rng;
 
 // Logo and version information
 const VERSION: &str = "1.0.0";
-// Remove static IS_PRO flag and replace with dynamic license check
 
 // Only include the startup messages for main.rs since that's all we use here
 struct StartupPromo {
@@ -56,7 +57,7 @@ async fn main() -> Result<(), AppError> {
     // Check for updates in the background
     let update_check = tokio::spawn(check_for_updates());
     
-    // Check license status - this replaces the static IS_PRO flag
+    // Check license status
     let is_pro = is_pro_version();
     
     if is_pro {
@@ -72,6 +73,14 @@ async fn main() -> Result<(), AppError> {
         // Display a promotional message for the free version
         let promo = StartupPromo::new();
         println!("\n{}\n", promo.get_random_message().bright_yellow());
+    }
+    
+    // Initialize FFmpeg
+    if let Err(e) = ffmpeg_wrapper::init() {
+        eprintln!("{}: {}", "Error initializing FFmpeg".red(), e);
+        eprintln!("{}", "Please ensure FFmpeg is installed and in your PATH.".yellow());
+        eprintln!("{}", "You can download it from: https://ffmpeg.org/download.html".yellow());
+        return Err(e);
     }
     
     // Perform enhanced dependency validation
@@ -106,33 +115,6 @@ async fn main() -> Result<(), AppError> {
                 } else {
                     println!("{}", "yt-dlp is required. Please install it manually and try again.".red());
                     return Err(AppError::MissingDependency("yt-dlp installation declined".to_string()));
-                }
-            }
-            
-            // Check ffmpeg status
-            if let Some(info) = deps.get("ffmpeg") {
-                if !info.is_min_version || info.is_vulnerable {
-                    has_issues = true;
-                    println!("{}", "ffmpeg needs to be updated.".yellow());
-                    println!("Would you like to attempt to update ffmpeg now? (y/n):");
-                    let mut input = String::new();
-                    std::io::stdin().read_line(&mut input)?;
-                    if input.trim().eq_ignore_ascii_case("y") {
-                        install_or_update_dependency("ffmpeg")?;
-                    } else {
-                        println!("{}", "Continuing with the current version. Some features may not work correctly.".yellow());
-                    }
-                }
-            } else {
-                has_issues = true;
-                println!("{}", "ffmpeg is not installed. Would you like to install it now? (y/n):".yellow());
-                let mut input = String::new();
-                std::io::stdin().read_line(&mut input)?;
-                if input.trim().eq_ignore_ascii_case("y") {
-                    install_or_update_dependency("ffmpeg")?;
-                } else {
-                    println!("{}", "Please install ffmpeg manually and try again.".red());
-                    return Err(AppError::MissingDependency("ffmpeg installation declined".to_string()));
                 }
             }
             
@@ -229,33 +211,58 @@ async fn main() -> Result<(), AppError> {
         }
     }
 
-    // Perform video download using the free version function
-    match download_video_free(
-        url, 
-        quality, 
-        format, 
-        start_time, 
-        end_time, 
-        use_playlist,
-        download_subtitles,
-        output_dir,
-        force_download,  // Pass the force_download parameter
-        bitrate,         // Pass the bitrate parameter
-    ).await {
-        Ok(_) => println!("{}", "Process completed successfully.".green()),
-        Err(AppError::DailyLimitExceeded) => {
-            eprintln!("{}", "Daily download limit exceeded for free version.".red().bold());
-            println!("{}", "🚀 Upgrade to Rustloader Pro for unlimited downloads: rustloader.com/pro 🚀".bright_yellow());
-            return Err(AppError::DailyLimitExceeded);
-        },
-        Err(AppError::PremiumFeature(feature)) => {
-            eprintln!("{}: {}", "Premium feature required".red().bold(), feature);
-            println!("{}", "🚀 Upgrade to Rustloader Pro to access this feature: rustloader.com/pro 🚀".bright_yellow());
-            return Err(AppError::PremiumFeature(feature));
-        },
-        Err(e) => {
-            eprintln!("{}: {}", "Error".red().bold(), e);
-            return Err(e);
+    // Use different download function based on license status
+    if is_pro {
+        // For Pro users, use the enhanced Pro download function
+        match download_video_pro(
+            url, 
+            quality, 
+            format, 
+            start_time, 
+            end_time, 
+            use_playlist,
+            download_subtitles,
+            output_dir,
+            force_download,
+            bitrate,
+            None,  // No progress callback for now
+        ).await {
+            Ok(_) => println!("{}", "Pro download process completed successfully.".green()),
+            Err(e) => {
+                eprintln!("{}: {}", "Error".red().bold(), e);
+                return Err(e);
+            }
+        }
+    } else {
+        // For Free users, use the standard function
+        match download_video_free(
+            url, 
+            quality, 
+            format, 
+            start_time, 
+            end_time, 
+            use_playlist,
+            download_subtitles,
+            output_dir,
+            force_download,
+            bitrate,
+            None,  // No progress callback for now
+        ).await {
+            Ok(_) => println!("{}", "Process completed successfully.".green()),
+            Err(AppError::DailyLimitExceeded) => {
+                eprintln!("{}", "Daily download limit exceeded for free version.".red().bold());
+                println!("{}", "🚀 Upgrade to Rustloader Pro for unlimited downloads: rustloader.com/pro 🚀".bright_yellow());
+                return Err(AppError::DailyLimitExceeded);
+            },
+            Err(AppError::PremiumFeature(feature)) => {
+                eprintln!("{}: {}", "Premium feature required".red().bold(), feature);
+                println!("{}", "🚀 Upgrade to Rustloader Pro to access this feature: rustloader.com/pro 🚀".bright_yellow());
+                return Err(AppError::PremiumFeature(feature));
+            },
+            Err(e) => {
+                eprintln!("{}: {}", "Error".red().bold(), e);
+                return Err(e);
+            }
         }
     }
 
