@@ -620,7 +620,7 @@ where
 
     // If not Pro and not forcing download, check daily limit
     if !is_pro && !force_download {
-        let mut counter = DownloadCounter::load_from_disk()?;
+        let counter = DownloadCounter::load_from_disk()?;
         if !counter.can_download() {
             println!("{}", "⚠️ Daily download limit reached for free version ⚠️".bright_red());
             println!("{}", "🚀 Upgrade to Rustloader Pro for unlimited downloads: rustloader.com/pro 🚀".bright_yellow());
