@@ -3,9 +3,8 @@ use crate::error::AppError;
 use chrono::Local;
 use dirs_next as dirs;
 use std::fs;
-use std::io::{Read, Write};
+use ring::hmac;
 use std::path::PathBuf;
-use ring::{digest, hmac};
 use base64::{Engine as _, engine::general_purpose};
 
 // Constants for free version limitations

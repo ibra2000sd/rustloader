@@ -17,7 +17,8 @@ serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 tauri = { version = "2.3.1", features = [] }
 
-rustloader = { path = ".." }
+# Enable the tauri-ui feature when importing the core rustloader library
+rustloader = { path = "..", features = ["tauri-ui"] }
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]

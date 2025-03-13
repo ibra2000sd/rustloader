@@ -20,6 +20,25 @@ pub struct FFmpegWrapper {
     bitrate: Option<String>,
 }
 
+
+pub fn init() -> Result<(), crate::error::AppError> {
+    // Check if ffmpeg is accessible
+    match std::process::Command::new("ffmpeg")
+        .arg("-version")
+        .output() {
+            Ok(output) => {
+                if output.status.success() {
+                    let version = String::from_utf8_lossy(&output.stdout);
+                    println!("FFmpeg initialized: {}", version.lines().next().unwrap_or("Unknown version"));
+                    Ok(())
+                } else {
+                    Err(crate::error::AppError::MissingDependency("FFmpeg returned error status".to_string()))
+                }
+            },
+            Err(_) => Err(crate::error::AppError::MissingDependency("FFmpeg not found in PATH".to_string()))
+        }
+}
+
 impl FFmpegWrapper {
     /// Create a new FFmpeg wrapper
     pub fn new(

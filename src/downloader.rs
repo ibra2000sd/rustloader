@@ -1,16 +1,8 @@
 // src/downloader.rs
 
 use crate::error::AppError;
-use crate::ytdlp_wrapper::{YtDlpWrapper, DownloadConfig};
 use crate::utils::initialize_download_dir;
-use crate::counter::{check_daily_limit, increment_daily_count};
-use crate::promo::DownloadPromo;
-use colored::*;
-use notify_rust::Notification;
-use std::sync::Arc;
-use crate::error::AppError;
 use crate::ytdlp_wrapper::{YtDlpWrapper, DownloadConfig};
-use crate::utils::initialize_download_dir;
 use crate::counter::{check_daily_limit, increment_daily_count};
 use crate::promo::DownloadPromo;
 use colored::*;
@@ -112,7 +104,6 @@ where
     F: Fn(u64, u64) -> bool + Send + Sync + 'static,
 {
     // Apply free version limitations
-    // Fix type mismatch: make sure all arms return Option<String>
     let limited_quality = match quality {
         Some("1080") | Some("2160") => {
             println!("{}", "Free version limited to 720p. Upgrade to Pro for higher quality.".yellow());
@@ -151,7 +142,7 @@ where
     // Create download configuration
     let config = DownloadConfig {
         url: url.to_string(),
-        quality: limited_quality,  // Now this is Option<String>, matching DownloadConfig's field type
+        quality: limited_quality,
         format: format.to_string(),
         start_time: start_time.map(|s| s.to_string()),
         end_time: end_time.map(|s| s.to_string()),
@@ -226,10 +217,10 @@ where
         if format == "mp3" { "audio" } else { "video" },
     )?;
     
-    // Create download configuration with pro features enabled - fixed type consistency
+    // Create download configuration with pro features enabled
     let config = DownloadConfig {
         url: url.to_string(),
-        quality: quality.map(|s| s.to_string()),  // Ensure we have Option<String>
+        quality: quality.map(|s| s.to_string()),
         format: format.to_string(),
         start_time: start_time.map(|s| s.to_string()),
         end_time: end_time.map(|s| s.to_string()),

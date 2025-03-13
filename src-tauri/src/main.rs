@@ -6,6 +6,7 @@ use rustloader::ffmpeg_wrapper;
 use rustloader::error::AppError;
 use std::sync::{Arc, Mutex};
 use tauri::{command, Window, State};
+use tauri::Emitter; // Add this import for the emit method
 
 /// Shared application state for managing download status
 struct AppState {
@@ -78,7 +79,7 @@ async fn download_video(
     output_dir: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    // Initialize FFmpeg - now using native Rust library
+    // Initialize FFmpeg
     if let Err(e) = ffmpeg_wrapper::init() {
         return Err(format!("Error initializing FFmpeg libraries: {}", e));
     }
@@ -95,11 +96,11 @@ async fn download_video(
     // Create a progress emitter
     let progress_emitter = Arc::new(ProgressEmitter::new(window.clone()));
 
-    // Convert option strings to option references
+    // Convert option strings to option references to &str
     let quality_ref = quality.as_deref();
-    let start_time_ref = start_time.as_ref();
-    let end_time_ref = end_time.as_ref();
-    let output_dir_ref = output_dir.as_ref();
+    let start_time_ref = start_time.as_deref();
+    let end_time_ref = end_time.as_deref();
+    let output_dir_ref = output_dir.as_deref();
 
     // Define a progress callback closure
     let progress_callback = move |downloaded: u64, total: u64| -> bool {
@@ -120,11 +121,11 @@ async fn download_video(
             &url,
             quality_ref,
             &format,
-            start_time_ref,
-            end_time_ref,
+            start_time_ref.map(|x| x.as_str()),
+            end_time_ref.map(|x| x.as_str()),
             use_playlist,
             download_subtitles,
-            output_dir_ref,
+            output_dir_ref.map(|x| x.as_str()),
             force_download,
             bitrate,
             Some(progress_callback),
@@ -136,11 +137,11 @@ async fn download_video(
             &url,
             quality_ref,
             &format,
-            start_time_ref,
-            end_time_ref,
+            start_time_ref.map(|x| x.as_str()),
+            end_time_ref.map(|x| x.as_str()),
             use_playlist,
             download_subtitles,
-            output_dir_ref,
+            output_dir_ref.map(|x| x.as_str()),
             force_download,
             bitrate,
             Some(progress_callback),

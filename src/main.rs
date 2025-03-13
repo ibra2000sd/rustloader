@@ -8,12 +8,14 @@ mod error;
 mod security;
 mod utils;
 mod license;
-mod youtube_dl_wrapper;
+mod ytdlp_wrapper; // Changed from youtube_dl_wrapper
 mod ffmpeg_wrapper;
+mod counter;
+mod promo;
 
 use cli::build_cli;
 use colored::*;
-use dependency_validator::{validate_dependencies, install_or_update_dependency};
+use dependency_validator::validate_dependencies;
 use downloader::{download_video_free, download_video_pro};
 use error::AppError;
 use utils::check_for_updates;
@@ -174,11 +176,11 @@ async fn main() -> Result<(), AppError> {
     let url = matches.get_one::<String>("url").unwrap();
     let quality = matches.get_one::<String>("quality").map(|q| q.as_str());
     let format = matches.get_one::<String>("format").map(|f| f.as_str()).unwrap_or("mp4");
-    let start_time = matches.get_one::<String>("start-time");
-    let end_time = matches.get_one::<String>("end-time");
+    let start_time = matches.get_one::<String>("start-time").map(|s| s.as_str());
+    let end_time = matches.get_one::<String>("end-time").map(|s| s.as_str());
     let use_playlist = matches.get_flag("playlist");
     let download_subtitles = matches.get_flag("subtitles");
-    let output_dir = matches.get_one::<String>("output-dir");
+    let output_dir = matches.get_one::<String>("output-dir").map(|s| s.as_str());
     
     // Only allow force download in development mode
     let force_download = if cfg!(debug_assertions) {
@@ -192,7 +194,7 @@ async fn main() -> Result<(), AppError> {
         false
     };
     
-    let bitrate = matches.get_one::<String>("video-bitrate"); // Extract the bitrate option
+    let bitrate = matches.get_one::<String>("video-bitrate").map(|b| b.as_str()); // Extract the bitrate option
 
     // Check for update results
     if let Ok(update_result) = update_check.await {

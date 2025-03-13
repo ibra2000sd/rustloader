@@ -149,8 +149,8 @@ impl YtDlpWrapper {
         let title = Arc::new(std::sync::Mutex::new(String::from("Unknown")));
         
         // Clone for progress callback
-        let downloaded_clone = downloaded.clone();
-        let total_clone = total.clone();
+        let _downloaded_clone = downloaded.clone();
+        let _total_clone = total.clone();
         let progress_callback = self.progress_callback.clone();
         
         // Set up a timer for progress updates
@@ -204,7 +204,7 @@ impl YtDlpWrapper {
                 while let Ok(Some(line)) = lines.next_line().await {
                     // Process progress update
                     if let Some(caps) = re_progress.captures(&line) {
-                        if let (Some(percent_str), Some(size_str), Some(size_unit), Some(speed_str), Some(speed_unit)) = 
+                        if let (Some(percent_str), Some(size_str), Some(size_unit), Some(_speed_str), Some(_speed_unit)) = 
                             (caps.get(1), caps.get(2), caps.get(3), caps.get(4), caps.get(5)) {
                             
                             // Parse percentage
@@ -275,6 +275,10 @@ impl YtDlpWrapper {
         pb.set_position(100);
         pb.finish_with_message(format!("Download complete: {}", title_str));
         
+        let title_str = {
+            let t = title.lock().unwrap();
+            t.clone()
+        };
         Ok(format!("Successfully downloaded: {}", title_str))
     }
 }
