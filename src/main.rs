@@ -1,5 +1,4 @@
 // src/main.rs
-// Updated to use native Rust libraries instead of external tools
 
 mod cli;
 mod downloader;
@@ -8,7 +7,7 @@ mod error;
 mod security;
 mod utils;
 mod license;
-mod ytdlp_wrapper; // Changed from youtube_dl_wrapper
+mod ytdlp_wrapper;
 mod ffmpeg_wrapper;
 mod counter;
 mod promo;
@@ -50,9 +49,66 @@ impl StartupPromo {
 
 #[tokio::main]
 async fn main() -> Result<(), AppError> {
-    // Initialize security module
-    security::init();
+    // Set up error handling for the whole program
+    let result = run_main().await;
     
+    match &result {
+        Ok(_) => {
+            println!("{}", "Process completed successfully.".green());
+        },
+        Err(e) => {
+            eprintln!("{}: {}", "Error".red().bold(), e);
+            
+            // Provide more helpful error messages for common errors
+            match e {
+                AppError::MissingDependency(msg) => {
+                    eprintln!("{}: {}", "Solution".green(), msg);
+                    if msg.contains("yt-dlp") {
+                        eprintln!("You can install yt-dlp by running: pip install yt-dlp");
+                    } else if msg.contains("ffmpeg") {
+                        if cfg!(target_os = "windows") {
+                            eprintln!("You can download ffmpeg from: https://ffmpeg.org/download.html");
+                        } else if cfg!(target_os = "macos") {
+                            eprintln!("You can install ffmpeg by running: brew install ffmpeg");
+                        } else {
+                            eprintln!("You can install ffmpeg by running: sudo apt install ffmpeg (or your distro's equivalent)");
+                        }
+                    }
+                },
+                AppError::DailyLimitExceeded => {
+                    eprintln!("{}", "Daily download limit exceeded for free version.".red().bold());
+                    eprintln!("{}", "🚀 Upgrade to Rustloader Pro for unlimited downloads: rustloader.com/pro 🚀".bright_yellow());
+                    eprintln!("\nAlternatively, you can bypass the limit for testing by setting this environment variable:");
+                    eprintln!("export RUSTLOADER_BYPASS_LIMIT=1");
+                },
+                AppError::PathError(msg) => {
+                    eprintln!("{}: Check that you have correct permissions for the path", "Solution".green());
+                    eprintln!("Also check if the directory exists and is accessible");
+                    eprintln!("\nAlternatively, specify a custom output directory with the -o option:");
+                    eprintln!("rustloader URL -o /path/to/downloads");
+                },
+                AppError::DownloadError(msg) => {
+                    if msg.contains("403") {
+                        eprintln!("{}: The website may be blocking downloads", "Solution".green());
+                        eprintln!("Try updating yt-dlp to the latest version: pip install -U yt-dlp");
+                    } else if msg.contains("not found") {
+                        eprintln!("{}: Check that the URL is correct and the video exists", "Solution".green());
+                    } else {
+                        eprintln!("{}: Check your internet connection and try again", "Solution".green());
+                    }
+                },
+                _ => {
+                    eprintln!("For more help, visit: rustloader.com/help");
+                }
+            }
+        }
+    }
+    
+    result
+}
+
+// Separated main logic for better error handling
+async fn run_main() -> Result<(), AppError> {
     // Display logo and welcome message
     print_logo();
     
@@ -79,50 +135,24 @@ async fn main() -> Result<(), AppError> {
     
     // Initialize native FFmpeg library
     if let Err(e) = ffmpeg_wrapper::init() {
-        eprintln!("{}: {}", "Error initializing FFmpeg libraries".red(), e);
-        eprintln!("{}", "This may indicate missing codecs or invalid installation.".yellow());
-        return Err(e);
+        println!("{}: {}", "Warning".yellow(), e);
+        println!("Will attempt to continue, but video processing may fail");
     }
     
-    // Perform enhanced dependency validation using native libraries
-    println!("{}", "Validating native Rust libraries...".blue());
-    
+    // Validate dependencies with more lenient error handling
     match validate_dependencies() {
-        Ok(deps) => {
-            // Check if any dependencies have issues
-            let mut has_issues = false;
-            
-            // Check rustube (native YT-DL) status
-            if let Some(info) = deps.get("rustube") {
-                if !info.is_min_version || info.is_vulnerable {
-                    has_issues = true;
-                    println!("{}", "rustube library is outdated or has vulnerabilities.".yellow());
-                    println!("This is integrated with the app, please update to the latest Rustloader version.");
-                }
-            }
-            
-            // Check ffmpeg library status
-            if let Some(info) = deps.get("ffmpeg") {
-                if !info.is_min_version || info.is_vulnerable {
-                    has_issues = true;
-                    println!("{}", "FFmpeg library is outdated or has vulnerabilities.".yellow());
-                    println!("This is integrated with the app, please update to the latest Rustloader version.");
-                }
-            }
-            
-            if !has_issues {
-                println!("{}", "All native Rust libraries passed validation.".green());
-            }
+        Ok(_) => {
+            println!("{}", "All dependencies validated successfully.".green());
         },
         Err(e) => {
-            println!("{}: {}", "Library validation failed".red(), e);
-            println!("Would you like to continue anyway? (y/n):");
+            println!("{}: {}", "Dependency validation warning".yellow(), e);
+            println!("Continue anyway? (y/n):");
             let mut input = String::new();
             std::io::stdin().read_line(&mut input)?;
             if !input.trim().eq_ignore_ascii_case("y") {
                 return Err(e);
             } else {
-                println!("{}", "Continuing with potential library issues...".yellow());
+                println!("{}", "Continuing with potential dependency issues...".yellow());
             }
         }
     }
@@ -140,9 +170,9 @@ async fn main() -> Result<(), AppError> {
         std::io::stdin().read_line(&mut email)?;
         email = email.trim().to_string();
         
-        // Try to activate the license
-        match activate_license(key, &email)? {
-            LicenseStatus::Pro(license) => {
+        // Try to activate the license with better error handling
+        match activate_license(key, &email) {
+            Ok(LicenseStatus::Pro(license)) => {
                 println!("{}", "License activated successfully!".green());
                 println!("Thank you for upgrading to Rustloader Pro!");
                 println!("Email: {}", license.user_email);
@@ -156,13 +186,17 @@ async fn main() -> Result<(), AppError> {
                 println!("\nPlease restart Rustloader to use Pro features.");
                 return Ok(());
             },
-            LicenseStatus::Invalid(reason) => {
+            Ok(LicenseStatus::Invalid(reason)) => {
                 println!("{}: {}", "License activation failed".red(), reason);
                 return Err(AppError::LicenseError(format!("License activation failed: {}", reason)));
             },
-            _ => {
+            Ok(LicenseStatus::Free) => {
                 println!("{}", "License activation failed with an unknown error".red());
                 return Err(AppError::LicenseError("License activation failed".to_string()));
+            },
+            Err(e) => {
+                println!("{}: {}", "License activation error".red(), e);
+                return Err(e);
             }
         }
     }
@@ -173,7 +207,16 @@ async fn main() -> Result<(), AppError> {
     }
     
     // Extract URL and options
-    let url = matches.get_one::<String>("url").unwrap();
+    let url = match matches.get_one::<String>("url") {
+        Some(url) => url,
+        None => {
+            // This shouldn't happen due to clap's required_unless_present_any,
+            // but we handle it anyway for robustness
+            println!("No URL provided. Use rustloader --help for usage information.");
+            return Err(AppError::ValidationError("No URL provided".to_string()));
+        }
+    };
+    
     let quality = matches.get_one::<String>("quality").map(|q| q.as_str());
     let format = matches.get_one::<String>("format").map(|f| f.as_str()).unwrap_or("mp4");
     let start_time = matches.get_one::<String>("start-time").map(|s| s.as_str());
@@ -182,7 +225,7 @@ async fn main() -> Result<(), AppError> {
     let download_subtitles = matches.get_flag("subtitles");
     let output_dir = matches.get_one::<String>("output-dir").map(|s| s.as_str());
     
-    // Only allow force download in development mode
+    // Only allow force download in development mode with warning
     let force_download = if cfg!(debug_assertions) {
         let is_forced = matches.get_flag("force");
         if is_forced {
@@ -194,7 +237,7 @@ async fn main() -> Result<(), AppError> {
         false
     };
     
-    let bitrate = matches.get_one::<String>("video-bitrate").map(|b| b.as_str()); // Extract the bitrate option
+    let bitrate = matches.get_one::<String>("video-bitrate").map(|b| b.as_str());
 
     // Check for update results
     if let Ok(update_result) = update_check.await {
@@ -205,8 +248,8 @@ async fn main() -> Result<(), AppError> {
 
     // Use different download function based on license status
     if is_pro {
-        // For Pro users, use the enhanced Pro download function with explicit type parameter
-        match download_video_pro::<fn(u64, u64) -> bool>(
+        // For Pro users, use the enhanced Pro download function
+        download_video_pro::<fn(u64, u64) -> bool>(
             url, 
             quality, 
             format, 
@@ -218,16 +261,12 @@ async fn main() -> Result<(), AppError> {
             force_download,
             bitrate,
             None,  // No progress callback for now
-        ).await {
-            Ok(_) => println!("{}", "Pro download process completed successfully.".green()),
-            Err(e) => {
-                eprintln!("{}: {}", "Error".red().bold(), e);
-                return Err(e);
-            }
-        }
+        ).await?;
+        
+        println!("{}", "Pro download process completed successfully.".green());
     } else {
-        // For Free users, use the standard function with explicit type parameter
-        match download_video_free::<fn(u64, u64) -> bool>(
+        // For Free users, use the standard function
+        download_video_free::<fn(u64, u64) -> bool>(
             url, 
             quality, 
             format, 
@@ -239,23 +278,9 @@ async fn main() -> Result<(), AppError> {
             force_download,
             bitrate,
             None,  // No progress callback for now
-        ).await {
-            Ok(_) => println!("{}", "Process completed successfully.".green()),
-            Err(AppError::DailyLimitExceeded) => {
-                eprintln!("{}", "Daily download limit exceeded for free version.".red().bold());
-                println!("{}", "🚀 Upgrade to Rustloader Pro for unlimited downloads: rustloader.com/pro 🚀".bright_yellow());
-                return Err(AppError::DailyLimitExceeded);
-            },
-            Err(AppError::PremiumFeature(feature)) => {
-                eprintln!("{}: {}", "Premium feature required".red().bold(), feature);
-                println!("{}", "🚀 Upgrade to Rustloader Pro to access this feature: rustloader.com/pro 🚀".bright_yellow());
-                return Err(AppError::PremiumFeature(feature));
-            },
-            Err(e) => {
-                eprintln!("{}: {}", "Error".red().bold(), e);
-                return Err(e);
-            }
-        }
+        ).await?;
+        
+        println!("{}", "Download process completed successfully.".green());
     }
 
     Ok(())

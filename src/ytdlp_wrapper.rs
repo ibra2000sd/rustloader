@@ -4,6 +4,7 @@ use crate::error::AppError;
 use colored::*;
 use indicatif::{ProgressBar, ProgressStyle};
 use regex::Regex;
+use std::env;
 use std::path::PathBuf;
 use std::process::{Stdio};
 use std::sync::Arc;
@@ -32,6 +33,7 @@ pub struct DownloadConfig {
 pub struct YtDlpWrapper {
     config: DownloadConfig,
     progress_callback: Option<ProgressCallback>,
+    binary_path: String,  // Added to support custom binary path
 }
 
 impl YtDlpWrapper {
@@ -40,14 +42,55 @@ impl YtDlpWrapper {
         config: DownloadConfig, 
         progress_callback: Option<ProgressCallback>
     ) -> Self {
+        // Check for custom yt-dlp path in environment
+        let binary_path = env::var("RUSTLOADER_YTDLP_PATH")
+            .unwrap_or_else(|_| "yt-dlp".to_string());
+            
         Self {
             config,
             progress_callback,
+            binary_path,
+        }
+    }
+    
+    /// Check if yt-dlp is working correctly
+    pub async fn check_ytdlp(&self) -> Result<(), AppError> {
+        let mut cmd = Command::new(&self.binary_path);
+        cmd.arg("--version");
+        
+        match cmd.output().await {
+            Ok(output) => {
+                if output.status.success() {
+                    let version = String::from_utf8_lossy(&output.stdout);
+                    println!("{}: {}", "yt-dlp version".green(), version.trim());
+                    Ok(())
+                } else {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    Err(AppError::MissingDependency(format!(
+                        "yt-dlp returned error: {}", stderr.trim()
+                    )))
+                }
+            },
+            Err(e) => {
+                Err(AppError::MissingDependency(format!(
+                    "yt-dlp not found or not executable: {}. Please install yt-dlp with 'pip install yt-dlp'", e
+                )))
+            }
         }
     }
     
     /// Download video with progress tracking
     pub async fn download(&self) -> Result<String, AppError> {
+        // Verify yt-dlp is working before starting
+        self.check_ytdlp().await?;
+        
+        // Verify output directory exists
+        if !self.config.output_dir.exists() {
+            std::fs::create_dir_all(&self.config.output_dir)
+                .map_err(|e| AppError::IoError(e))?;
+            println!("Created output directory: {:?}", self.config.output_dir);
+        }
+        
         // Create a progress bar
         let pb = ProgressBar::new(100);
         pb.set_style(
@@ -58,7 +101,7 @@ impl YtDlpWrapper {
         );
         
         // Build the yt-dlp command with all necessary arguments
-        let mut cmd = Command::new("yt-dlp");
+        let mut cmd = Command::new(&self.binary_path);
         
         // Add basic arguments
         cmd.arg(self.config.url.clone())
@@ -138,9 +181,16 @@ impl YtDlpWrapper {
         
         println!("{} {}", "Running yt-dlp command:".blue(), format!("{:?}", cmd).yellow());
         
-        // Execute the command
-        let mut child = cmd.spawn()
-            .map_err(|e| AppError::DownloadError(format!("Failed to execute yt-dlp: {}", e)))?;
+        // Execute the command with improved error handling
+        let mut child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(e) => {
+                pb.finish_with_message("Failed to start download");
+                return Err(AppError::DownloadError(format!(
+                    "Failed to execute yt-dlp: {}. Make sure yt-dlp is installed correctly.", e
+                )));
+            }
+        };
         
         // Set up Atomics for progress tracking
         let downloaded = Arc::new(AtomicU64::new(0));
@@ -245,21 +295,46 @@ impl YtDlpWrapper {
                 let mut lines = reader.lines();
                 
                 while let Ok(Some(line)) = lines.next_line().await {
-                    // Print errors to console for debugging
-                    eprintln!("{}", line.red());
+                    // Print errors to console with color coding
+                    if line.contains("ERROR") || line.contains("Error") {
+                        eprintln!("{}", line.red());
+                    } else if line.contains("WARNING") || line.contains("Warning") {
+                        eprintln!("{}", line.yellow());
+                    } else {
+                        // Print other stderr lines in normal color for debugging
+                        eprintln!("{}", line);
+                    }
                 }
             });
         }
         
         // Wait for the command to complete
-        let status = child.wait().await
-            .map_err(|e| AppError::DownloadError(format!("yt-dlp process error: {}", e)))?;
+        let status = match child.wait().await {
+            Ok(status) => status,
+            Err(e) => {
+                progress_task.abort();
+                pb.finish_with_message("Download process error");
+                return Err(AppError::DownloadError(format!("yt-dlp process error: {}", e)));
+            }
+        };
         
         // Abort the progress task
         progress_task.abort();
         
         if !status.success() {
-            return Err(AppError::DownloadError(format!("yt-dlp exited with status: {}", status)));
+            let exit_code = status.code().unwrap_or(-1);
+            
+            // Provide helpful messages for common error codes
+            let error_message = match exit_code {
+                1 => "yt-dlp had some warnings but may have succeeded partially. Check the output directory.",
+                2 => "yt-dlp was unable to download the video. The URL might be invalid or unsupported.",
+                3 => "yt-dlp had a fatal error. Please check the error messages above.",
+                _ => "yt-dlp exited with an unknown error code.",
+            };
+            
+            return Err(AppError::DownloadError(format!(
+                "yt-dlp exited with status: {} (code: {}). {}", status, exit_code, error_message
+            )));
         }
         
         // Get the title

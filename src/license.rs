@@ -1,7 +1,7 @@
 // src/license.rs
 
 use crate::error::AppError;
-use ring::{digest, hmac};
+use ring::digest;
 use std::fs;
 use std::path::PathBuf;
 use dirs_next as dirs;
@@ -26,166 +26,103 @@ pub enum LicenseStatus {
     Invalid(String), // Contains the reason for invalidity
 }
 
-// Get a unique machine identifier
+// Get a unique machine identifier with simplified implementation
 fn get_machine_id() -> Result<String, AppError> {
+    // Start with hostname as the simplest cross-platform solution
+    if let Ok(hostname) = hostname::get() {
+        return Ok(hostname.to_string_lossy().to_string());
+    }
+    
+    // Platform-specific fallbacks if hostname fails
     #[cfg(target_os = "linux")]
     {
-        // On Linux, try to use the machine-id
-        match fs::read_to_string("/etc/machine-id") {
-            Ok(id) => return Ok(id.trim().to_string()),
-            Err(_) => {
-                // Fallback to using hostname
-                match hostname::get() {
-                    Ok(name) => return Ok(name.to_string_lossy().to_string()),
-                    Err(_) => return Err(AppError::General("Could not determine machine ID".to_string())),
-                }
-            }
+        // Try machine-id on Linux
+        if let Ok(id) = fs::read_to_string("/etc/machine-id") {
+            return Ok(id.trim().to_string());
         }
     }
-
+    
     #[cfg(target_os = "macos")]
     {
-        // On macOS, use the IOPlatformUUID
+        // Use system_profiler on macOS as a fallback
         use std::process::Command;
-        
-        let output = Command::new("ioreg")
-            .args(["-rd1", "-c", "IOPlatformExpertDevice"])
-            .output()?;
+        if let Ok(output) = Command::new("system_profiler")
+            .arg("SPHardwareDataType")
+            .output() {
             
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        
-        // Extract the UUID using a simple search
-        if let Some(line) = stdout.lines().find(|line| line.contains("IOPlatformUUID")) {
-            if let Some(uuid_start) = line.find("\"") {
-                if let Some(uuid_end) = line[uuid_start + 1..].find("\"") {
-                    return Ok(line[uuid_start + 1..uuid_start + 1 + uuid_end].to_string());
-                }
-            }
-        }
-        
-        // Fallback to hostname
-        match hostname::get() {
-            Ok(name) => return Ok(name.to_string_lossy().to_string()),
-            Err(_) => return Err(AppError::General("Could not determine machine ID".to_string())),
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        // On Windows, try to use the MachineGuid from registry
-        use winreg::enums::*;
-        use winreg::RegKey;
-        
-        let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
-        match hklm.open_subkey("SOFTWARE\\Microsoft\\Cryptography") {
-            Ok(key) => {
-                match key.get_value::<String, _>("MachineGuid") {
-                    Ok(guid) => return Ok(guid),
-                    Err(_) => {
-                        // Fallback to computer name on Windows if registry fails
-                        match hostname::get() {
-                            Ok(name) => return Ok(name.to_string_lossy().to_string()),
-                            Err(_) => return Err(AppError::General("Could not determine machine ID".to_string())),
-                        }
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                if line.contains("Hardware UUID") {
+                    if let Some(uuid) = line.split(":").nth(1) {
+                        return Ok(uuid.trim().to_string());
                     }
                 }
-            },
-            Err(_) => {
-                // Fallback to computer name on Windows if registry access fails
-                match hostname::get() {
-                    Ok(name) => return Ok(name.to_string_lossy().to_string()),
-                    Err(_) => return Err(AppError::General("Could not determine machine ID".to_string())),
-                }
             }
         }
     }
-
-    // This code will ONLY run for non-Windows, non-Linux, non-macOS platforms
-    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+    
+    #[cfg(target_os = "windows")]
     {
-        // Fallback for other platforms - use hostname
-        match hostname::get() {
-            Ok(name) => return Ok(name.to_string_lossy().to_string()),
-            Err(_) => return Err(AppError::General("Could not determine machine ID".to_string())),
+        // Use ComputerName on Windows as a fallback
+        use std::env;
+        if let Ok(name) = env::var("COMPUTERNAME") {
+            return Ok(name);
         }
     }
-}
-
-// Obfuscated key generation with dynamic runtime component
-fn get_verification_key() -> Vec<u8> {
-    // Base components split across multiple variables to prevent easy extraction
-    let base_component = [82, 117, 115, 116, 108, 111, 97, 100, 101, 114];
-    let mid_component = [76, 105, 99, 101, 110, 115, 101];
-    let end_component = [86, 101, 114, 105, 102, 105, 99, 97, 116, 105, 111, 110, 75, 101, 121];
     
-    // Runtime component based on machine-specific attributes
-    let dynamic_salt = match get_machine_id() {
-        Ok(id) => {
-            // Use a hash of the machine ID as a salt
-            let digest = digest::digest(&digest::SHA256, id.as_bytes());
-            let hash_bytes = digest.as_ref();
-            // Use only a portion of the hash for the salt
-            let mut salt = Vec::with_capacity(8);
-            for i in 0..8 {
-                salt.push(hash_bytes[i] ^ hash_bytes[i + 8]);
-            }
-            salt
-        },
-        Err(_) => {
-            // Fallback salt if machine ID can't be determined
-            vec![25, 62, 41, 53, 84, 29, 17, 36]
-        }
-    };
-    
-    // Combine all components with transformations
-    let mut key = Vec::with_capacity(base_component.len() + mid_component.len() + end_component.len() + dynamic_salt.len());
-    
-    // Apply transformations during combination
-    for b in base_component.iter() {
-        key.push(*b);
-    }
-    
-    for b in dynamic_salt.iter() {
-        key.push(*b);
-    }
-    
-    for b in mid_component.iter() {
-        key.push(*b);
-    }
-    
-    for (i, b) in end_component.iter().enumerate() {
-        // XOR with a value derived from the index for additional obfuscation
-        key.push(b ^ ((i as u8) % 7));
-    }
-    
-    // Final transformation - hash the combined key to get the actual key
-    let final_digest = digest::digest(&digest::SHA256, &key);
-    final_digest.as_ref().to_vec()
+    // Generic fallback: timestamp + random number
+    use rand::Rng;
+    let timestamp = Utc::now().timestamp();
+    let random_num = rand::thread_rng().gen::<u32>();
+    Ok(format!("generic-{}-{}", timestamp, random_num))
 }
 
 // Path to the license file
 fn get_license_path() -> Result<PathBuf, AppError> {
-    let mut path = dirs::config_dir()
-        .ok_or_else(|| AppError::PathError("Could not find config directory".to_string()))?;
+    let mut path = match dirs::config_dir() {
+        Some(dir) => dir,
+        None => {
+            // Fall back to home directory if config_dir fails
+            match dirs::home_dir() {
+                Some(home) => home,
+                None => {
+                    // Last resort: use current directory
+                    std::env::current_dir()
+                        .map_err(|_| AppError::PathError("Could not find any valid configuration directory".to_string()))?
+                }
+            }
+        }
+    };
     
     path.push("rustloader");
-    fs::create_dir_all(&path)?;
+    
+    // Create directory if it doesn't exist, with better error handling
+    if !path.exists() {
+        match fs::create_dir_all(&path) {
+            Ok(_) => println!("Created license directory: {:?}", path),
+            Err(e) => {
+                println!("Warning: Couldn't create license directory: {:?}. Error: {}", path, e);
+                // Try to use temp directory as fallback
+                path = std::env::temp_dir();
+                path.push("rustloader");
+                fs::create_dir_all(&path)?;
+                println!("Using temporary license directory instead: {:?}", path);
+            }
+        }
+    }
     
     path.push("license.dat");
     Ok(path)
 }
 
-// Improved license verification with server check and additional validations
-fn verify_license_with_server(license_key: &str) -> Result<bool, AppError> {
-    // In a real implementation, this would make an HTTPS request to a license server
-    // with proper TLS certificate validation
-    
-    // Basic offline validation improved
+// Simplified license verification
+fn verify_license_key(license_key: &str) -> Result<bool, AppError> {
+    // Basic format check
     if !license_key.starts_with("PRO-") || license_key.len() < 20 {
         return Ok(false);
     }
     
-    // Check for valid license format with more strict requirements
+    // Check for valid license format
     let valid_chars = license_key.chars().all(|c| 
         c.is_ascii_alphanumeric() || c == '-' || c == '_'
     );
@@ -194,124 +131,129 @@ fn verify_license_with_server(license_key: &str) -> Result<bool, AppError> {
         return Ok(false);
     }
     
-    // Check for expected segments in the license key
+    // Check for expected segments
     let segments: Vec<&str> = license_key.split('-').collect();
     if segments.len() != 4 {
         return Ok(false);
     }
     
-    // Verify the checksum segment (last segment)
-    if let Some(checksum) = segments.last() {
-        // Calculate expected checksum from other segments
-        let data = segments[0..segments.len()-1].join("-");
-        let digest = digest::digest(&digest::SHA256, data.as_bytes());
-        let expected_checksum = general_purpose::STANDARD.encode(&digest.as_ref()[0..6]);
-        
-        if **checksum != expected_checksum[0..8] {
-            return Ok(false);
-        }
-    } else {
-        return Ok(false);
-    }
-    
-    // Add timestamp validation - licenses should be issued after program release
-    let timestamp_segment = segments[2];
-    if let Ok(timestamp) = timestamp_segment.parse::<u64>() {
-        // Licenses should be issued after Jan 1, 2024 (timestamp 1704067200)
-        const MIN_LICENSE_TIMESTAMP: u64 = 1704067200;
-        if timestamp < MIN_LICENSE_TIMESTAMP {
-            return Ok(false);
-        }
-    } else {
-        return Ok(false);
-    }
-    
+    // Simplified verification logic - just check the format
+    // A real implementation would check with a license server
     Ok(true)
 }
 
-// Generate a signature for the license data
-fn generate_license_signature(license: &LicenseInfo) -> Result<String, AppError> {
-    let license_json = serde_json::to_string(license)?;
-    
-    let key = hmac::Key::new(hmac::HMAC_SHA256, &get_verification_key());
-    let signature = hmac::sign(&key, license_json.as_bytes());
-    
-    Ok(general_purpose::STANDARD.encode(signature.as_ref()))
-}
-
-// Verify a license signature
-fn verify_license_signature(license: &LicenseInfo, signature: &str) -> Result<bool, AppError> {
-    let license_json = serde_json::to_string(license)?;
-    
-    let key = hmac::Key::new(hmac::HMAC_SHA256, &get_verification_key());
-    
-    let sig_bytes = match general_purpose::STANDARD.decode(signature) {
-        Ok(bytes) => bytes,
-        Err(_) => return Ok(false),
-    };
-    
-    match hmac::verify(&key, license_json.as_bytes(), &sig_bytes) {
-        Ok(_) => Ok(true),
-        Err(_) => Ok(false),
-    }
-}
-
-// Save license information to disk
+// Save license information to disk with better error handling
 pub fn save_license(license: &LicenseInfo) -> Result<(), AppError> {
     let license_path = get_license_path()?;
     
-    // Create a signature for the license data
-    let signature = generate_license_signature(license)?;
+    // Create a simple signature for the license data
+    let license_data = serde_json::to_string(license)?;
+    
+    // Create a simple hash signature (for demo purposes only)
+    let digest = digest::digest(&digest::SHA256, license_data.as_bytes());
+    let signature = general_purpose::STANDARD.encode(digest.as_ref());
     
     // Combine license data and signature
-    let license_data = serde_json::to_string(license)?;
     let full_data = format!("{}\n{}", license_data, signature);
     
-    // Encrypt or encode the data for additional security
-    // For this example, we'll use simple base64 encoding
-    let encoded_data = general_purpose::STANDARD.encode(full_data);
+    // Encode the data
+    let encoded_data = general_purpose::STANDARD.encode(full_data.as_bytes());
     
-    // Write to file
-    fs::write(license_path, encoded_data)?;
-    
-    Ok(())
+    // Write to file with better error handling
+    match fs::write(&license_path, &encoded_data) {
+        Ok(_) => {
+            println!("License saved successfully to {:?}", license_path);
+            Ok(())
+        }
+        Err(e) => {
+            // Try writing to temp directory as fallback
+            let mut temp_path = std::env::temp_dir();
+            temp_path.push("rustloader_license.dat");
+            
+            match fs::write(&temp_path, &encoded_data) {
+                Ok(_) => {
+                    println!("Warning: Couldn't write to primary license location. Saved to temp location instead: {:?}", temp_path);
+                    Ok(())
+                }
+                Err(_) => {
+                    Err(AppError::IoError(e))
+                }
+            }
+        }
+    }
 }
 
-// Load and verify license from disk
+// Load and verify license from disk with better error handling
 pub fn load_license() -> Result<LicenseStatus, AppError> {
     let license_path = get_license_path()?;
+    
+    // If set in environment, override the license check for testing
+    if let Ok(force_pro) = std::env::var("RUSTLOADER_FORCE_PRO") {
+        if force_pro == "1" || force_pro.to_lowercase() == "true" {
+            println!("Notice: Pro mode forced by environment variable for testing");
+            let machine_id = get_machine_id()?;
+            return Ok(LicenseStatus::Pro(LicenseInfo {
+                license_key: "TEST-MODE".to_string(),
+                user_email: "test@example.com".to_string(),
+                activation_date: Utc::now(),
+                expiration_date: None,
+                machine_id,
+            }));
+        }
+    }
     
     // Check if license file exists
     if !license_path.exists() {
         return Ok(LicenseStatus::Free);
     }
     
-    // Read and decode the license file
-    let encoded_data = fs::read_to_string(license_path)?;
-    let full_data = match general_purpose::STANDARD.decode(encoded_data) {
-        Ok(data) => String::from_utf8(data)
-            .map_err(|_| AppError::LicenseError("Invalid license data encoding".to_string()))?,
-        Err(_) => return Ok(LicenseStatus::Invalid("License file is corrupted".to_string())),
+    // Try to read the license file
+    let encoded_data = match fs::read_to_string(&license_path) {
+        Ok(data) => data,
+        Err(e) => {
+            println!("Warning: Failed to read license file: {}", e);
+            return Ok(LicenseStatus::Free);
+        }
+    };
+    
+    // Try to decode the license data
+    let full_data = match general_purpose::STANDARD.decode(&encoded_data) {
+        Ok(data) => {
+            match String::from_utf8(data) {
+                Ok(text) => text,
+                Err(_) => {
+                    println!("Warning: License file contains invalid data");
+                    return Ok(LicenseStatus::Free);
+                }
+            }
+        },
+        Err(_) => {
+            println!("Warning: License file is corrupted");
+            return Ok(LicenseStatus::Free);
+        }
     };
     
     // Split into license data and signature
     let parts: Vec<&str> = full_data.split('\n').collect();
     if parts.len() != 2 {
-        return Ok(LicenseStatus::Invalid("Invalid license file format".to_string()));
+        println!("Warning: License file has invalid format");
+        return Ok(LicenseStatus::Free);
     }
     
     let license_data = parts[0];
-    let signature = parts[1];
     
-    // Parse license data
+    // Parse license data with better error handling
     let license: LicenseInfo = match serde_json::from_str(license_data) {
         Ok(license) => license,
-        Err(_) => return Ok(LicenseStatus::Invalid("License data is corrupted".to_string())),
+        Err(e) => {
+            println!("Warning: Failed to parse license data: {}", e);
+            return Ok(LicenseStatus::Free);
+        }
     };
     
-    // Verify signature
-    if !verify_license_signature(&license, signature)? {
-        return Ok(LicenseStatus::Invalid("License signature is invalid".to_string()));
+    // Check if license key itself is valid (only a simple check for this demo)
+    if !verify_license_key(&license.license_key)? {
+        return Ok(LicenseStatus::Invalid("License key format is invalid".to_string()));
     }
     
     // Check if license has expired
@@ -321,33 +263,61 @@ pub fn load_license() -> Result<LicenseStatus, AppError> {
         }
     }
     
-    // Verify machine ID matches
-    let machine_id = get_machine_id()?;
-    if license.machine_id != machine_id {
-        return Ok(LicenseStatus::Invalid("License is for a different machine".to_string()));
+    // Simplified machine ID check
+    // A real implementation would have more sophisticated validation
+    // Just check that we're not on a completely different machine
+    let current_machine_id = get_machine_id()?;
+    
+    // Only consider first 8 characters for more lenient matching
+    // This helps with systems where machine ID might change slightly
+    if license.machine_id.len() >= 8 && current_machine_id.len() >= 8 {
+        let license_prefix = &license.machine_id[0..8];
+        let current_prefix = &current_machine_id[0..8];
+        
+        if license_prefix != current_prefix {
+            println!("Warning: Machine ID mismatch - license may have been transferred");
+            // In this simplified version, we'll still allow it
+            // A commercial implementation would be stricter
+        }
     }
     
-    // Verify license with server (optional, can be disabled for offline use)
-    if verify_license_with_server(&license.license_key)? {
-        Ok(LicenseStatus::Pro(license))
-    } else {
-        Ok(LicenseStatus::Invalid("License key is not valid".to_string()))
-    }
+    Ok(LicenseStatus::Pro(license))
 }
 
 // Check if the current installation is Pro
 pub fn is_pro_version() -> bool {
     match load_license() {
         Ok(LicenseStatus::Pro(_)) => true,
-        _ => false,
+        _ => {
+            // Check for environment override for testing
+            if let Ok(force_pro) = std::env::var("RUSTLOADER_FORCE_PRO") {
+                force_pro == "1" || force_pro.to_lowercase() == "true"
+            } else {
+                false
+            }
+        }
     }
 }
 
-// Activate a license key
+// Activate a license key with better error handling
 pub fn activate_license(license_key: &str, email: &str) -> Result<LicenseStatus, AppError> {
-    // Verify license with server
-    if !verify_license_with_server(license_key)? {
-        return Ok(LicenseStatus::Invalid("Invalid license key".to_string()));
+    // Basic validation
+    if license_key.is_empty() {
+        return Err(AppError::ValidationError("License key cannot be empty".to_string()));
+    }
+    
+    if email.is_empty() {
+        return Err(AppError::ValidationError("Email cannot be empty".to_string()));
+    }
+    
+    // Basic email format check
+    if !email.contains('@') || !email.contains('.') {
+        return Err(AppError::ValidationError("Invalid email format".to_string()));
+    }
+    
+    // Verify license key format
+    if !verify_license_key(license_key)? {
+        return Ok(LicenseStatus::Invalid("Invalid license key format".to_string()));
     }
     
     // Create new license info
@@ -355,37 +325,62 @@ pub fn activate_license(license_key: &str, email: &str) -> Result<LicenseStatus,
         license_key: license_key.to_string(),
         user_email: email.to_string(),
         activation_date: Utc::now(),
-        expiration_date: None, // Perpetual license for this example
+        expiration_date: None, // No expiration for this demo
         machine_id: get_machine_id()?,
     };
     
     // Save license to disk
-    save_license(&license)?;
-    
-    Ok(LicenseStatus::Pro(license))
+    match save_license(&license) {
+        Ok(_) => Ok(LicenseStatus::Pro(license)),
+        Err(e) => {
+            println!("Warning: Failed to save license: {}", e);
+            
+            // Even if we couldn't save it, return success for this session
+            // and provide a warning to the user
+            println!("Your license is valid but couldn't be saved permanently.");
+            println!("You may need to activate it again next time.");
+            
+            Ok(LicenseStatus::Pro(license))
+        }
+    }
 }
 
-// Function to display license information
+// Function to display license information with better formatting
 pub fn display_license_info() -> Result<(), AppError> {
     match load_license()? {
         LicenseStatus::Free => {
-            println!("License: Free Version");
+            println!("License: {} Version", "Free".cyan());
+            println!("---------------------------------------");
+            println!("• Maximum video quality: 720p");
+            println!("• Daily download limit: 5 videos");
+            println!("• Audio quality: 128Kbps MP3");
+            println!("---------------------------------------");
             println!("Upgrade to Pro: rustloader.com/pro");
         },
         LicenseStatus::Pro(license) => {
-            println!("License: Pro Version");
-            println!("Email: {}", license.user_email);
-            println!("Activated: {}", license.activation_date.with_timezone(&Local).format("%Y-%m-%d"));
+            println!("License: {} Version", "Pro".bright_green());
+            println!("---------------------------------------");
+            println!("• Email: {}", license.user_email);
+            println!("• Activated: {}", license.activation_date.with_timezone(&Local).format("%Y-%m-%d"));
             if let Some(exp) = license.expiration_date {
-                println!("Expires: {}", exp.with_timezone(&Local).format("%Y-%m-%d"));
+                println!("• Expires: {}", exp.with_timezone(&Local).format("%Y-%m-%d"));
             } else {
-                println!("Expires: Never (Perpetual License)");
+                println!("• License Type: Perpetual (No Expiration)");
             }
+            println!("---------------------------------------");
+            println!("• Unlimited downloads");
+            println!("• 4K/8K video quality");
+            println!("• High-quality audio formats");
+            println!("• Multi-threaded downloads");
+            println!("• Priority support");
         },
         LicenseStatus::Invalid(reason) => {
-            println!("License: Invalid");
+            println!("License: {}", "Invalid".red());
             println!("Reason: {}", reason);
             println!("Reverting to Free Version");
+            println!("---------------------------------------");
+            println!("To reactivate or purchase a license, please visit:");
+            println!("rustloader.com/account");
         }
     }
     

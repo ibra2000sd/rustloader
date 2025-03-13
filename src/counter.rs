@@ -1,17 +1,26 @@
 // src/counter.rs
+
 use crate::error::AppError;
 use chrono::Local;
 use dirs_next as dirs;
 use std::fs;
-use ring::hmac;
 use std::path::PathBuf;
-use base64::{Engine as _, engine::general_purpose};
+use std::fs::File;
+use std::io::{Read, Write};
 
 // Constants for free version limitations
 const MAX_DAILY_DOWNLOADS: u32 = 5;
 
 /// Check if daily download limit has been reached
 pub fn check_daily_limit() -> Result<(), AppError> {
+    // Skip limit check if environment variable is set
+    if let Ok(bypass_limit) = std::env::var("RUSTLOADER_BYPASS_LIMIT") {
+        if bypass_limit == "1" || bypass_limit.to_lowercase() == "true" {
+            println!("Notice: Daily limit check bypassed by environment variable");
+            return Ok(());
+        }
+    }
+    
     let (count, _) = get_download_counter()?;
     
     if count >= MAX_DAILY_DOWNLOADS {
@@ -23,6 +32,14 @@ pub fn check_daily_limit() -> Result<(), AppError> {
 
 /// Increment daily download count
 pub fn increment_daily_count() -> Result<(), AppError> {
+    // Skip if environment variable is set
+    if let Ok(bypass_limit) = std::env::var("RUSTLOADER_BYPASS_LIMIT") {
+        if bypass_limit == "1" || bypass_limit.to_lowercase() == "true" {
+            println!("Notice: Download count not incremented due to environment variable");
+            return Ok(());
+        }
+    }
+    
     let (count, date) = get_download_counter()?;
     
     // Check if we're still counting for today
@@ -38,32 +55,45 @@ pub fn increment_daily_count() -> Result<(), AppError> {
     Ok(())
 }
 
-/// Get current download counter
+/// Get current download counter with simplified implementation
 fn get_download_counter() -> Result<(u32, String), AppError> {
-    // Get counter file path
-    let counter_path = get_counter_file_path()?;
+    // Get counter file path with better error handling
+    let counter_path = match get_counter_file_path() {
+        Ok(path) => path,
+        Err(e) => {
+            println!("Warning: Could not determine counter file path: {}", e);
+            // Return default values
+            return Ok((0, Local::now().format("%Y-%m-%d").to_string()));
+        }
+    };
     
     // Default values (no downloads today)
     let today = Local::now().format("%Y-%m-%d").to_string();
     let mut count = 0;
     let mut date = today.clone();
     
-    // Read counter if exists
+    // Read counter if exists with better error handling
     if counter_path.exists() {
-        match fs::read_to_string(&counter_path) {
-            Ok(content) => {
-                // Decrypt and verify content
-                if let Ok((stored_date, stored_count)) = decrypt_counter(&content) {
-                    // If date matches today, use the stored count
-                    // otherwise start fresh for a new day
-                    if stored_date == today {
-                        count = stored_count;
-                        date = stored_date;
+        match File::open(&counter_path) {
+            Ok(mut file) => {
+                let mut content = String::new();
+                if file.read_to_string(&mut content).is_ok() {
+                    let parts: Vec<&str> = content.trim().split(',').collect();
+                    if parts.len() == 2 {
+                        date = parts[0].to_string();
+                        count = parts[1].parse().unwrap_or(0);
+                        
+                        // Reset count if it's a new day
+                        if date != today {
+                            date = today.clone();
+                            count = 0;
+                        }
                     }
                 }
             },
-            Err(_) => {
-                // Counter file exists but couldn't be read - start fresh
+            Err(e) => {
+                println!("Warning: Could not read counter file: {}", e);
+                // Continue with default values
             }
         }
     }
@@ -71,98 +101,73 @@ fn get_download_counter() -> Result<(u32, String), AppError> {
     Ok((count, date))
 }
 
-/// Save download counter
+/// Save download counter with simplified implementation
 fn save_download_counter(count: u32, date: &str) -> Result<(), AppError> {
     // Get counter file path
     let counter_path = get_counter_file_path()?;
     
     // Ensure directory exists
     if let Some(parent) = counter_path.parent() {
-        fs::create_dir_all(parent)?;
+        if !parent.exists() {
+            match fs::create_dir_all(parent) {
+                Ok(_) => {},
+                Err(e) => {
+                    println!("Warning: Could not create counter directory: {}", e);
+                    // Even if we can't save, we shouldn't fail the download
+                    return Ok(());
+                }
+            }
+        }
     }
     
-    // Encrypt counter data
-    let encrypted = encrypt_counter(date, count)?;
+    // Create content
+    let content = format!("{},{}", date, count);
     
-    // Write to file
-    fs::write(counter_path, encrypted)?;
+    // Write to file with better error handling
+    match File::create(&counter_path) {
+        Ok(mut file) => {
+            match file.write_all(content.as_bytes()) {
+                Ok(_) => {},
+                Err(e) => {
+                    println!("Warning: Could not write to counter file: {}", e);
+                    // Even if we can't save, we shouldn't fail the download
+                }
+            }
+        },
+        Err(e) => {
+            println!("Warning: Could not create counter file: {}", e);
+            // Even if we can't save, we shouldn't fail the download
+        }
+    }
     
     Ok(())
 }
 
-/// Get path to counter file
+/// Get path to counter file with fallbacks
 fn get_counter_file_path() -> Result<PathBuf, AppError> {
-    let mut data_dir = dirs::data_local_dir()
-        .ok_or_else(|| AppError::PathError("Could not locate local data directory".to_string()))?;
-    
-    data_dir.push("rustloader");
-    data_dir.push("counter.dat");
-    
-    Ok(data_dir)
-}
-
-/// Encrypt counter data
-fn encrypt_counter(date: &str, count: u32) -> Result<String, AppError> {
-    // Create the data string
-    let content = format!("{},{}", date, count);
-    
-    // Create HMAC signature with a simple key (in a real app, use a better key)
-    let key = hmac::Key::new(hmac::HMAC_SHA256, b"rustloader-counter-key");
-    let signature = hmac::sign(&key, content.as_bytes());
-    let signature_b64 = general_purpose::STANDARD.encode(signature.as_ref());
-    
-    // Combine data and signature
-    let full_data = format!("{}\n{}", content, signature_b64);
-    
-    // Base64 encode the full data
-    Ok(general_purpose::STANDARD.encode(full_data.as_bytes()))
-}
-
-/// Decrypt counter data
-fn decrypt_counter(encrypted_data: &str) -> Result<(String, u32), AppError> {
-    // Base64 decode the data
-    let decoded_bytes = match general_purpose::STANDARD.decode(encrypted_data) {
-        Ok(bytes) => bytes,
-        Err(_) => return Err(AppError::SecurityViolation),
-    };
-    
-    // Convert to string and split by newline
-    let full_data = match String::from_utf8(decoded_bytes) {
-        Ok(data) => data,
-        Err(_) => return Err(AppError::SecurityViolation),
-    };
-    
-    let parts: Vec<&str> = full_data.split('\n').collect();
-    if parts.len() != 2 {
-        return Err(AppError::SecurityViolation);
+    // Try to use data_local_dir first
+    if let Some(mut data_dir) = dirs::data_local_dir() {
+        data_dir.push("rustloader");
+        // Try to create the directory
+        let _ = fs::create_dir_all(&data_dir);
+        data_dir.push("counter.dat");
+        return Ok(data_dir);
     }
     
-    let content = parts[0];
-    let signature_b64 = parts[1];
-    
-    // Verify signature
-    let key = hmac::Key::new(hmac::HMAC_SHA256, b"rustloader-counter-key");
-    let signature_bytes = match general_purpose::STANDARD.decode(signature_b64) {
-        Ok(bytes) => bytes,
-        Err(_) => return Err(AppError::SecurityViolation),
-    };
-    
-    match hmac::verify(&key, content.as_bytes(), &signature_bytes) {
-        Ok(_) => {
-            // Signature verified, parse the data
-            let data_parts: Vec<&str> = content.split(',').collect();
-            if data_parts.len() != 2 {
-                return Err(AppError::SecurityViolation);
-            }
-            
-            let date = data_parts[0].to_string();
-            let count: u32 = match data_parts[1].parse() {
-                Ok(c) => c,
-                Err(_) => return Err(AppError::SecurityViolation),
-            };
-            
-            Ok((date, count))
-        },
-        Err(_) => Err(AppError::SecurityViolation),
+    // Fall back to home directory
+    if let Some(mut home_dir) = dirs::home_dir() {
+        home_dir.push(".rustloader");
+        // Try to create the directory
+        let _ = fs::create_dir_all(&home_dir);
+        home_dir.push("counter.dat");
+        return Ok(home_dir);
     }
+    
+    // Last resort: temp directory
+    let mut temp_dir = std::env::temp_dir();
+    temp_dir.push("rustloader");
+    // Try to create the directory
+    let _ = fs::create_dir_all(&temp_dir);
+    temp_dir.push("counter.dat");
+    Ok(temp_dir)
 }

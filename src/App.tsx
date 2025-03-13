@@ -1,242 +1,181 @@
+// src/App.tsx
+
 import React, { useState, useEffect } from 'react';
+import './App.css';
+import DownloadForm from './components/DownloadForm';
+import ProgressBar from './components/ProgressBar';
+import LicenseInfo from './components/LicenseInfo';
 
-// Define component prop types
-interface DownloadFormProps {
-  isPro: boolean;
-  onDownloadStart: () => void;
+// Import Tauri API functions
+import { invoke } from '@tauri-apps/api/tauri';
+import { listen } from '@tauri-apps/api/event';
+
+// Define app state type
+interface AppState {
+  licenseStatus: 'checking' | 'free' | 'pro';
+  isDownloading: boolean;
+  downloadProgress: number;
+  activeTab: 'download' | 'license';
+  errorMessage: string;
+  successMessage: string;
 }
 
-// Simplified DownloadForm component
-const DownloadForm: React.FC<DownloadFormProps> = ({ isPro, onDownloadStart }) => {
-  const [url, setUrl] = useState('');
-  const [isLoading, setIsLoading] = useState(false);
-
-  const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    if (!url) return;
-    
-    setIsLoading(true);
-    // Simulate download start
-    setTimeout(() => {
-      onDownloadStart();
-      setIsLoading(false);
-    }, 500);
-  };
-
-  return (
-    <div className="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6">
-      <form onSubmit={handleSubmit}>
-        <div className="mb-4">
-          <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-            Video URL
-          </label>
-          <input
-            type="text"
-            value={url}
-            onChange={(e) => setUrl(e.target.value)}
-            placeholder="https://www.youtube.com/watch?v=..."
-            className="w-full p-2 border rounded-md text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-white"
-            required
-          />
-        </div>
-        <div className="mb-4">
-          <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-            Quality
-          </label>
-          <select
-            className="w-full p-2 border rounded-md text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-white"
-          >
-            <option value="480">480p</option>
-            <option value="720">720p</option>
-            {isPro && (
-              <>
-                <option value="1080">1080p</option>
-                <option value="2160">4K</option>
-              </>
-            )}
-          </select>
-        </div>
-        <button
-          type="submit"
-          disabled={isLoading || !url}
-          className="w-full py-2 px-4 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-md shadow-sm disabled:bg-blue-300 transition-colors"
-        >
-          {isLoading ? 'Processing...' : 'Download'}
-        </button>
-      </form>
-    </div>
-  );
-};
-
-// Define license activation props
-interface LicenseActivationProps {
-  isProVersion: boolean;
-  onActivationComplete: (success: boolean) => void;
-}
-
-// Simplified LicenseActivation component
-const LicenseActivation: React.FC<LicenseActivationProps> = ({ isProVersion, onActivationComplete }) => {
-  const [licenseKey, setLicenseKey] = useState('');
-  const [email, setEmail] = useState('');
-  const [isActivating, setIsActivating] = useState(false);
-
-  const handleActivate = (e: React.FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    if (!licenseKey || !email) return;
-    
-    setIsActivating(true);
-    // Simulate activation
-    setTimeout(() => {
-      onActivationComplete(true);
-      setIsActivating(false);
-    }, 1500);
-  };
-
-  if (isProVersion) {
-    return (
-      <div className="bg-green-50 dark:bg-green-900 p-6 rounded-lg shadow-md">
-        <h2 className="text-lg font-semibold text-green-800 dark:text-green-200 mb-2">
-          Pro License Active
-        </h2>
-        <p className="text-green-700 dark:text-green-300">
-          Thank you for using Rustloader Pro!
-        </p>
-      </div>
-    );
-  }
-
-  return (
-    <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-md">
-      <h2 className="text-lg font-semibold text-gray-800 dark:text-white mb-4">
-        Activate Pro License
-      </h2>
-      <form onSubmit={handleActivate} className="space-y-4">
-        <div>
-          <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-            License Key
-          </label>
-          <input
-            type="text"
-            value={licenseKey}
-            onChange={(e) => setLicenseKey(e.target.value)}
-            placeholder="PRO-XXXX-XXXX-XXXX"
-            className="w-full p-2 border rounded-md text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-white"
-          />
-        </div>
-        <div>
-          <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-            Email
-          </label>
-          <input
-            type="email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            placeholder="your@email.com"
-            className="w-full p-2 border rounded-md text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-white"
-          />
-        </div>
-        <button
-          type="submit"
-          disabled={isActivating || !licenseKey || !email}
-          className="w-full py-2 px-4 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-md shadow-sm disabled:bg-blue-300 transition-colors"
-        >
-          {isActivating ? 'Activating...' : 'Activate License'}
-        </button>
-      </form>
-    </div>
-  );
-};
-
-// Define progress bar props
-interface ProgressBarProps {
-  progress: number;
-}
-
-// Simplified ProgressBar component
-const ProgressBar: React.FC<ProgressBarProps> = ({ progress }) => {
-  const normalizedProgress = Math.min(100, Math.max(0, progress || 0));
-  
-  return (
-    <div className="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6">
-      <div className="flex justify-between mb-2">
-        <span className="text-sm font-medium text-gray-700 dark:text-gray-300">Downloading...</span>
-        <span className="text-sm font-medium text-blue-600 dark:text-blue-400">{normalizedProgress.toFixed(1)}%</span>
-      </div>
-      <div className="h-2.5 bg-gray-200 dark:bg-gray-700 rounded-full">
-        <div 
-          className="h-2.5 bg-blue-600 rounded-full" 
-          style={{ width: `${normalizedProgress}%` }}
-        ></div>
-      </div>
-      <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">
-        {normalizedProgress >= 100 ? 'Processing file...' : 'Downloading...'}
-      </div>
-    </div>
-  );
-};
-
-// Main App component
+// Main App component with improved error handling
 const App: React.FC = () => {
-  const [licenseStatus, setLicenseStatus] = useState<'free' | 'pro'>('free'); // 'free' or 'pro'
-  const [isDownloading, setIsDownloading] = useState(false);
-  const [downloadProgress, setDownloadProgress] = useState(0);
-  const [activeTab, setActiveTab] = useState<'download' | 'license'>('download'); // 'download' or 'license'
-  
-  // Simulate checking license status on component mount
+  // Initialize state with proper typing
+  const [state, setState] = useState<AppState>({
+    licenseStatus: 'checking',
+    isDownloading: false,
+    downloadProgress: 0,
+    activeTab: 'download',
+    errorMessage: '',
+    successMessage: ''
+  });
+
+  // Check license status on mount
   useEffect(() => {
-    // In a real app, this would check with a backend API
-    const checkLicense = async (): Promise<void> => {
-      // Simulate API call delay
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      
-      // For demonstration, we'll default to 'free'
-      // In a real app, this would be set based on license verification
-      setLicenseStatus('free');
+    const checkLicense = async () => {
+      try {
+        const status = await invoke<string>('check_license');
+        setState(prev => ({ ...prev, licenseStatus: status as 'free' | 'pro' }));
+      } catch (error) {
+        console.error('Failed to check license:', error);
+        setState(prev => ({ 
+          ...prev, 
+          licenseStatus: 'free',
+          errorMessage: `License check failed: ${error}. Using free version.` 
+        }));
+      }
     };
-    
+
     checkLicense();
   }, []);
-  
-  // Simulate download progress updates
+
+  // Listen for download progress events from Rust backend
   useEffect(() => {
-    if (!isDownloading) return;
-    
-    // Simulate progress updates
-    const interval = setInterval(() => {
-      setDownloadProgress(prev => {
-        const newProgress = prev + (Math.random() * 2);
-        
-        if (newProgress >= 100) {
-          clearInterval(interval);
-          
-          // Simulate processing after download completes
-          setTimeout(() => {
-            setIsDownloading(false);
-            setDownloadProgress(0);
-          }, 3000);
-          
-          return 100;
+    const unsubscribe = listen<number>('download-progress', (event) => {
+      setState(prev => ({ ...prev, downloadProgress: event.payload }));
+
+      // When download completes
+      if (event.payload >= 100) {
+        setTimeout(() => {
+          setState(prev => ({ 
+            ...prev, 
+            isDownloading: false,
+            successMessage: 'Download completed successfully!'
+          }));
+        }, 2000); // Give time for processing to complete
+      }
+    });
+
+    // Cleanup listener on unmount
+    return () => {
+      unsubscribe.then(unsub => unsub());
+    };
+  }, []);
+
+  // Check for pending downloads on mount (useful for page refreshes)
+  useEffect(() => {
+    const checkPendingDownloads = async () => {
+      try {
+        const isDownloading = await invoke<boolean>('check_pending_downloads');
+        if (isDownloading) {
+          setState(prev => ({ 
+            ...prev, 
+            isDownloading: true,
+            downloadProgress: 0
+          }));
         }
-        return newProgress;
+      } catch (error) {
+        console.error('Failed to check pending downloads:', error);
+      }
+    };
+
+    checkPendingDownloads();
+  }, []);
+
+  // Handle download form submission
+  const handleDownloadStart = async (downloadParams: {
+    url: string;
+    quality: string;
+    format: string;
+    startTime?: string;
+    endTime?: string;
+    usePlaylist: boolean;
+    downloadSubtitles: boolean;
+    outputDir?: string;
+  }) => {
+    // Clear previous messages
+    setState(prev => ({ 
+      ...prev, 
+      errorMessage: '',
+      successMessage: ''
+    }));
+
+    try {
+      setState(prev => ({ ...prev, isDownloading: true, downloadProgress: 0 }));
+      
+      await invoke('download_video', {
+        url: downloadParams.url,
+        quality: downloadParams.quality || undefined,
+        format: downloadParams.format,
+        startTime: downloadParams.startTime || undefined,
+        endTime: downloadParams.endTime || undefined,
+        usePlaylist: downloadParams.usePlaylist,
+        downloadSubtitles: downloadParams.downloadSubtitles,
+        outputDir: downloadParams.outputDir || undefined
       });
-    }, 500);
-    
-    return () => clearInterval(interval);
-  }, [isDownloading]);
-  
-  // Handle download start
-  const handleDownloadStart = (): void => {
-    setIsDownloading(true);
-    setDownloadProgress(0);
-  };
-  
-  // Handle license activation
-  const handleLicenseActivation = (success: boolean): void => {
-    if (success) {
-      setLicenseStatus('pro');
+      
+      // Note: We don't set isDownloading to false here because we'll
+      // receive progress events that will update the state
+    } catch (error) {
+      console.error('Download failed:', error);
+      setState(prev => ({ 
+        ...prev, 
+        isDownloading: false,
+        errorMessage: `Download failed: ${error}`
+      }));
     }
   };
-  
+
+  // Handle license activation
+  const handleLicenseActivation = async (licenseKey: string, email: string) => {
+    // Clear previous messages
+    setState(prev => ({ 
+      ...prev, 
+      errorMessage: '',
+      successMessage: ''
+    }));
+
+    try {
+      const result = await invoke<string>('activate_license_key', {
+        licenseKey,
+        email
+      });
+      
+      setState(prev => ({ 
+        ...prev, 
+        licenseStatus: 'pro',
+        successMessage: result || 'License activated successfully!'
+      }));
+    } catch (error) {
+      console.error('License activation failed:', error);
+      setState(prev => ({ 
+        ...prev, 
+        errorMessage: `License activation failed: ${error}`
+      }));
+    }
+  };
+
+  // Dismiss messages
+  const dismissMessage = (type: 'error' | 'success') => {
+    if (type === 'error') {
+      setState(prev => ({ ...prev, errorMessage: '' }));
+    } else {
+      setState(prev => ({ ...prev, successMessage: '' }));
+    }
+  };
+
   return (
     <div className="min-h-screen bg-gray-100 dark:bg-gray-900 py-8 px-4">
       <div className="max-w-4xl mx-auto">
@@ -252,32 +191,67 @@ const App: React.FC = () => {
           {/* License Badge */}
           <div className="mt-3">
             <span className={`inline-block px-3 py-1 text-sm font-medium text-white rounded-full ${
-              licenseStatus === 'pro' ? 'bg-yellow-500' : 'bg-blue-500'
+              state.licenseStatus === 'checking' ? 'bg-gray-500' :
+              state.licenseStatus === 'pro' ? 'bg-yellow-500' : 'bg-blue-500'
             }`}>
-              {licenseStatus === 'pro' ? 'PRO VERSION' : 'FREE VERSION'}
+              {state.licenseStatus === 'checking' ? 'CHECKING LICENSE...' :
+               state.licenseStatus === 'pro' ? 'PRO VERSION' : 'FREE VERSION'}
             </span>
           </div>
         </header>
+        
+        {/* Error and Success Messages */}
+        {state.errorMessage && (
+          <div className="mb-6 bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative" role="alert">
+            <strong className="font-bold">Error! </strong>
+            <span className="block sm:inline">{state.errorMessage}</span>
+            <span 
+              className="absolute top-0 bottom-0 right-0 px-4 py-3 cursor-pointer"
+              onClick={() => dismissMessage('error')}
+            >
+              <svg className="fill-current h-6 w-6 text-red-500" role="button" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20">
+                <title>Close</title>
+                <path d="M14.348 14.849a1.2 1.2 0 0 1-1.697 0L10 11.819l-2.651 3.029a1.2 1.2 0 1 1-1.697-1.697l2.758-3.15-2.759-3.152a1.2 1.2 0 1 1 1.697-1.697L10 8.183l2.651-3.031a1.2 1.2 0 1 1 1.697 1.697l-2.758 3.152 2.758 3.15a1.2 1.2 0 0 1 0 1.698z"/>
+              </svg>
+            </span>
+          </div>
+        )}
+        
+        {state.successMessage && (
+          <div className="mb-6 bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded relative" role="alert">
+            <strong className="font-bold">Success! </strong>
+            <span className="block sm:inline">{state.successMessage}</span>
+            <span 
+              className="absolute top-0 bottom-0 right-0 px-4 py-3 cursor-pointer"
+              onClick={() => dismissMessage('success')}
+            >
+              <svg className="fill-current h-6 w-6 text-green-500" role="button" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20">
+                <title>Close</title>
+                <path d="M14.348 14.849a1.2 1.2 0 0 1-1.697 0L10 11.819l-2.651 3.029a1.2 1.2 0 1 1-1.697-1.697l2.758-3.15-2.759-3.152a1.2 1.2 0 1 1 1.697-1.697L10 8.183l2.651-3.031a1.2 1.2 0 1 1 1.697 1.697l-2.758 3.152 2.758 3.15a1.2 1.2 0 0 1 0 1.698z"/>
+              </svg>
+            </span>
+          </div>
+        )}
         
         {/* Tab Navigation */}
         <div className="flex border-b border-gray-200 dark:border-gray-700 mb-6">
           <button
             className={`py-2 px-4 font-medium text-sm ${
-              activeTab === 'download'
+              state.activeTab === 'download'
                 ? 'text-blue-600 dark:text-blue-400 border-b-2 border-blue-600 dark:border-blue-400'
                 : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'
             }`}
-            onClick={() => setActiveTab('download')}
+            onClick={() => setState(prev => ({ ...prev, activeTab: 'download' }))}
           >
             Download
           </button>
           <button
             className={`py-2 px-4 font-medium text-sm ${
-              activeTab === 'license'
+              state.activeTab === 'license'
                 ? 'text-blue-600 dark:text-blue-400 border-b-2 border-blue-600 dark:border-blue-400'
                 : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'
             }`}
-            onClick={() => setActiveTab('license')}
+            onClick={() => setState(prev => ({ ...prev, activeTab: 'license' }))}
           >
             License
           </button>
@@ -286,20 +260,25 @@ const App: React.FC = () => {
         {/* Main Content */}
         <div className="space-y-6">
           {/* Progress Bar (shown during download) */}
-          {isDownloading && (
-            <ProgressBar progress={downloadProgress} />
+          {state.isDownloading && (
+            <ProgressBar progress={state.downloadProgress} />
           )}
           
           {/* Active Tab Content */}
-          {activeTab === 'download' ? (
+          {state.activeTab === 'download' ? (
             <DownloadForm 
-              isPro={licenseStatus === 'pro'} 
+              isPro={state.licenseStatus === 'pro'} 
               onDownloadStart={handleDownloadStart}
+              disabled={state.isDownloading}
             />
           ) : (
-            <LicenseActivation 
-              isProVersion={licenseStatus === 'pro'} 
-              onActivationComplete={handleLicenseActivation}
+            <LicenseInfo 
+              isProVersion={state.licenseStatus === 'pro'} 
+              onActivationComplete={(success) => {
+                if (success) {
+                  setState(prev => ({ ...prev, licenseStatus: 'pro' }));
+                }
+              }}
             />
           )}
           
