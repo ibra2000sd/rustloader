@@ -6,7 +6,7 @@ export default defineConfig({
   plugins: [react()],
   clearScreen: false, // Prevent Vite from clearing the screen so that Rust errors remain visible
   server: {
-    port: 5173, // This must match the devPath URL in tauri.conf.json
+    port: 3000, // This must match the devPath URL in tauri.conf.json
     strictPort: true // Fail if the port is not available
   },
   envPrefix: ["VITE_", "TAURI_"],
