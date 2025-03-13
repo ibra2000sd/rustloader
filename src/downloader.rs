@@ -1,5 +1,13 @@
-// src/downloader.rs - Fixed type mismatch
+// src/downloader.rs
 
+use crate::error::AppError;
+use crate::ytdlp_wrapper::{YtDlpWrapper, DownloadConfig};
+use crate::utils::initialize_download_dir;
+use crate::counter::{check_daily_limit, increment_daily_count};
+use crate::promo::DownloadPromo;
+use colored::*;
+use notify_rust::Notification;
+use std::sync::Arc;
 use crate::error::AppError;
 use crate::ytdlp_wrapper::{YtDlpWrapper, DownloadConfig};
 use crate::utils::initialize_download_dir;
