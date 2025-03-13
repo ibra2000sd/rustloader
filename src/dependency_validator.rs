@@ -1,24 +1,19 @@
 // src/dependency_validator.rs
-//
-// Rewritten to validate Rust libraries instead of external dependencies
 
 use crate::error::AppError;
 use std::collections::HashMap;
+use std::process::Command;
 use colored::*;
-use std::cmp::Ordering;
+use std::ffi::OsStr;
 
-// Minimum required versions for native libraries
-const MIN_RUSTUBE_VERSION: &str = "0.6.0";
-const MIN_FFMPEG_VERSION: &str = "4.4.0";
-
-/// Dependency info structure for tracking library versions and compatibility
+/// Information about a dependency
 #[derive(Debug, Clone)]
 pub struct DependencyInfo {
     pub name: String,
     pub version: String,
     pub is_min_version: bool,
     pub is_vulnerable: bool,
-    pub features: Vec<String>,
+    pub path: Option<String>,
 }
 
 /// Validate all required dependencies
@@ -26,24 +21,61 @@ pub fn validate_dependencies() -> Result<HashMap<String, DependencyInfo>, AppErr
     let mut results = HashMap::new();
     let mut has_issues = false;
     
-    println!("{}", "Validating Rust library dependencies...".blue());
+    println!("{}", "Validating external dependencies...".blue());
     
-    // Check rustube library
-    let rustube_info = validate_rustube_library()?;
-    if !rustube_info.is_min_version || rustube_info.is_vulnerable {
-        has_issues = true;
+    // Check for yt-dlp
+    match validate_ytdlp() {
+        Ok(info) => {
+            if !info.is_min_version {
+                has_issues = true;
+                println!("{}: yt-dlp version {} is below minimum required", 
+                    "WARNING".yellow(),
+                    info.version);
+            } else {
+                println!("{}: {} ({})", "yt-dlp".green(), info.version, 
+                    info.path.as_deref().unwrap_or("unknown path"));
+            }
+            results.insert("yt-dlp".to_string(), info);
+        },
+        Err(e) => {
+            has_issues = true;
+            println!("{}: {}", "ERROR".red(), e);
+            results.insert("yt-dlp".to_string(), DependencyInfo {
+                name: "yt-dlp".to_string(),
+                version: "not found".to_string(),
+                is_min_version: false,
+                is_vulnerable: false,
+                path: None,
+            });
+        }
     }
-    results.insert("rustube".to_string(), rustube_info);
     
-    // Check ffmpeg library
-    let ffmpeg_info = validate_ffmpeg_library()?;
-    if !ffmpeg_info.is_min_version || ffmpeg_info.is_vulnerable {
-        has_issues = true;
+    // Check for ffmpeg
+    match validate_ffmpeg() {
+        Ok(info) => {
+            if !info.is_min_version {
+                has_issues = true;
+                println!("{}: ffmpeg version {} is below minimum required", 
+                    "WARNING".yellow(),
+                    info.version);
+            } else {
+                println!("{}: {} ({})", "ffmpeg".green(), info.version, 
+                    info.path.as_deref().unwrap_or("unknown path"));
+            }
+            results.insert("ffmpeg".to_string(), info);
+        },
+        Err(e) => {
+            has_issues = true;
+            println!("{}: {}", "ERROR".red(), e);
+            results.insert("ffmpeg".to_string(), DependencyInfo {
+                name: "ffmpeg".to_string(),
+                version: "not found".to_string(),
+                is_min_version: false,
+                is_vulnerable: false,
+                path: None,
+            });
+        }
     }
-    results.insert("ffmpeg".to_string(), ffmpeg_info);
-    
-    // Check other critical libraries
-    validate_other_libraries(&mut results, &mut has_issues)?;
     
     // Display summary
     if has_issues {
@@ -55,249 +87,234 @@ pub fn validate_dependencies() -> Result<HashMap<String, DependencyInfo>, AppErr
     Ok(results)
 }
 
-/// Validate rustube library
-fn validate_rustube_library() -> Result<DependencyInfo, AppError> {
-    // First try to detect dynamically linked rustube
-    let bundled_rustube = true; // Assume bundled until proven otherwise
+/// Validate yt-dlp installation
+fn validate_ytdlp() -> Result<DependencyInfo, AppError> {
+    // First check if yt-dlp is in PATH
+    let path = find_executable("yt-dlp")?;
     
-    #[cfg(not(feature = "rustube"))]
-    {
-        println!("{}: {}", "rustube".green(), "Using bundled version");
-        
-        // Get rustube version from Cargo.toml (in a real implementation)
-        let version = env!("CARGO_PKG_VERSION");
-        
-        return Ok(DependencyInfo {
-            name: "rustube".to_string(),
-            version: version.to_string(),
-            is_min_version: true,
-            is_vulnerable: false,
-            features: vec!["default".to_string()],
-        });
+    // Get version
+    let output = Command::new(&path)
+        .arg("--version")
+        .output()
+        .map_err(|e| AppError::MissingDependency(format!("Failed to run yt-dlp: {}", e)))?;
+    
+    if !output.status.success() {
+        return Err(AppError::MissingDependency("yt-dlp returned error status".to_string()));
     }
     
-    #[cfg(feature = "rustube")]
-    {
-        use rustube::{self, VideoFetcher};
-        
-        println!("{}: {}", "rustube".green(), "Checking external crate");
-        
-        let version = rustube::CRATE_VERSION;
-        
-        // Check minimum version
-        let is_min_version = compare_versions(version, MIN_RUSTUBE_VERSION);
-        
-        if !is_min_version {
-            println!("{}: Version {} is below minimum required ({})", 
-                "WARNING".yellow(),
-                version,
-                MIN_RUSTUBE_VERSION);
-        }
-        
-        // Check for known vulnerabilities (in a real implementation, this would be more comprehensive)
-        let is_vulnerable = false;
-        
-        // Get enabled features
-        let features = vec!["default".to_string()]; // Simplified
-        
-        return Ok(DependencyInfo {
-            name: "rustube".to_string(),
-            version: version.to_string(),
-            is_min_version,
-            is_vulnerable,
-            features,
-        });
-    }
+    let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
     
-    // If no FFmpeg features are enabled, use bundled version
-    println!("{}: {}", "rustube".green(), "Using fallback version");
+    // Check for minimum version (2022.01.21 or later)
+    let is_min_version = is_ytdlp_version_sufficient(&version);
+    
+    // Check for known vulnerabilities (can be expanded)
+    let is_vulnerable = false;
     
     Ok(DependencyInfo {
-        name: "rustube".to_string(),
-        version: "bundled".to_string(),
-        is_min_version: true,
-        is_vulnerable: false,
-        features: vec!["default".to_string()],
+        name: "yt-dlp".to_string(),
+        version,
+        is_min_version,
+        is_vulnerable,
+        path: Some(path),
     })
 }
 
-/// Validate ffmpeg library
-fn validate_ffmpeg_library() -> Result<DependencyInfo, AppError> {
-    #[cfg(feature = "ffmpeg-next")]
-    {
-        use ffmpeg_next as ffmpeg;
-        
-        println!("{}: {}", "ffmpeg-next".green(), "Checking crate");
-        
-        // Initialize FFmpeg
-        ffmpeg::init().map_err(|e| {
-            println!("{}: {}", "ERROR".red(), e);
-            AppError::MissingDependency(format!("FFmpeg initialization failed: {}", e))
-        })?;
-        
-        // Get the version
-        let version = unsafe {
-            let version_ptr = ffmpeg::ffi::avutil::av_version_info();
-            if version_ptr.is_null() {
-                "unknown".to_string()
-            } else {
-                std::ffi::CStr::from_ptr(version_ptr)
-                    .to_string_lossy()
-                    .to_string()
-            }
-        };
-        
-        // Check minimum version
-        let is_min_version = !version.contains("unknown");
-        
-        // Check for known vulnerabilities
-        let is_vulnerable = false;
-        
-        // Get enabled features
-        let mut features = Vec::new();
-        
-        if ffmpeg::codec::encoder::find_by_name("libx264").is_some() {
-            features.push("libx264".to_string());
-        }
-        
-        if ffmpeg::codec::encoder::find_by_name("libmp3lame").is_some() {
-            features.push("libmp3lame".to_string());
-        }
-        
-        println!("{}: {} with features: {}", 
-            "ffmpeg-next".green(), 
-            version, 
-            features.join(", "));
-        
-        return Ok(DependencyInfo {
-            name: "ffmpeg-next".to_string(),
-            version,
-            is_min_version,
-            is_vulnerable,
-            features,
-        });
+/// Validate ffmpeg installation
+fn validate_ffmpeg() -> Result<DependencyInfo, AppError> {
+    // First check if ffmpeg is in PATH
+    let path = find_executable("ffmpeg")?;
+    
+    // Get version
+    let output = Command::new(&path)
+        .arg("-version")
+        .output()
+        .map_err(|e| AppError::MissingDependency(format!("Failed to run ffmpeg: {}", e)))?;
+    
+    if !output.status.success() {
+        return Err(AppError::MissingDependency("ffmpeg returned error status".to_string()));
     }
     
-    #[cfg(feature = "ffmpeg4")]
-    {
-        use ffmpeg4 as ffmpeg;
-        
-        println!("{}: {}", "ffmpeg4".green(), "Checking crate");
-        
-        // Initialize FFmpeg
-        ffmpeg::init().map_err(|e| {
-            println!("{}: {}", "ERROR".red(), e);
-            AppError::MissingDependency(format!("FFmpeg initialization failed: {}", e))
-        })?;
-        
-        // Get the version
-        let version = unsafe {
-            let version_ptr = ffmpeg::ffi::av_version_info();
-            if version_ptr.is_null() {
-                "unknown".to_string()
-            } else {
-                std::ffi::CStr::from_ptr(version_ptr)
-                    .to_string_lossy()
-                    .to_string()
-            }
-        };
-        
-        // Check minimum version
-        let is_min_version = !version.contains("unknown");
-        
-        // Check for known vulnerabilities
-        let is_vulnerable = false;
-        
-        // Get enabled features
-        let mut features = Vec::new();
-        
-        if ffmpeg::codec::encoder::find_by_name("libx264").is_some() {
-            features.push("libx264".to_string());
-        }
-        
-        if ffmpeg::codec::encoder::find_by_name("libmp3lame").is_some() {
-            features.push("libmp3lame".to_string());
-        }
-        
-        println!("{}: {} with features: {}", 
-            "ffmpeg4".green(), 
-            version, 
-            features.join(", "));
-        
-        return Ok(DependencyInfo {
-            name: "ffmpeg4".to_string(),
-            version,
-            is_min_version,
-            is_vulnerable,
-            features,
-        });
-    }
+    let output_str = String::from_utf8_lossy(&output.stdout);
     
-    // If no FFmpeg features are enabled, use bundled version
-    println!("{}: {}", "ffmpeg".green(), "Using bundled version");
+    // Extract version from output
+    let version = match output_str.lines().next() {
+        Some(line) => {
+            if let Some(version_start) = line.find("version ") {
+                let version_str = &line[version_start + 8..];
+                if let Some(version_end) = version_str.find(' ') {
+                    version_str[..version_end].to_string()
+                } else {
+                    version_str.to_string()
+                }
+            } else {
+                "unknown".to_string()
+            }
+        },
+        None => "unknown".to_string(),
+    };
+    
+    // Check for minimum version (4.0 or later)
+    let is_min_version = is_ffmpeg_version_sufficient(&version);
+    
+    // Check for known vulnerabilities (can be expanded)
+    let is_vulnerable = false;
     
     Ok(DependencyInfo {
         name: "ffmpeg".to_string(),
-        version: "bundled".to_string(),
-        is_min_version: true,
-        is_vulnerable: false,
-        features: vec!["default".to_string()],
+        version,
+        is_min_version,
+        is_vulnerable,
+        path: Some(path),
     })
 }
 
-/// Validate additional important libraries
-fn validate_other_libraries(
-    results: &mut HashMap<String, DependencyInfo>,
-    has_issues: &mut bool
-) -> Result<(), AppError> {
-    // Check reqwest
-    let reqwest_version = env!("CARGO_PKG_VERSION_MINOR");
-    results.insert("reqwest".to_string(), DependencyInfo {
-        name: "reqwest".to_string(),
-        version: reqwest_version.to_string(),
-        is_min_version: true,
-        is_vulnerable: false,
-        features: vec!["json".to_string(), "stream".to_string()],
-    });
+/// Find an executable in PATH
+fn find_executable<S: AsRef<OsStr>>(name: S) -> Result<String, AppError> {
+    let which_command = if cfg!(target_os = "windows") {
+        "where"
+    } else {
+        "which"
+    };
     
-    // Check tokio
-    let tokio_version = "1.0.0"; // Simplified - in real code we'd detect the actual version
+    let output = Command::new(which_command)
+        .arg(name.as_ref())
+        .output()
+        .map_err(|e| AppError::MissingDependency(format!("Failed to locate executable: {}", e)))?;
     
-    results.insert("tokio".to_string(), DependencyInfo {
-        name: "tokio".to_string(),
-        version: tokio_version.to_string(),
-        is_min_version: true,
-        is_vulnerable: false,
-        features: vec!["full".to_string()],
-    });
+    if !output.status.success() {
+        return Err(AppError::MissingDependency(format!("Executable '{}' not found in PATH", 
+            name.as_ref().to_string_lossy())));
+    }
     
-    Ok(())
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(path)
 }
 
-/// Compare two version strings
-fn compare_versions(version1: &str, version2: &str) -> bool {
-    let v1_parts: Vec<&str> = version1.split('.').collect();
-    let v2_parts: Vec<&str> = version2.split('.').collect();
+/// Check if yt-dlp version is sufficient
+fn is_ytdlp_version_sufficient(version: &str) -> bool {
+    // Parse version format YYYY.MM.DD
+    let parts: Vec<&str> = version.split('.').collect();
     
-    for i in 0..std::cmp::min(v1_parts.len(), v2_parts.len()) {
-        let v1_part = v1_parts[i].parse::<u32>().unwrap_or(0);
-        let v2_part = v2_parts[i].parse::<u32>().unwrap_or(0);
-        
-        match v1_part.cmp(&v2_part) {
-            Ordering::Less => return false,
-            Ordering::Greater => return true,
-            Ordering::Equal => continue,
+    if parts.len() >= 3 {
+        if let (Ok(year), Ok(month), Ok(day)) = (
+            parts[0].parse::<u32>(),
+            parts[1].parse::<u32>(),
+            parts[2].parse::<u32>(),
+        ) {
+            // Minimum required version is 2022.01.21
+            return (year > 2022) || 
+                   (year == 2022 && month > 1) || 
+                   (year == 2022 && month == 1 && day >= 21);
         }
     }
     
-    v1_parts.len() >= v2_parts.len() // If all common parts are equal, longer version is considered greater
+    // If we can't parse the version, assume it's not sufficient
+    false
+}
+
+/// Check if ffmpeg version is sufficient
+fn is_ffmpeg_version_sufficient(version: &str) -> bool {
+    // Parse version like "4.2.7" or "4.4.1"
+    let parts: Vec<&str> = version.split('.').collect();
+    
+    if parts.len() >= 2 {
+        if let (Ok(major), Ok(_minor)) = (
+            parts[0].parse::<u32>(),
+            parts[1].parse::<u32>(),
+        ) {
+            // Minimum required version is 4.0
+            return major >= 4;
+        }
+    }
+    
+    // If we can't parse the version, assume it's not sufficient
+    false
 }
 
 /// Install or update a dependency
 pub fn install_or_update_dependency(name: &str) -> Result<(), AppError> {
-    println!("{}", "Rustloader now uses native Rust libraries instead of external tools.".green());
-    println!("The dependency '{}' is bundled with the application.", name);
+    match name {
+        "yt-dlp" => install_ytdlp(),
+        "ffmpeg" => install_ffmpeg(),
+        _ => Err(AppError::General(format!("Unknown dependency: {}", name))),
+    }
+}
+
+/// Install or update yt-dlp
+fn install_ytdlp() -> Result<(), AppError> {
+    println!("{}", "Installing/updating yt-dlp...".blue());
     
-    // No installation needed since we're using Rust libraries
-    Ok(())
+    let result = if cfg!(target_os = "windows") {
+        // On Windows, we can use pip
+        Command::new("pip")
+            .args(["install", "--upgrade", "yt-dlp"])
+            .status()
+    } else if cfg!(target_os = "macos") {
+        // On macOS, try homebrew first
+        let brew_result = Command::new("brew")
+            .args(["install", "yt-dlp"])
+            .status();
+            
+        if brew_result.is_err() || !brew_result.as_ref().map(|s| s.success()).unwrap_or(false) {
+            // Fall back to pip
+            Command::new("pip3")
+                .args(["install", "--user", "--upgrade", "yt-dlp"])
+                .status()
+        } else {
+            brew_result
+        }
+    } else {
+        // On Linux, try pip
+        Command::new("pip3")
+            .args(["install", "--user", "--upgrade", "yt-dlp"])
+            .status()
+    };
+    
+    match result {
+        Ok(status) if status.success() => {
+            println!("{}", "yt-dlp installed/updated successfully.".green());
+            Ok(())
+        },
+        Ok(_) => {
+            Err(AppError::General("yt-dlp installation failed".to_string()))
+        },
+        Err(e) => {
+            Err(AppError::General(format!("Error installing yt-dlp: {}", e)))
+        }
+    }
+}
+
+/// Install or update ffmpeg
+fn install_ffmpeg() -> Result<(), AppError> {
+    println!("{}", "Installing ffmpeg...".blue());
+    
+    let result = if cfg!(target_os = "windows") {
+        // On Windows, we need to guide the user
+        println!("{}", "Automatic installation of ffmpeg is not supported on Windows.".yellow());
+        println!("{}", "Please download and install ffmpeg manually from: https://ffmpeg.org/download.html".yellow());
+        return Err(AppError::General("Manual installation required".to_string()));
+    } else if cfg!(target_os = "macos") {
+        // On macOS, use homebrew
+        Command::new("brew")
+            .args(["install", "ffmpeg"])
+            .status()
+    } else {
+        // On Linux, use apt, assuming Debian/Ubuntu
+        Command::new("sudo")
+            .args(["apt", "install", "-y", "ffmpeg"])
+            .status()
+    };
+    
+    match result {
+        Ok(status) if status.success() => {
+            println!("{}", "ffmpeg installed successfully.".green());
+            Ok(())
+        },
+        Ok(_) => {
+            Err(AppError::General("ffmpeg installation failed".to_string()))
+        },
+        Err(e) => {
+            Err(AppError::General(format!("Error installing ffmpeg: {}", e)))
+        }
+    }
 }
