@@ -1,14 +1,17 @@
 import React, { useState, useEffect } from 'react';
 
-// In a real application, you would import your components from their proper paths
-// For this demonstration, we'll create simplified inline components
+// Define component prop types
+interface DownloadFormProps {
+  isPro: boolean;
+  onDownloadStart: () => void;
+}
 
 // Simplified DownloadForm component
-const DownloadForm = ({ isPro, onDownloadStart }) => {
+const DownloadForm: React.FC<DownloadFormProps> = ({ isPro, onDownloadStart }) => {
   const [url, setUrl] = useState('');
   const [isLoading, setIsLoading] = useState(false);
 
-  const handleSubmit = (e) => {
+  const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (!url) return;
     
@@ -65,13 +68,19 @@ const DownloadForm = ({ isPro, onDownloadStart }) => {
   );
 };
 
+// Define license activation props
+interface LicenseActivationProps {
+  isProVersion: boolean;
+  onActivationComplete: (success: boolean) => void;
+}
+
 // Simplified LicenseActivation component
-const LicenseActivation = ({ isProVersion, onActivationComplete }) => {
+const LicenseActivation: React.FC<LicenseActivationProps> = ({ isProVersion, onActivationComplete }) => {
   const [licenseKey, setLicenseKey] = useState('');
   const [email, setEmail] = useState('');
   const [isActivating, setIsActivating] = useState(false);
 
-  const handleActivate = (e) => {
+  const handleActivate = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (!licenseKey || !email) return;
     
@@ -138,8 +147,13 @@ const LicenseActivation = ({ isProVersion, onActivationComplete }) => {
   );
 };
 
+// Define progress bar props
+interface ProgressBarProps {
+  progress: number;
+}
+
 // Simplified ProgressBar component
-const ProgressBar = ({ progress }) => {
+const ProgressBar: React.FC<ProgressBarProps> = ({ progress }) => {
   const normalizedProgress = Math.min(100, Math.max(0, progress || 0));
   
   return (
@@ -162,16 +176,16 @@ const ProgressBar = ({ progress }) => {
 };
 
 // Main App component
-const App = () => {
-  const [licenseStatus, setLicenseStatus] = useState('free'); // 'free' or 'pro'
+const App: React.FC = () => {
+  const [licenseStatus, setLicenseStatus] = useState<'free' | 'pro'>('free'); // 'free' or 'pro'
   const [isDownloading, setIsDownloading] = useState(false);
   const [downloadProgress, setDownloadProgress] = useState(0);
-  const [activeTab, setActiveTab] = useState('download'); // 'download' or 'license'
+  const [activeTab, setActiveTab] = useState<'download' | 'license'>('download'); // 'download' or 'license'
   
   // Simulate checking license status on component mount
   useEffect(() => {
     // In a real app, this would check with a backend API
-    const checkLicense = async () => {
+    const checkLicense = async (): Promise<void> => {
       // Simulate API call delay
       await new Promise(resolve => setTimeout(resolve, 1000));
       
@@ -211,13 +225,13 @@ const App = () => {
   }, [isDownloading]);
   
   // Handle download start
-  const handleDownloadStart = () => {
+  const handleDownloadStart = (): void => {
     setIsDownloading(true);
     setDownloadProgress(0);
   };
   
   // Handle license activation
-  const handleLicenseActivation = (success) => {
+  const handleLicenseActivation = (success: boolean): void => {
     if (success) {
       setLicenseStatus('pro');
     }

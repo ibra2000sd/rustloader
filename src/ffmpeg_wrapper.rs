@@ -1,15 +1,17 @@
 // src/ffmpeg_wrapper.rs
 
+#![allow(dead_code)] // Silence all dead code warnings for this file
+
 use crate::error::AppError;
 use colored::*;
 use indicatif::{ProgressBar, ProgressStyle};
 use regex::Regex;
 use std::path::{Path, PathBuf};
 use std::process::{Stdio};
+use std::sync::atomic::{AtomicU64, Ordering}; // Fixed braces here
+use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 
 /// FFmpeg wrapper for audio/video conversion
 pub struct FFmpegWrapper {

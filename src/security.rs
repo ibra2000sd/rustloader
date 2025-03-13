@@ -3,6 +3,8 @@
 //! This module provides centralized security settings, validation functions,
 //! and utilities to enhance the overall security posture of the application.
 
+#![allow(dead_code)] // Add this to silence all dead code warnings in this file
+
 use crate::error::AppError;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};

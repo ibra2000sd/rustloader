@@ -324,13 +324,13 @@ const DownloadForm: React.FC<DownloadFormProps> = ({ isPro, onDownloadStart }) =
 
         {/* Submit Button */}
         <div className="pt-2">
-          <button
-            type="submit"
-            disabled={isLoading || !url || (startTime && !validateTimeFormat(startTime)) || (endTime && !validateTimeFormat(endTime))}
-            className="w-full py-2 px-4 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-md shadow-sm disabled:bg-blue-300 transition-colors"
-          >
-            {isLoading ? 'Processing...' : 'Download'}
-          </button>
+        <button
+  type="submit"
+  disabled={!!(isLoading || !url || (startTime && !validateTimeFormat(startTime)) || (endTime && !validateTimeFormat(endTime)))}
+  className="w-full py-2 px-4 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-md shadow-sm disabled:bg-blue-300 transition-colors"
+>
+  {isLoading ? 'Processing...' : 'Download'}
+</button>
         </div>
       </form>
     </div>
