@@ -1,4 +1,5 @@
 // src/main.rs
+// Updated to use native Rust libraries instead of external tools
 
 mod cli;
 mod downloader;
@@ -74,62 +75,52 @@ async fn main() -> Result<(), AppError> {
         println!("\n{}\n", promo.get_random_message().bright_yellow());
     }
     
-    // Initialize FFmpeg
+    // Initialize native FFmpeg library
     if let Err(e) = ffmpeg_wrapper::init() {
-        eprintln!("{}: {}", "Error initializing FFmpeg".red(), e);
-        eprintln!("{}", "Please ensure FFmpeg is installed and in your PATH.".yellow());
-        eprintln!("{}", "You can download it from: https://ffmpeg.org/download.html".yellow());
+        eprintln!("{}: {}", "Error initializing FFmpeg libraries".red(), e);
+        eprintln!("{}", "This may indicate missing codecs or invalid installation.".yellow());
         return Err(e);
     }
     
-    // Perform enhanced dependency validation
-    println!("{}", "Performing enhanced dependency validation...".blue());
+    // Perform enhanced dependency validation using native libraries
+    println!("{}", "Validating native Rust libraries...".blue());
     
     match validate_dependencies() {
         Ok(deps) => {
             // Check if any dependencies have issues
             let mut has_issues = false;
             
-            // Check yt-dlp status
-            if let Some(info) = deps.get("yt-dlp") {
+            // Check rustube (native YT-DL) status
+            if let Some(info) = deps.get("rustube") {
                 if !info.is_min_version || info.is_vulnerable {
                     has_issues = true;
-                    println!("{}", "yt-dlp needs to be updated.".yellow());
-                    println!("Would you like to update yt-dlp now? (y/n):");
-                    let mut input = String::new();
-                    std::io::stdin().read_line(&mut input)?;
-                    if input.trim().eq_ignore_ascii_case("y") {
-                        install_or_update_dependency("yt-dlp")?;
-                    } else {
-                        println!("{}", "Continuing with the current version. Some features may not work correctly.".yellow());
-                    }
+                    println!("{}", "rustube library is outdated or has vulnerabilities.".yellow());
+                    println!("This is integrated with the app, please update to the latest Rustloader version.");
                 }
-            } else {
-                has_issues = true;
-                println!("{}", "yt-dlp is not installed. Would you like to install it now? (y/n):".yellow());
-                let mut input = String::new();
-                std::io::stdin().read_line(&mut input)?;
-                if input.trim().eq_ignore_ascii_case("y") {
-                    install_or_update_dependency("yt-dlp")?;
-                } else {
-                    println!("{}", "yt-dlp is required. Please install it manually and try again.".red());
-                    return Err(AppError::MissingDependency("yt-dlp installation declined".to_string()));
+            }
+            
+            // Check ffmpeg library status
+            if let Some(info) = deps.get("ffmpeg") {
+                if !info.is_min_version || info.is_vulnerable {
+                    has_issues = true;
+                    println!("{}", "FFmpeg library is outdated or has vulnerabilities.".yellow());
+                    println!("This is integrated with the app, please update to the latest Rustloader version.");
                 }
             }
             
             if !has_issues {
-                println!("{}", "All dependencies passed validation.".green());
+                println!("{}", "All native Rust libraries passed validation.".green());
             }
         },
         Err(e) => {
-            println!("{}: {}", "Dependency validation failed".red(), e);
+            println!("{}: {}", "Library validation failed".red(), e);
             println!("Would you like to continue anyway? (y/n):");
             let mut input = String::new();
             std::io::stdin().read_line(&mut input)?;
             if !input.trim().eq_ignore_ascii_case("y") {
                 return Err(e);
             } else {
-                println!("{}", "Continuing with potential dependency issues...".yellow());
+                println!("{}", "Continuing with potential library issues...".yellow());
             }
         }
     }

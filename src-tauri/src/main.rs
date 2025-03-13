@@ -78,9 +78,9 @@ async fn download_video(
     output_dir: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    // Initialize FFmpeg
+    // Initialize FFmpeg - now using native Rust library
     if let Err(e) = ffmpeg_wrapper::init() {
-        return Err(format!("Error initializing FFmpeg: {}", e));
+        return Err(format!("Error initializing FFmpeg libraries: {}", e));
     }
 
     // Check if a download is already in progress
@@ -170,7 +170,13 @@ fn main() {
     // Build and run the Tauri application
     tauri::Builder::default()
         .setup(|app| {
-            // Additional setup code can be added here if necessary
+            // Initialize rustloader's FFmpeg library and other dependencies
+            println!("Initializing native Rust libraries...");
+            if let Err(e) = ffmpeg_wrapper::init() {
+                eprintln!("Warning: FFmpeg initialization failed: {}", e);
+                // We continue anyway, as we'll check again when downloading
+            }
+            
             println!("Tauri application is starting up...");
             Ok(())
         })

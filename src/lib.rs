@@ -1,4 +1,5 @@
 // src/lib.rs
+// Updated to use native Rust libraries instead of external tools
 
 pub mod cli;
 pub mod downloader;
@@ -17,3 +18,10 @@ pub const VERSION: &str = "1.0.0";
 pub use error::AppError;
 pub use youtube_dl_wrapper::{YoutubeDlWrapper, DownloadConfig};
 pub use downloader::DownloadProgress;
+
+// Re-export necessary external libraries for downstream use
+pub use rustube;
+#[cfg(feature = "ffmpeg-next")]
+pub use ffmpeg_next as ffmpeg;
+#[cfg(feature = "ffmpeg4")]
+pub use ffmpeg4 as ffmpeg;
