@@ -8,7 +8,7 @@ pub mod error;
 pub mod security;
 pub mod utils;
 pub mod license;
-pub mod ytdlp_wrapper;  // Changed from youtube_dl_wrapper
+pub mod ytdlp_wrapper;
 pub mod ffmpeg_wrapper;
 pub mod promo;         // New module for promotional messages
 pub mod counter;       // New module for download counting
@@ -18,5 +18,5 @@ pub const VERSION: &str = "1.0.0";
 
 // You can optionally re-export commonly used types
 pub use error::AppError;
-pub use ytdlp_wrapper::{YtDlpWrapper, DownloadConfig};  // Changed
+pub use ytdlp_wrapper::{YtDlpWrapper, DownloadConfig};
 pub use downloader::DownloadProgress;

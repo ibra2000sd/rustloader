@@ -1,133 +1,177 @@
-import React, { useState } from 'react';
-import './LicenseInfo.css';
+import { useState } from 'react';
 
-interface LicenseInfoProps {
-  licenseType: 'free' | 'pro';
-  onActivate: (licenseKey: string, email: string) => void;
+interface LicenseActivationProps {
+  isProVersion: boolean;
+  onActivationComplete: (success: boolean) => void;
 }
 
-const LicenseInfo: React.FC<LicenseInfoProps> = ({ licenseType, onActivate }) => {
-  const [showActivation, setShowActivation] = useState(false);
+const LicenseActivation: React.FC<LicenseActivationProps> = ({ isProVersion, onActivationComplete }) => {
   const [licenseKey, setLicenseKey] = useState('');
   const [email, setEmail] = useState('');
-  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isActivating, setIsActivating] = useState(false);
+  const [errorMessage, setErrorMessage] = useState('');
+  const [successMessage, setSuccessMessage] = useState('');
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const validateEmail = (email: string): boolean => {
+    return /\S+@\S+\.\S+/.test(email);
+  };
+
+  const validateLicenseKey = (key: string): boolean => {
+    // PRO-XXXX-XXXX-XXXX format
+    return /^PRO-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(key);
+  };
+
+  const handleActivate = async (e: React.FormEvent): Promise<void> => {
     e.preventDefault();
     
-    if (!licenseKey || !email) {
-      alert('Please enter both license key and email');
+    // Reset messages
+    setErrorMessage('');
+    setSuccessMessage('');
+    
+    // Basic validation
+    if (!licenseKey) {
+      setErrorMessage('Please enter your license key');
       return;
     }
     
-    setIsSubmitting(true);
+    if (!email) {
+      setErrorMessage('Please enter your email address');
+      return;
+    }
+    
+    if (!validateEmail(email)) {
+      setErrorMessage('Please enter a valid email address');
+      return;
+    }
+    
+    if (!validateLicenseKey(licenseKey)) {
+      setErrorMessage('License key should be in the format PRO-XXXX-XXXX-XXXX');
+      return;
+    }
+    
+    // Start activation process
+    setIsActivating(true);
     
     try {
-      await onActivate(licenseKey, email);
-      // If successful, we'll get a new license status from the parent component
-      // which will update the UI accordingly
-      setShowActivation(false);
-      setLicenseKey('');
-      setEmail('');
+      // Mock license activation - in a real app, this would call your backend API
+      // For demo purposes, we're simulating a successful activation
+      setTimeout(() => {
+        setSuccessMessage('License activated successfully!');
+        setLicenseKey('');
+        setEmail('');
+        
+        // Notify parent component
+        if (onActivationComplete) {
+          onActivationComplete(true);
+        }
+        setIsActivating(false);
+      }, 1500);
     } catch (error) {
-      console.error('License activation error:', error);
-    } finally {
-      setIsSubmitting(false);
+      setErrorMessage(`Activation failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      
+      // Notify parent component
+      if (onActivationComplete) {
+        onActivationComplete(false);
+      }
+      setIsActivating(false);
     }
   };
 
-  // Show different content based on license type
+  // If already on Pro version, show different content
+  if (isProVersion) {
+    return (
+      <div className="bg-green-50 dark:bg-green-900 p-6 rounded-lg shadow-md">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-semibold text-green-800 dark:text-green-200">Pro License Active</h2>
+          <span className="px-3 py-1 bg-green-500 text-white text-sm font-medium rounded-full">
+            ACTIVE
+          </span>
+        </div>
+        <p className="text-green-700 dark:text-green-300 mb-4">
+          Thank you for using Rustloader Pro! You have access to all premium features:
+        </p>
+        <ul className="list-disc list-inside text-green-700 dark:text-green-300 space-y-1 mb-4">
+          <li>4K/8K video quality downloads</li>
+          <li>High-fidelity audio formats (FLAC, 320kbps MP3)</li>
+          <li>No daily download limits</li>
+          <li>Multi-threaded downloads for maximum speed</li>
+          <li>Priority updates and support</li>
+        </ul>
+      </div>
+    );
+  }
+
   return (
-    <div className="license-info-container">
-      <div className="license-info-header">
-        <h2>License Information</h2>
-        {licenseType === 'free' && (
-          <button 
-            className="upgrade-button"
-            onClick={() => setShowActivation(!showActivation)}
-          >
-            {showActivation ? 'Cancel' : 'Activate License'}
-          </button>
-        )}
-      </div>
+    <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-md">
+      <h2 className="text-lg font-semibold text-gray-800 dark:text-white mb-4">
+        Activate Pro License
+      </h2>
       
-      <div className="license-status">
-        {licenseType === 'pro' ? (
-          <div className="pro-license-info">
-            <h3>Pro License Active</h3>
-            <p>Thank you for using Rustloader Pro!</p>
-            <ul className="license-features">
-              <li>✅ High-quality downloads (1080p, 4K)</li>
-              <li>✅ Unlimited daily downloads</li>
-              <li>✅ Additional audio formats</li>
-              <li>✅ Priority support</li>
-            </ul>
-          </div>
-        ) : (
-          <div className="free-license-info">
-            <h3>Free License</h3>
-            <p>You're using the free version of Rustloader.</p>
-            <ul className="license-features">
-              <li>✅ Downloads up to 720p</li>
-              <li>✅ Basic MP3 audio (128kbps)</li>
-              <li>✅ Limited to 5 downloads per day</li>
-              <li>❌ High-quality video (1080p, 4K)</li>
-            </ul>
-            <p className="pro-promo">
-              Upgrade to Pro for unlimited downloads and higher quality!
-            </p>
-          </div>
-        )}
-      </div>
-      
-      {showActivation && licenseType === 'free' && (
-        <div className="license-activation">
-          <h3>Activate Pro License</h3>
-          <form onSubmit={handleSubmit}>
-            <div className="form-group">
-              <label htmlFor="license-key">License Key</label>
-              <input
-                type="text"
-                id="license-key"
-                value={licenseKey}
-                onChange={(e) => setLicenseKey(e.target.value)}
-                placeholder="PRO-XXXX-XXXX-XXXX"
-                disabled={isSubmitting}
-                required
-              />
-            </div>
-            
-            <div className="form-group">
-              <label htmlFor="email">Email</label>
-              <input
-                type="email"
-                id="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="your@email.com"
-                disabled={isSubmitting}
-                required
-              />
-            </div>
-            
-            <div className="form-group">
-              <button 
-                type="submit" 
-                className="activate-button"
-                disabled={isSubmitting || !licenseKey || !email}
-              >
-                {isSubmitting ? 'Activating...' : 'Activate License'}
-              </button>
-            </div>
-          </form>
-          
-          <p className="purchase-note">
-            Don't have a license? <a href="https://rustloader.com/pro" target="_blank" rel="noreferrer">Purchase Pro</a>
-          </p>
+      {errorMessage && (
+        <div className="bg-red-100 dark:bg-red-900 text-red-700 dark:text-red-200 p-3 rounded-md mb-4 text-sm">
+          {errorMessage}
         </div>
       )}
+      
+      {successMessage && (
+        <div className="bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-200 p-3 rounded-md mb-4 text-sm">
+          {successMessage}
+        </div>
+      )}
+      
+      <form onSubmit={handleActivate} className="space-y-4">
+        <div className="space-y-2">
+          <label htmlFor="license-key" className="block text-sm font-medium text-gray-700 dark:text-gray-300">
+            License Key
+          </label>
+          <input
+            type="text"
+            id="license-key"
+            value={licenseKey}
+            onChange={(e) => setLicenseKey(e.target.value.toUpperCase())}
+            placeholder="PRO-XXXX-XXXX-XXXX"
+            className="w-full p-2 border rounded-md text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-white"
+            disabled={isActivating}
+          />
+          <p className="text-xs text-gray-500 dark:text-gray-400">
+            Enter your license key in the format PRO-XXXX-XXXX-XXXX
+          </p>
+        </div>
+        
+        <div className="space-y-2">
+          <label htmlFor="email" className="block text-sm font-medium text-gray-700 dark:text-gray-300">
+            Email Address
+          </label>
+          <input
+            type="email"
+            id="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            placeholder="your@email.com"
+            className="w-full p-2 border rounded-md text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-white"
+            disabled={isActivating}
+          />
+          <p className="text-xs text-gray-500 dark:text-gray-400">
+            Enter the email address used to purchase your license
+          </p>
+        </div>
+        
+        <button
+          type="submit"
+          disabled={isActivating || !licenseKey || !email}
+          className="w-full py-2 px-4 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-md shadow-sm disabled:bg-blue-300 transition-colors"
+        >
+          {isActivating ? 'Activating...' : 'Activate License'}
+        </button>
+      </form>
+      
+      <div className="mt-6 pt-4 border-t border-gray-200 dark:border-gray-700">
+        <p className="text-sm text-gray-600 dark:text-gray-400 text-center">
+          Don't have a license? <a href="#" className="text-blue-600 dark:text-blue-400 hover:underline">Purchase Pro</a>
+        </p>
+      </div>
     </div>
   );
 };
 
-export default LicenseInfo;
+export default LicenseActivation;

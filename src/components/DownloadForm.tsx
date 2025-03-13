@@ -1,23 +1,20 @@
-import React, { useState } from 'react';
-import { open } from '@tauri-apps/api/dialog';
-import './DownloadForm.css';
+import { useState, useEffect } from 'react';
 
-interface DownloadFormProps {
-  onSubmit: (options: {
-    url: string;
-    quality: string;
-    format: string;
-    startTime?: string;
-    endTime?: string;
-    usePlaylist: boolean;
-    downloadSubtitles: boolean;
-    outputDir?: string;
-  }) => void;
-  isPro: boolean;
-  isDisabled: boolean;
+interface VideoInfo {
+  title: string;
+  uploader: string;
+  duration: number;
+  views: number;
+  likes: number;
+  uploadDate: string;
 }
 
-const DownloadForm: React.FC<DownloadFormProps> = ({ onSubmit, isPro, isDisabled }) => {
+interface DownloadFormProps {
+  isPro: boolean;
+  onDownloadStart: () => void;
+}
+
+const DownloadForm: React.FC<DownloadFormProps> = ({ isPro, onDownloadStart }) => {
   const [url, setUrl] = useState('');
   const [quality, setQuality] = useState('720');
   const [format, setFormat] = useState('mp4');
@@ -25,77 +22,163 @@ const DownloadForm: React.FC<DownloadFormProps> = ({ onSubmit, isPro, isDisabled
   const [endTime, setEndTime] = useState('');
   const [usePlaylist, setUsePlaylist] = useState(false);
   const [downloadSubtitles, setDownloadSubtitles] = useState(false);
-  const [outputDir, setOutputDir] = useState<string | undefined>(undefined);
+  const [outputDir, setOutputDir] = useState('');
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [videoInfo, setVideoInfo] = useState<VideoInfo | null>(null);
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    
-    if (!url) {
-      alert('Please enter a URL');
-      return;
-    }
-    
-    onSubmit({
-      url,
-      quality,
-      format,
-      startTime: startTime || undefined,
-      endTime: endTime || undefined,
-      usePlaylist,
-      downloadSubtitles,
-      outputDir,
-    });
-  };
+  // Reset error when URL changes
+  useEffect(() => {
+    setError('');
+  }, [url]);
 
-  const selectOutputDirectory = async () => {
+  const fetchVideoInfo = async (): Promise<void> => {
+    if (!url || url.length < 5) return;
+    
+    setIsLoading(true);
     try {
-      const selected = await open({
-        directory: true,
-        multiple: false,
-        title: 'Select Output Directory',
-      });
-      
-      if (selected && !Array.isArray(selected)) {
-        setOutputDir(selected);
-      }
-    } catch (error) {
-      console.error('Failed to select directory:', error);
+      // In a real app, this would fetch video info from a backend API
+      // For demo purposes, we'll simulate a successful API call
+      setTimeout(() => {
+        const mockVideoInfo: VideoInfo = {
+          title: "Sample Video Title",
+          uploader: "Sample Channel",
+          duration: 325, // 5:25 in seconds
+          views: 12500,
+          likes: 1050,
+          uploadDate: "2023-10-15"
+        };
+        setVideoInfo(mockVideoInfo);
+        setError('');
+        setIsLoading(false);
+      }, 1000);
+    } catch (err) {
+      setError(`Failed to fetch video info: ${err instanceof Error ? err.message : 'Unknown error'}`);
+      setVideoInfo(null);
+      setIsLoading(false);
     }
   };
 
-  const validateTimeFormat = (value: string) => {
+  const selectOutputDirectory = async (): Promise<void> => {
+    try {
+      // In a real app, this would use a file picker API
+      // For demo purposes, we'll simulate a successful directory selection
+      setTimeout(() => {
+        setOutputDir('/Users/username/Downloads/Videos');
+      }, 500);
+    } catch (err) {
+      setError(`Failed to select directory: ${err instanceof Error ? err.message : 'Unknown error'}`);
+    }
+  };
+
+  const validateTimeFormat = (value: string): boolean => {
     if (!value) return true;
-    
     // Format HH:MM:SS
     const timeRegex = /^([0-9][0-9]):([0-5][0-9]):([0-5][0-9])$/;
     return timeRegex.test(value);
   };
 
+  const handleSubmit = async (e: React.FormEvent): Promise<void> => {
+    e.preventDefault();
+    
+    if (!url) {
+      setError('Please enter a URL');
+      return;
+    }
+    
+    if (startTime && !validateTimeFormat(startTime)) {
+      setError('Invalid start time format. Use HH:MM:SS');
+      return;
+    }
+    
+    if (endTime && !validateTimeFormat(endTime)) {
+      setError('Invalid end time format. Use HH:MM:SS');
+      return;
+    }
+    
+    setIsLoading(true);
+    setError('');
+    
+    try {
+      // Notify parent component about download starting
+      onDownloadStart();
+      
+      // In a real app, this would call a backend API to start the download
+      // For demo purposes, we'll simulate a successful download start
+      setTimeout(() => {
+        setIsLoading(false);
+      }, 1500);
+    } catch (err) {
+      setError(`Download failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
+      setIsLoading(false);
+    }
+  };
+
   return (
-    <div className="download-form-container">
-      <form onSubmit={handleSubmit} className="download-form">
-        <div className="form-group">
-          <label htmlFor="url">Video URL</label>
-          <input
-            type="text"
-            id="url"
-            value={url}
-            onChange={(e) => setUrl(e.target.value)}
-            placeholder="https://www.youtube.com/watch?v=..."
-            disabled={isDisabled}
-            required
-          />
+    <div className="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6">
+      <form onSubmit={handleSubmit} className="space-y-4">
+        {/* Video URL Input */}
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">
+              Video URL
+            </label>
+            {isLoading && (
+              <span className="text-xs text-blue-500">Loading...</span>
+            )}
+          </div>
+          <div className="flex space-x-2">
+            <input
+              type="text"
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              onBlur={fetchVideoInfo}
+              placeholder="https://www.youtube.com/watch?v=..."
+              disabled={isLoading}
+              className="w-full p-2 border rounded-md text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-white"
+              required
+            />
+            <button
+              type="button"
+              onClick={fetchVideoInfo}
+              disabled={isLoading}
+              className="px-3 py-2 bg-blue-500 text-white rounded-md text-sm hover:bg-blue-600 transition-colors disabled:bg-blue-300"
+            >
+              Fetch Info
+            </button>
+          </div>
         </div>
-        
-        <div className="form-row">
-          <div className="form-group">
-            <label htmlFor="quality">Quality</label>
+
+        {/* Video Info Preview (if available) */}
+        {videoInfo && (
+          <div className="p-4 bg-gray-100 dark:bg-gray-700 rounded-md">
+            <h3 className="font-medium text-sm mb-2">{videoInfo.title}</h3>
+            <div className="flex space-x-4 text-xs text-gray-600 dark:text-gray-300">
+              <span>Duration: {Math.floor(videoInfo.duration / 60)}:{(videoInfo.duration % 60).toString().padStart(2, '0')}</span>
+              {videoInfo.uploader && <span>By: {videoInfo.uploader}</span>}
+            </div>
+          </div>
+        )}
+
+        {/* Error Message */}
+        {error && (
+          <div className="p-3 bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200 rounded-md text-sm">
+            {error}
+          </div>
+        )}
+
+        {/* Format and Quality Section */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="space-y-2">
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">
+              Quality
+            </label>
             <select
-              id="quality"
               value={quality}
               onChange={(e) => setQuality(e.target.value)}
-              disabled={isDisabled}
+              disabled={isLoading}
+              className="w-full p-2 border rounded-md text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-white"
             >
               <option value="480">480p</option>
               <option value="720">720p</option>
@@ -107,17 +190,21 @@ const DownloadForm: React.FC<DownloadFormProps> = ({ onSubmit, isPro, isDisabled
               )}
             </select>
             {!isPro && (
-              <small className="pro-note">Pro version required for 1080p/4K</small>
+              <p className="text-xs text-amber-600 dark:text-amber-400">
+                Pro version required for 1080p/4K
+              </p>
             )}
           </div>
-          
-          <div className="form-group">
-            <label htmlFor="format">Format</label>
+
+          <div className="space-y-2">
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">
+              Format
+            </label>
             <select
-              id="format"
               value={format}
               onChange={(e) => setFormat(e.target.value)}
-              disabled={isDisabled}
+              disabled={isLoading}
+              className="w-full p-2 border rounded-md text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-white"
             >
               <option value="mp4">MP4 Video</option>
               <option value="mp3">MP3 Audio</option>
@@ -130,95 +217,103 @@ const DownloadForm: React.FC<DownloadFormProps> = ({ onSubmit, isPro, isDisabled
             </select>
           </div>
         </div>
-        
-        <div className="form-group toggle-container">
+
+        {/* Toggle Advanced Options */}
+        <div className="pt-2">
           <button 
             type="button" 
-            className="toggle-advanced"
             onClick={() => setShowAdvanced(!showAdvanced)}
-            disabled={isDisabled}
+            disabled={isLoading}
+            className="text-sm text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300"
           >
             {showAdvanced ? 'Hide Advanced Options' : 'Show Advanced Options'}
           </button>
         </div>
-        
+
+        {/* Advanced Options Section */}
         {showAdvanced && (
-          <div className="advanced-options">
-            <div className="form-row">
-              <div className="form-group">
-                <label htmlFor="start-time">Start Time (HH:MM:SS)</label>
+          <div className="space-y-4 pt-2 border-t dark:border-gray-700">
+            {/* Time Range */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                  Start Time (HH:MM:SS)
+                </label>
                 <input
                   type="text"
-                  id="start-time"
                   value={startTime}
                   onChange={(e) => setStartTime(e.target.value)}
                   placeholder="00:00:00"
-                  pattern="^([0-9][0-9]):([0-5][0-9]):([0-5][0-9])$"
-                  disabled={isDisabled}
+                  disabled={isLoading}
+                  className="w-full p-2 border rounded-md text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-white"
                 />
                 {startTime && !validateTimeFormat(startTime) && (
-                  <small className="error-hint">Use format HH:MM:SS</small>
+                  <p className="text-xs text-red-600">Format must be HH:MM:SS</p>
                 )}
               </div>
-              
-              <div className="form-group">
-                <label htmlFor="end-time">End Time (HH:MM:SS)</label>
+
+              <div className="space-y-2">
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                  End Time (HH:MM:SS)
+                </label>
                 <input
                   type="text"
-                  id="end-time"
                   value={endTime}
                   onChange={(e) => setEndTime(e.target.value)}
                   placeholder="00:00:00"
-                  pattern="^([0-9][0-9]):([0-5][0-9]):([0-5][0-9])$"
-                  disabled={isDisabled}
+                  disabled={isLoading}
+                  className="w-full p-2 border rounded-md text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-white"
                 />
                 {endTime && !validateTimeFormat(endTime) && (
-                  <small className="error-hint">Use format HH:MM:SS</small>
+                  <p className="text-xs text-red-600">Format must be HH:MM:SS</p>
                 )}
               </div>
             </div>
-            
-            <div className="form-row">
-              <div className="form-group checkbox-group">
-                <label>
-                  <input
-                    type="checkbox"
-                    checked={usePlaylist}
-                    onChange={(e) => setUsePlaylist(e.target.checked)}
-                    disabled={isDisabled}
-                  />
-                  Download entire playlist
-                </label>
-              </div>
-              
-              <div className="form-group checkbox-group">
-                <label>
-                  <input
-                    type="checkbox"
-                    checked={downloadSubtitles}
-                    onChange={(e) => setDownloadSubtitles(e.target.checked)}
-                    disabled={isDisabled}
-                  />
-                  Download subtitles
-                </label>
-              </div>
+
+            {/* Checkboxes */}
+            <div className="flex flex-col sm:flex-row space-y-2 sm:space-y-0 sm:space-x-6">
+              <label className="inline-flex items-center space-x-2">
+                <input
+                  type="checkbox"
+                  checked={usePlaylist}
+                  onChange={(e) => setUsePlaylist(e.target.checked)}
+                  disabled={isLoading}
+                  className="rounded text-blue-600 dark:bg-gray-700"
+                />
+                <span className="text-sm text-gray-700 dark:text-gray-300">Download entire playlist</span>
+              </label>
+
+              <label className="inline-flex items-center space-x-2">
+                <input
+                  type="checkbox"
+                  checked={downloadSubtitles}
+                  onChange={(e) => setDownloadSubtitles(e.target.checked)}
+                  disabled={isLoading}
+                  className="rounded text-blue-600 dark:bg-gray-700"
+                />
+                <span className="text-sm text-gray-700 dark:text-gray-300">Download subtitles</span>
+              </label>
             </div>
-            
-            <div className="form-group">
-              <label htmlFor="output-dir">Output Directory</label>
-              <div className="directory-selector">
+
+            {/* Output Directory */}
+            <div className="space-y-2">
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                Output Directory
+              </label>
+              <div className="flex space-x-2">
                 <input
                   type="text"
-                  id="output-dir"
-                  value={outputDir || ''}
+                  value={outputDir}
                   readOnly
                   placeholder="Default directory"
-                  disabled={isDisabled}
+                  disabled={isLoading}
+                  className="w-full p-2 border rounded-md text-sm bg-gray-50 dark:bg-gray-700 dark:border-gray-600 dark:text-white"
                 />
                 <button
                   type="button"
                   onClick={selectOutputDirectory}
-                  disabled={isDisabled}
+                  disabled={isLoading}
+                  className="px-3 py-2 bg-gray-500 text-white rounded-md text-sm hover:bg-gray-600 transition-colors disabled:bg-gray-400"
                 >
                   Browse
                 </button>
@@ -226,14 +321,15 @@ const DownloadForm: React.FC<DownloadFormProps> = ({ onSubmit, isPro, isDisabled
             </div>
           </div>
         )}
-        
-        <div className="form-group button-container">
+
+        {/* Submit Button */}
+        <div className="pt-2">
           <button
             type="submit"
-            className="download-button"
-            disabled={isDisabled || !url || (startTime !== '' && !validateTimeFormat(startTime)) || (endTime !== '' && !validateTimeFormat(endTime))}
+            disabled={isLoading || !url || (startTime && !validateTimeFormat(startTime)) || (endTime && !validateTimeFormat(endTime))}
+            className="w-full py-2 px-4 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-md shadow-sm disabled:bg-blue-300 transition-colors"
           >
-            {isDisabled ? 'Downloading...' : 'Download'}
+            {isLoading ? 'Processing...' : 'Download'}
           </button>
         </div>
       </form>

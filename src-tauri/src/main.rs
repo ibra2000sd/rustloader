@@ -96,7 +96,7 @@ async fn download_video(
     // Create a progress emitter
     let progress_emitter = Arc::new(ProgressEmitter::new(window.clone()));
 
-    // Convert option strings to option references to &str
+    // Convert option strings to option references
     let quality_ref = quality.as_deref();
     let start_time_ref = start_time.as_deref();
     let end_time_ref = end_time.as_deref();
@@ -121,11 +121,11 @@ async fn download_video(
             &url,
             quality_ref,
             &format,
-            start_time_ref.map(|x| x.as_str()),
-            end_time_ref.map(|x| x.as_str()),
+            start_time_ref,
+            end_time_ref,
             use_playlist,
             download_subtitles,
-            output_dir_ref.map(|x| x.as_str()),
+            output_dir_ref,
             force_download,
             bitrate,
             Some(progress_callback),
@@ -137,11 +137,11 @@ async fn download_video(
             &url,
             quality_ref,
             &format,
-            start_time_ref.map(|x| x.as_str()),
-            end_time_ref.map(|x| x.as_str()),
+            start_time_ref,
+            end_time_ref,
             use_playlist,
             download_subtitles,
-            output_dir_ref.map(|x| x.as_str()),
+            output_dir_ref,
             force_download,
             bitrate,
             Some(progress_callback),
