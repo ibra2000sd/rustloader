@@ -1,0 +1,15 @@
+--- a/src/downloader/engine.rs
++++ b/src/downloader/engine.rs
+@@ -425,7 +425,7 @@
+-        if let Err(e) = progress_tx.send(progress).await {
+-            warn!("Failed to send final progress: {}", e);
+-        }
+-        
+-        info!("Simple download completed: {} bytes", downloaded);
+-        Ok(())
++        if let Err(e) = progress_tx.send(progress).await {
++            warn!("Failed to send final progress: {}", e);
++        }
++        
++        info!("Simple download completed: {} bytes", downloaded);
++        Ok(())

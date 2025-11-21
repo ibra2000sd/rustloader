@@ -1,0 +1,46 @@
+cat > .gitignore << 'EOF'
+# Rust compilation artifacts
+/target/
+**/*.rs.bk
+*.pdb
+
+# Cargo lock file (keep for binary projects)
+# Cargo.lock
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Downloaded files (testing)
+*.mp4
+*.mkv
+*.webm
+*.mp3
+*.m4a
+downloads/
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+.*.tmp
+segment_*.tmp
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Environment files
+.env
+.env.local
+EOF

@@ -1,0 +1,609 @@
+//! Main GUI application
+
+use crate::database::{DatabaseManager, initialize_database};
+use crate::downloader::DownloadProgress;
+use crate::extractor::VideoInfo;
+use crate::gui::clipboard;
+use crate::gui::components::download_item;
+use crate::gui::integration::{BackendBridge, ProgressUpdate};
+use crate::queue::TaskStatus;
+use crate::utils::config::{AppSettings, VideoQuality};
+use anyhow::Result;
+use iced::widget::{button, column, container, row, text, text_input};
+use iced::{Application, Command, Element, Length, Subscription, Theme};
+use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use tracing::{debug, error, info, warn};
+use uuid::Uuid;
+
+/// Main application state
+pub struct RustloaderApp {
+    // Core components
+    backend: BackendBridge,
+    db_manager: Arc<DatabaseManager>,
+
+    // UI State
+    current_view: View,
+    url_input: String,
+    status_message: String,
+
+    // Download tasks
+    active_downloads: Vec<DownloadTaskUI>,
+
+    // Settings
+    download_location: String,
+    max_concurrent: usize,
+    segments_per_download: usize,
+    quality: VideoQuality,
+
+    // Flags
+    is_extracting: bool,
+}
+
+/// Application view
+#[derive(Debug, Clone, PartialEq)]
+pub enum View {
+    Main,
+    Settings,
+}
+
+/// Download task UI representation
+#[derive(Debug, Clone)]
+pub struct DownloadTaskUI {
+    pub id: String,
+    pub title: String,
+    pub url: String,
+    pub progress: f32,          // 0.0 to 1.0
+    pub speed: f64,             // bytes per second
+    pub status: String,         // "Downloading", "Paused", "Completed", etc.
+    pub downloaded_mb: f64,
+    pub total_mb: f64,
+    pub eta_seconds: Option<u64>,
+}
+
+/// Application messages
+#[derive(Debug, Clone)]
+pub enum Message {
+    // Input events
+    UrlInputChanged(String),
+    DownloadButtonPressed,
+    PasteFromClipboard,
+    ClearUrlInput,
+
+    // Extract events
+    ExtractionStarted,
+    ExtractionCompleted(Result<VideoInfo, String>),
+
+    // Download events
+    DownloadStarted(String),  // task_id
+    DownloadProgress(String, DownloadProgressData),
+    DownloadCompleted(String),
+    DownloadFailed(String, String),
+
+    // Queue control
+    PauseDownload(String),
+    ResumeDownload(String),
+    CancelDownload(String),
+    RemoveCompleted(String),
+    ClearAllCompleted,
+    RetryDownload(String),
+    OpenDownloadFolder(String),
+
+    // View navigation
+    SwitchToMain,
+    SwitchToSettings,
+
+    // Settings
+    DownloadLocationChanged(String),
+    BrowseDownloadLocation,
+    MaxConcurrentChanged(usize),
+    SegmentsChanged(usize),
+    QualityChanged(String),
+    SaveSettings,
+
+    // System
+    Tick,  // For periodic UI updates
+}
+
+/// Download progress data
+#[derive(Debug, Clone)]
+pub struct DownloadProgressData {
+    pub progress: f32,
+    pub speed: f64,
+    pub downloaded: u64,
+    pub total: u64,
+    pub eta: Option<u64>,
+}
+
+impl Application for RustloaderApp {
+    type Executor = iced::executor::Default;
+    type Message = Message;
+    type Theme = Theme;
+    type Flags = ();
+
+    fn new(_flags: Self::Flags) -> (Self, Command<Message>) {
+        // Initialize settings
+        let mut settings = AppSettings::default();
+
+        // Initialize database
+        let db_path = dirs::data_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("rustloader")
+            .join("rustloader.db");
+
+        // Create directory if it doesn't exist
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+
+        let db_path_str = db_path.to_string_lossy().to_string();
+        let db_pool = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(initialize_database(&db_path_str))
+            .expect("Failed to initialize database");
+
+        let db_manager = Arc::new(DatabaseManager::new(db_pool));
+
+        // Load settings from database
+        if let Ok(loaded_settings) = load_settings_from_db(&db_manager) {
+            settings = loaded_settings;
+        }
+
+        // Initialize backend
+        let backend = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(BackendBridge::new(settings.clone()))
+            .expect("Failed to initialize backend");
+
+        let app = Self {
+            backend,
+            db_manager,
+            current_view: View::Main,
+            url_input: String::new(),
+            status_message: "Ready".to_string(),
+            active_downloads: Vec::new(),
+            download_location: settings.download_location.to_string_lossy().to_string(),
+            max_concurrent: settings.max_concurrent,
+            segments_per_download: settings.segments,
+            quality: settings.quality,
+            is_extracting: false,
+        };
+
+        (app, Command::none())
+    }
+
+    fn title(&self) -> String {
+        String::from("Rustloader - High-Performance Video Downloader")
+    }
+
+    fn update(&mut self, message: Message) -> Command<Message> {
+        match message {
+            // Input events
+            Message::UrlInputChanged(url) => {
+                self.url_input = url;
+                Command::none()
+            }
+
+            Message::DownloadButtonPressed => {
+                if !self.url_input.is_empty() && !self.is_extracting {
+                    self.is_extracting = true;
+                    self.status_message = "Extracting video information...".to_string();
+
+                    let url = self.url_input.clone();
+                    Command::perform(
+                        async move {
+                            // This would normally call the backend
+                            // For now, we'll simulate it
+                            Ok(VideoInfo {
+                                id: Uuid::new_v4().to_string(),
+                                title: "Sample Video".to_string(),
+                                url: url.clone(),
+                                direct_url: url.clone(),
+                                duration: Some(600),
+                                filesize: Some(100 * 1024 * 1024), // 100MB
+                                thumbnail: None,
+                                uploader: Some("Sample Uploader".to_string()),
+                                upload_date: Some("20230101".to_string()),
+                                formats: vec![],
+                                description: None,
+                                view_count: Some(1000000),
+                                like_count: Some(10000),
+                                extractor: Some("youtube".to_string()),
+                            })
+                        },
+                        |result| Message::ExtractionCompleted(result.map_err(|e| e.to_string())),
+                    )
+                } else {
+                    Command::none()
+                }
+            }
+
+            Message::PasteFromClipboard => {
+                match clipboard::get_clipboard_content() {
+                    Ok(content) => {
+                        self.url_input = content;
+                        self.status_message = "URL pasted from clipboard".to_string();
+                    }
+                    Err(e) => {
+                        self.status_message = format!("Failed to paste from clipboard: {}", e);
+                    }
+                }
+                Command::none()
+            }
+
+            Message::ClearUrlInput => {
+                self.url_input.clear();
+                Command::none()
+            }
+
+            // Extract events
+            Message::ExtractionStarted => {
+                self.is_extracting = true;
+                self.status_message = "Extracting video information...".to_string();
+                Command::none()
+            }
+
+            Message::ExtractionCompleted(result) => {
+                self.is_extracting = false;
+
+                match result {
+                    Ok(video_info) => {
+                        let title = video_info.title.clone();
+                        let url = video_info.url.clone();
+
+                        // Create output path
+                        let output_path = PathBuf::from(&self.download_location)
+                            .join(format!("{}.mp4", sanitize_filename(&title)));
+
+                        // Start download
+                        let task_id = Uuid::new_v4().to_string();
+                        let task_ui = DownloadTaskUI {
+                            id: task_id.clone(),
+                            title,
+                            url,
+                            progress: 0.0,
+                            speed: 0.0,
+                            status: "Queued".to_string(),
+                            downloaded_mb: 0.0,
+                            total_mb: video_info.filesize.unwrap_or(0) as f64 / (1024.0 * 1024.0),
+                            eta_seconds: None,
+                        };
+
+                        self.active_downloads.push(task_ui);
+                        self.status_message = format!("Added to download queue: {}", video_info.title);
+
+                        // Clear URL input
+                        self.url_input.clear();
+                    }
+                    Err(e) => {
+                        self.status_message = format!("Failed to extract video info: {}", e);
+                    }
+                }
+
+                Command::none()
+            }
+
+            // Download events
+            Message::DownloadStarted(task_id) => {
+                if let Some(task) = self.active_downloads.iter_mut().find(|t| t.id == task_id) {
+                    task.status = "Downloading".to_string();
+                }
+                Command::none()
+            }
+
+            Message::DownloadProgress(task_id, progress_data) => {
+                if let Some(task) = self.active_downloads.iter_mut().find(|t| t.id == task_id) {
+                    task.progress = progress_data.progress;
+                    task.speed = progress_data.speed;
+                    task.downloaded_mb = progress_data.downloaded as f64 / (1024.0 * 1024.0);
+                    task.eta_seconds = progress_data.eta;
+                }
+                Command::none()
+            }
+
+            Message::DownloadCompleted(task_id) => {
+                if let Some(task) = self.active_downloads.iter_mut().find(|t| t.id == task_id) {
+                    task.status = "Completed".to_string();
+                    task.progress = 1.0;
+                }
+                self.status_message = "Download completed".to_string();
+                Command::none()
+            }
+
+            Message::DownloadFailed(task_id, error) => {
+                if let Some(task) = self.active_downloads.iter_mut().find(|t| t.id == task_id) {
+                    task.status = "Failed".to_string();
+                }
+                self.status_message = format!("Download failed: {}", error);
+                Command::none()
+            }
+
+            // Queue control
+            Message::PauseDownload(task_id) => {
+                // This would call the backend
+                if let Some(task) = self.active_downloads.iter_mut().find(|t| t.id == task_id) {
+                    task.status = "Paused".to_string();
+                }
+                Command::none()
+            }
+
+            Message::ResumeDownload(task_id) => {
+                // This would call the backend
+                if let Some(task) = self.active_downloads.iter_mut().find(|t| t.id == task_id) {
+                    task.status = "Downloading".to_string();
+                }
+                Command::none()
+            }
+
+            Message::CancelDownload(task_id) => {
+                // This would call the backend
+                if let Some(index) = self.active_downloads.iter().position(|t| t.id == task_id) {
+                    self.active_downloads.remove(index);
+                }
+                Command::none()
+            }
+
+            Message::RemoveCompleted(task_id) => {
+                if let Some(index) = self.active_downloads.iter().position(|t| t.id == task_id) {
+                    self.active_downloads.remove(index);
+                }
+                Command::none()
+            }
+
+            Message::ClearAllCompleted => {
+                self.active_downloads.retain(|t| t.status != "Completed");
+                Command::none()
+            }
+
+            Message::RetryDownload(task_id) => {
+                // This would call the backend
+                if let Some(task) = self.active_downloads.iter_mut().find(|t| t.id == task_id) {
+                    task.status = "Queued".to_string();
+                    task.progress = 0.0;
+                }
+                Command::none()
+            }
+
+            Message::OpenDownloadFolder(_task_id) => {
+                // This would open the download folder
+                Command::none()
+            }
+
+            // View navigation
+            Message::SwitchToMain => {
+                self.current_view = View::Main;
+                Command::none()
+            }
+
+            Message::SwitchToSettings => {
+                self.current_view = View::Settings;
+                Command::none()
+            }
+
+            // Settings
+            Message::DownloadLocationChanged(location) => {
+                self.download_location = location;
+                Command::none()
+            }
+
+            Message::BrowseDownloadLocation => {
+                // This would open a file dialog
+                Command::none()
+            }
+
+            Message::MaxConcurrentChanged(value) => {
+                self.max_concurrent = value;
+                Command::none()
+            }
+
+            Message::SegmentsChanged(value) => {
+                self.segments_per_download = value;
+                Command::none()
+            }
+
+            Message::QualityChanged(quality) => {
+                self.quality = match quality.as_str() {
+                    "Best Available" => VideoQuality::Best,
+                    "Worst Available" => VideoQuality::Worst,
+                    _ => VideoQuality::Best,
+                };
+                Command::none()
+            }
+
+            Message::SaveSettings => {
+                let settings = AppSettings {
+                    download_location: PathBuf::from(&self.download_location),
+                    segments: self.segments_per_download,
+                    max_concurrent: self.max_concurrent,
+                    quality: self.quality.clone(),
+                    chunk_size: 8192,
+                    retry_attempts: 3,
+                    enable_resume: true,
+                };
+
+                // Save settings to database
+                let db_manager = Arc::clone(&self.db_manager);
+                Command::perform(
+                    async move {
+                        save_settings_to_db(&db_manager, &settings).await?;
+                        Ok(())
+                    },
+                    |result| {
+                        match result {
+                            Ok(_) => Message::SwitchToMain,
+                            Err(e) => {
+                                // Handle error
+                                Message::SwitchToMain
+                            }
+                        }
+                    },
+                )
+            }
+
+            // System
+            Message::Tick => {
+                // Process progress updates from backend
+                while let Some(update) = self.backend.try_receive_progress() {
+                    match update {
+                        ProgressUpdate::ExtractionComplete(video_info) => {
+                            // Handle extraction completion
+                            let title = video_info.title.clone();
+                            let url = video_info.url.clone();
+
+                            // Create output path
+                            let output_path = PathBuf::from(&self.download_location)
+                                .join(format!("{}.mp4", sanitize_filename(&title)));
+
+                            // Start download
+                            let task_id = Uuid::new_v4().to_string();
+                            let task_ui = DownloadTaskUI {
+                                id: task_id.clone(),
+                                title,
+                                url,
+                                progress: 0.0,
+                                speed: 0.0,
+                                status: "Queued".to_string(),
+                                downloaded_mb: 0.0,
+                                total_mb: video_info.filesize.unwrap_or(0) as f64 / (1024.0 * 1024.0),
+                                eta_seconds: None,
+                            };
+
+                            self.active_downloads.push(task_ui);
+                            self.status_message = format!("Added to download queue: {}", video_info.title);
+                        }
+                        ProgressUpdate::DownloadProgress { task_id, progress, speed, downloaded, total, eta_seconds } => {
+                            if let Some(task) = self.active_downloads.iter_mut().find(|t| t.id == task_id) {
+                                task.progress = progress;
+                                task.speed = speed;
+                                task.downloaded_mb = downloaded as f64 / (1024.0 * 1024.0);
+                                task.total_mb = total as f64 / (1024.0 * 1024.0);
+                                task.eta_seconds = eta_seconds;
+                            }
+                        }
+                        ProgressUpdate::DownloadComplete(task_id) => {
+                            if let Some(task) = self.active_downloads.iter_mut().find(|t| t.id == task_id) {
+                                task.status = "Completed".to_string();
+                                task.progress = 1.0;
+                            }
+                            self.status_message = "Download completed".to_string();
+                        }
+                        ProgressUpdate::DownloadFailed { task_id, error } => {
+                            if let Some(task) = self.active_downloads.iter_mut().find(|t| t.id == task_id) {
+                                task.status = "Failed".to_string();
+                            }
+                            self.status_message = format!("Download failed: {}", error);
+                        }
+                        ProgressUpdate::TaskStatusChanged { task_id, status } => {
+                            if let Some(task) = self.active_downloads.iter_mut().find(|t| t.id == task_id) {
+                                task.status = match status {
+                                    TaskStatus::Queued => "Queued".to_string(),
+                                    TaskStatus::Downloading => "Downloading".to_string(),
+                                    TaskStatus::Paused => "Paused".to_string(),
+                                    TaskStatus::Completed => "Completed".to_string(),
+                                    TaskStatus::Failed(_) => "Failed".to_string(),
+                                    TaskStatus::Cancelled => "Cancelled".to_string(),
+                                };
+                            }
+                        }
+                    }
+                }
+
+                Command::none()
+            }
+        }
+    }
+
+    fn view(&self) -> Element<Message> {
+        match self.current_view {
+            View::Main => {
+                use crate::gui::views::main_view;
+                main_view(
+                    &self.url_input,
+                    &self.active_downloads,
+                    &self.status_message,
+                    self.is_extracting,
+                )
+            }
+            View::Settings => {
+                use crate::gui::views::settings_view;
+                settings_view(
+                    &self.download_location,
+                    self.max_concurrent,
+                    self.segments_per_download,
+                )
+            }
+        }
+    }
+
+    fn subscription(&self) -> Subscription<Message> {
+        iced::time::every(std::time::Duration::from_millis(100))
+            .map(|_| Message::Tick)
+    }
+
+    fn theme(&self) -> Self::Theme {
+        Theme::Dark
+    }
+}
+
+/// Sanitize filename for filesystem
+fn sanitize_filename(name: &str) -> String {
+    name.chars()
+        .map(|c| match c {
+            '/' | '\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            _ => c,
+        })
+        .collect()
+}
+
+/// Load settings from database
+async fn load_settings_from_db(db_manager: &DatabaseManager) -> Result<AppSettings> {
+    let mut settings = AppSettings::default();
+
+    // Load download location
+    if let Some(location) = db_manager.get_setting("download_location").await? {
+        settings.download_location = PathBuf::from(location);
+    }
+
+    // Load max concurrent
+    if let Some(value) = db_manager.get_setting("max_concurrent").await? {
+        if let Ok(val) = value.parse::<usize>() {
+            settings.max_concurrent = val;
+        }
+    }
+
+    // Load segments
+    if let Some(value) = db_manager.get_setting("segments").await? {
+        if let Ok(val) = value.parse::<usize>() {
+            settings.segments = val;
+        }
+    }
+
+    // Load quality
+    if let Some(value) = db_manager.get_setting("quality").await? {
+        settings.quality = match value.as_str() {
+            "Best" => VideoQuality::Best,
+            "Worst" => VideoQuality::Worst,
+            _ => VideoQuality::Best,
+        };
+    }
+
+    Ok(settings)
+}
+
+/// Save settings to database
+async fn save_settings_to_db(db_manager: &DatabaseManager, settings: &AppSettings) -> Result<()> {
+    db_manager.save_setting("download_location", &settings.download_location.to_string_lossy()).await?;
+    db_manager.save_setting("max_concurrent", &settings.max_concurrent.to_string()).await?;
+    db_manager.save_setting("segments", &settings.segments.to_string()).await?;
+
+    let quality_str = match settings.quality {
+        VideoQuality::Best => "Best",
+        VideoQuality::Worst => "Worst",
+        VideoQuality::Specific(_) => "Custom",
+    };
+    db_manager.save_setting("quality", quality_str).await?;
+
+    Ok(())
+}
+}

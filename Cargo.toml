@@ -1,0 +1,59 @@
+[package]
+name = "rustloader"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.40", features = ["full"] }
+
+# HTTP client
+reqwest = { version = "0.12", features = ["stream", "rustls-tls"] }
+
+# GUI framework
+iced = { version = "0.12", features = ["tokio", "image", "advanced"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Database
+sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio"] }
+
+# Async utilities
+futures = "0.3"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+# File system
+tokio-util = { version = "0.7", features = ["io"] }
+
+# CLI argument parsing (for yt-dlp)
+which = "6.0"
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Path handling
+path-absolutize = "3.1"
+
+# Clipboard support
+arboard = "3.4"
+
+# File dialogs
+rfd = "0.14"
+
+# CLI argument parsing
+clap = { version = "4.5", features = ["derive"] }
+
+# Directory operations
+dirs = "5.0"
+
+[dev-dependencies]
+tokio-test = "0.4"
