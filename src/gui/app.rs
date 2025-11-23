@@ -1,27 +1,26 @@
 //! Main GUI application
 
 use crate::database::{DatabaseManager, initialize_database};
-use crate::downloader::DownloadProgress;
 use crate::extractor::VideoInfo;
 use crate::gui::clipboard;
-use crate::gui::components::download_item;
 use crate::gui::integration::{BackendBridge, ProgressUpdate};
 use crate::queue::TaskStatus;
 use crate::utils::config::{AppSettings, VideoQuality};
 use anyhow::Result;
-use iced::widget::{button, column, container, row, text, text_input};
-use iced::{Application, Command, Element, Length, Subscription, Theme};
+use iced::{Application, Command, Element, Subscription, Theme};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::Mutex;
-use tracing::{debug, error, info, warn};
+use tokio::runtime::Runtime;
 use uuid::Uuid;
+
 
 /// Main application state
 pub struct RustloaderApp {
     // Core components
-    backend: BackendBridge,
+    backend: std::sync::Arc<std::sync::Mutex<BackendBridge>>,
     db_manager: Arc<DatabaseManager>,
+    // Keep a long-lived runtime so backend tasks stay alive
+    runtime: Arc<Runtime>,
 
     // UI State
     current_view: View,
@@ -77,6 +76,7 @@ pub enum Message {
 
     // Download events
     DownloadStarted(String),  // task_id
+    DownloadStartedWithInfo(String, VideoInfo),
     DownloadProgress(String, DownloadProgressData),
     DownloadCompleted(String),
     DownloadFailed(String, String),
@@ -138,27 +138,32 @@ impl Application for RustloaderApp {
         }
 
         let db_path_str = db_path.to_string_lossy().to_string();
-        let db_pool = tokio::runtime::Runtime::new()
-            .unwrap()
+
+        // Create a single runtime and keep it alive for the app lifetime
+        let rt = Runtime::new().expect("Failed to create tokio runtime");
+
+        let db_pool = rt
             .block_on(initialize_database(&db_path_str))
             .expect("Failed to initialize database");
 
         let db_manager = Arc::new(DatabaseManager::new(db_pool));
 
         // Load settings from database
-        if let Ok(loaded_settings) = load_settings_from_db(&db_manager) {
+        if let Ok(loaded_settings) = rt.block_on(load_settings_from_db(&*db_manager)) {
             settings = loaded_settings;
         }
 
-        // Initialize backend
-        let backend = tokio::runtime::Runtime::new()
-            .unwrap()
+        // Initialize backend on the same runtime and wrap it in a sync Arc<Mutex> for GUI access
+        let backend_bridge = rt
             .block_on(BackendBridge::new(settings.clone()))
             .expect("Failed to initialize backend");
+        let backend = std::sync::Arc::new(std::sync::Mutex::new(backend_bridge));
+        let runtime = Arc::new(rt);
 
         let app = Self {
             backend,
             db_manager,
+            runtime,
             current_view: View::Main,
             url_input: String::new(),
             status_message: "Ready".to_string(),
@@ -191,28 +196,36 @@ impl Application for RustloaderApp {
                     self.status_message = "Extracting video information...".to_string();
 
                     let url = self.url_input.clone();
+                    // Call backend extractor via the stored runtime and backend bridge
+                    let backend = std::sync::Arc::clone(&self.backend);
+                    let runtime = std::sync::Arc::clone(&self.runtime);
+
                     Command::perform(
                         async move {
-                            // This would normally call the backend
-                            // For now, we'll simulate it
-                            Ok(VideoInfo {
-                                id: Uuid::new_v4().to_string(),
-                                title: "Sample Video".to_string(),
-                                url: url.clone(),
-                                direct_url: url.clone(),
-                                duration: Some(600),
-                                filesize: Some(100 * 1024 * 1024), // 100MB
-                                thumbnail: None,
-                                uploader: Some("Sample Uploader".to_string()),
-                                upload_date: Some("20230101".to_string()),
-                                formats: vec![],
-                                description: None,
-                                view_count: Some(1000000),
-                                like_count: Some(10000),
-                                extractor: Some("youtube".to_string()),
-                            })
+                            // Use the stored runtime to spawn an async task that calls the backend.
+                            // Communicate result back via a oneshot channel to avoid blocking runtime threads.
+                            let (tx, rx) = tokio::sync::oneshot::channel();
+                            let backend_clone = backend.clone();
+                            let url_clone = url.clone();
+
+                            // Run a dedicated thread that creates its own runtime to call the backend.
+                            std::thread::spawn(move || {
+                                let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime for extractor thread");
+                                let res = rt.block_on(async move {
+                                    match backend_clone.lock() {
+                                        Ok(mut bridge) => bridge.extract_video_info(&url_clone).await,
+                                        Err(e) => Err(format!("Backend mutex poisoned: {}", e)),
+                                    }
+                                });
+                                let _ = tx.send(res);
+                            });
+
+                            match rx.await {
+                                Ok(res) => res,
+                                Err(_) => Err("Extractor task canceled".to_string()),
+                            }
                         },
-                        |result| Message::ExtractionCompleted(result.map_err(|e| e.to_string())),
+                        |result: Result<VideoInfo, String>| Message::ExtractionCompleted(result.map_err(|e| e.to_string())),
                     )
                 } else {
                     Command::none()
@@ -249,32 +262,59 @@ impl Application for RustloaderApp {
 
                 match result {
                     Ok(video_info) => {
-                        let title = video_info.title.clone();
-                        let url = video_info.url.clone();
-
-                        // Create output path
+                        // Prepare output path
                         let output_path = PathBuf::from(&self.download_location)
-                            .join(format!("{}.mp4", sanitize_filename(&title)));
+                            .join(format!("{}.mp4", sanitize_filename(&video_info.title)));
 
-                        // Start download
-                        let task_id = Uuid::new_v4().to_string();
-                        let task_ui = DownloadTaskUI {
-                            id: task_id.clone(),
-                            title,
-                            url,
-                            progress: 0.0,
-                            speed: 0.0,
-                            status: "Queued".to_string(),
-                            downloaded_mb: 0.0,
-                            total_mb: video_info.filesize.unwrap_or(0) as f64 / (1024.0 * 1024.0),
-                            eta_seconds: None,
-                        };
-
-                        self.active_downloads.push(task_ui);
-                        self.status_message = format!("Added to download queue: {}", video_info.title);
-
-                        // Clear URL input
+                        // Clear URL input and update status while we start the download
                         self.url_input.clear();
+                        self.status_message = format!("Starting download: {}", video_info.title.clone());
+
+                        // Kick off start_download on backend and include video_info so UI can create an entry
+                        let backend = std::sync::Arc::clone(&self.backend);
+                        let runtime = std::sync::Arc::clone(&self.runtime);
+                        let vi_clone = video_info.clone();
+                        let out_clone = output_path.clone();
+
+                        eprintln!("⏳ GUI: preparing to call backend.start_download for '{}'", vi_clone.title);
+                        return Command::perform(
+                            async move {
+                                // Spawn the backend start_download on the app runtime and use oneshot to receive the task id.
+                                let (tx, rx) = tokio::sync::oneshot::channel();
+                                let backend_clone = backend.clone();
+                                let vi = vi_clone.clone();
+                                let out = out_clone.clone();
+
+                                // Spawn a blocking thread with its own runtime to start the download.
+                                let vi_for_call = vi.clone();
+                                let vi_title = vi.title.clone();
+                                std::thread::spawn(move || {
+                                    eprintln!("⏳ [GUI THREAD] calling backend.start_download for '{}'", vi_title);
+                                    let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime for start_download thread");
+                                    let res = rt.block_on(async move {
+                                        match backend_clone.lock() {
+                                            Ok(mut bridge) => bridge.start_download(vi_for_call.clone(), out.clone(), None).await,
+                                            Err(e) => Err(format!("Backend mutex poisoned: {}", e)),
+                                        }
+                                    });
+                                    eprintln!("⏳ [GUI THREAD] backend.start_download returned for '{}': {:?}", vi_title, res.as_ref().map(|s| s.as_str()).unwrap_or("Err"));
+                                    let _ = tx.send(res);
+                                });
+
+                                let res = match rx.await {
+                                    Ok(r) => r,
+                                    Err(_) => Err("Start download task canceled".to_string()),
+                                };
+
+                                eprintln!("⏳ GUI: received start_download result for '{}': {:?}", vi_clone.title, res.as_ref().map(|s| s.as_str()).unwrap_or("Err"));
+
+                                (res, vi_clone)
+                            },
+                            |(res, vi): (Result<String, String>, VideoInfo)| match res {
+                                Ok(task_id) => Message::DownloadStartedWithInfo(task_id, vi),
+                                Err(e) => Message::DownloadFailed("".to_string(), e),
+                            },
+                        );
                     }
                     Err(e) => {
                         self.status_message = format!("Failed to extract video info: {}", e);
@@ -286,9 +326,32 @@ impl Application for RustloaderApp {
 
             // Download events
             Message::DownloadStarted(task_id) => {
+                // If UI already has an entry with this id, mark it as downloading
                 if let Some(task) = self.active_downloads.iter_mut().find(|t| t.id == task_id) {
                     task.status = "Downloading".to_string();
                 }
+                Command::none()
+            }
+
+            Message::DownloadStartedWithInfo(task_id, video_info) => {
+                // Create UI entry now that backend provided the real task id
+                let title = video_info.title.clone();
+                let url = video_info.url.clone();
+
+                let task_ui = DownloadTaskUI {
+                    id: task_id.clone(),
+                    title: title.clone(),
+                    url,
+                    progress: 0.0,
+                    speed: 0.0,
+                    status: "Queued".to_string(),
+                    downloaded_mb: 0.0,
+                    total_mb: video_info.filesize.unwrap_or(0) as f64 / (1024.0 * 1024.0),
+                    eta_seconds: None,
+                };
+
+                self.active_downloads.push(task_ui);
+                self.status_message = format!("Added to download queue: {}", title);
                 Command::none()
             }
 
@@ -426,14 +489,14 @@ impl Application for RustloaderApp {
                 let db_manager = Arc::clone(&self.db_manager);
                 Command::perform(
                     async move {
-                        save_settings_to_db(&db_manager, &settings).await?;
-                        Ok(())
+                        save_settings_to_db(&db_manager, &settings).await.map_err(|e| e.to_string())?;
+                        Ok::<(), String>(())
                     },
-                    |result| {
+                    |result: Result<(), String>| {
                         match result {
                             Ok(_) => Message::SwitchToMain,
-                            Err(e) => {
-                                // Handle error
+                            Err(_e) => {
+                                // Handle error (for now, switch to main view)
                                 Message::SwitchToMain
                             }
                         }
@@ -443,70 +506,98 @@ impl Application for RustloaderApp {
 
             // System
             Message::Tick => {
-                // Process progress updates from backend
-                while let Some(update) = self.backend.try_receive_progress() {
-                    match update {
-                        ProgressUpdate::ExtractionComplete(video_info) => {
-                            // Handle extraction completion
-                            let title = video_info.title.clone();
-                            let url = video_info.url.clone();
+                // Drain progress updates from backend and log them for debugging
+                // Use a non-blocking try_lock so the GUI never blocks if the backend
+                // is busy (e.g. during a long extraction step). If the lock is
+                // unavailable, skip this tick and let the next tick try again.
+                if let Ok(mut bridge) = self.backend.try_lock() {
+                    let mut update_count = 0usize;
+                    while let Some(update) = bridge.try_receive_progress() {
+                        update_count += 1;
+                        eprintln!("🔔 GUI received progress update #{}: {:?}", update_count, update);
 
-                            // Create output path
-                            let output_path = PathBuf::from(&self.download_location)
-                                .join(format!("{}.mp4", sanitize_filename(&title)));
+                        match update {
+                            ProgressUpdate::ExtractionComplete(video_info) => {
+                                // Handle extraction completion
+                                let title = video_info.title.clone();
+                                let url = video_info.url.clone();
 
-                            // Start download
-                            let task_id = Uuid::new_v4().to_string();
-                            let task_ui = DownloadTaskUI {
-                                id: task_id.clone(),
-                                title,
-                                url,
-                                progress: 0.0,
-                                speed: 0.0,
-                                status: "Queued".to_string(),
-                                downloaded_mb: 0.0,
-                                total_mb: video_info.filesize.unwrap_or(0) as f64 / (1024.0 * 1024.0),
-                                eta_seconds: None,
-                            };
+                                // Create output path
+                                let output_path = PathBuf::from(&self.download_location)
+                                    .join(format!("{}.mp4", sanitize_filename(&title)));
 
-                            self.active_downloads.push(task_ui);
-                            self.status_message = format!("Added to download queue: {}", video_info.title);
-                        }
-                        ProgressUpdate::DownloadProgress { task_id, progress, speed, downloaded, total, eta_seconds } => {
-                            if let Some(task) = self.active_downloads.iter_mut().find(|t| t.id == task_id) {
-                                task.progress = progress;
-                                task.speed = speed;
-                                task.downloaded_mb = downloaded as f64 / (1024.0 * 1024.0);
-                                task.total_mb = total as f64 / (1024.0 * 1024.0);
-                                task.eta_seconds = eta_seconds;
-                            }
-                        }
-                        ProgressUpdate::DownloadComplete(task_id) => {
-                            if let Some(task) = self.active_downloads.iter_mut().find(|t| t.id == task_id) {
-                                task.status = "Completed".to_string();
-                                task.progress = 1.0;
-                            }
-                            self.status_message = "Download completed".to_string();
-                        }
-                        ProgressUpdate::DownloadFailed { task_id, error } => {
-                            if let Some(task) = self.active_downloads.iter_mut().find(|t| t.id == task_id) {
-                                task.status = "Failed".to_string();
-                            }
-                            self.status_message = format!("Download failed: {}", error);
-                        }
-                        ProgressUpdate::TaskStatusChanged { task_id, status } => {
-                            if let Some(task) = self.active_downloads.iter_mut().find(|t| t.id == task_id) {
-                                task.status = match status {
-                                    TaskStatus::Queued => "Queued".to_string(),
-                                    TaskStatus::Downloading => "Downloading".to_string(),
-                                    TaskStatus::Paused => "Paused".to_string(),
-                                    TaskStatus::Completed => "Completed".to_string(),
-                                    TaskStatus::Failed(_) => "Failed".to_string(),
-                                    TaskStatus::Cancelled => "Cancelled".to_string(),
+                                // Start download UI entry will be added when backend returns task id
+                                let task_id = Uuid::new_v4().to_string();
+                                let task_ui = DownloadTaskUI {
+                                    id: task_id.clone(),
+                                    title: title.clone(),
+                                    url,
+                                    progress: 0.0,
+                                    speed: 0.0,
+                                    status: "Queued".to_string(),
+                                    downloaded_mb: 0.0,
+                                    total_mb: video_info.filesize.unwrap_or(0) as f64 / (1024.0 * 1024.0),
+                                    eta_seconds: None,
                                 };
+
+                                self.active_downloads.push(task_ui);
+                                self.status_message = format!("Added to download queue: {}", video_info.title);
+                                eprintln!("✅ Added UI task for extraction: {}", title);
+                            }
+                            ProgressUpdate::DownloadProgress { task_id, progress, speed, downloaded, total, eta_seconds } => {
+                                if let Some(task) = self.active_downloads.iter_mut().find(|t| t.id == task_id) {
+                                    task.progress = progress;
+                                    task.speed = speed;
+                                    task.downloaded_mb = downloaded as f64 / (1024.0 * 1024.0);
+                                    task.total_mb = total as f64 / (1024.0 * 1024.0);
+                                    task.eta_seconds = eta_seconds;
+
+                                    eprintln!("✅ Updated task {}: {:.1}% @ {:.2} MB/s", task.title, progress * 100.0, speed / 1024.0 / 1024.0);
+                                } else {
+                                    eprintln!("⚠️ Task {} not found in active_downloads!", task_id);
+                                }
+                            }
+                            ProgressUpdate::DownloadComplete(task_id) => {
+                                if let Some(task) = self.active_downloads.iter_mut().find(|t| t.id == task_id) {
+                                    task.status = "Completed".to_string();
+                                    task.progress = 1.0;
+                                }
+                                self.status_message = "Download completed".to_string();
+                                eprintln!("🎉 Download complete for task {}", task_id);
+                            }
+                            ProgressUpdate::DownloadFailed { task_id, error } => {
+                                if let Some(task) = self.active_downloads.iter_mut().find(|t| t.id == task_id) {
+                                    task.status = "Failed".to_string();
+                                }
+                                self.status_message = format!("Download failed: {}", error);
+                                eprintln!("❌ Download failed for {}: {}", task_id, error);
+                            }
+                            ProgressUpdate::TaskStatusChanged { task_id, status } => {
+                                if let Some(task) = self.active_downloads.iter_mut().find(|t| t.id == task_id) {
+                                    task.status = match status {
+                                        TaskStatus::Queued => "Queued".to_string(),
+                                        TaskStatus::Downloading => "Downloading".to_string(),
+                                        TaskStatus::Paused => "Paused".to_string(),
+                                        TaskStatus::Completed => "Completed".to_string(),
+                                        TaskStatus::Failed(_) => "Failed".to_string(),
+                                        TaskStatus::Cancelled => "Cancelled".to_string(),
+                                    };
+                                    eprintln!("ℹ️ Task {} status changed -> {}", task.title, task.status);
+                                } else {
+                                    eprintln!("⚠️ Task {} not found for status change", task_id);
+                                }
                             }
                         }
                     }
+
+                    if update_count > 0 {
+                        eprintln!("📊 Processed {} progress updates this tick", update_count);
+                    }
+                } else {
+                    // Backend is currently locked by a background operation (e.g. extraction).
+                    // Don't block the GUI; try again on the next tick.
+                    // For debugging, print a low-verbosity note.
+                    // eprintln!("🔕 Backend busy; skipping progress drain this tick");
                 }
 
                 Command::none()
@@ -550,7 +641,7 @@ impl Application for RustloaderApp {
 fn sanitize_filename(name: &str) -> String {
     name.chars()
         .map(|c| match c {
-            '/' | '\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
             _ => c,
         })
         .collect()
@@ -606,4 +697,4 @@ async fn save_settings_to_db(db_manager: &DatabaseManager, settings: &AppSetting
 
     Ok(())
 }
-}
+

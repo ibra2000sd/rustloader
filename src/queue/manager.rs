@@ -5,6 +5,7 @@ use crate::extractor::{Format, VideoInfo};
 use crate::utils::error::RustloaderError;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use std::time::Duration;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -47,7 +48,10 @@ pub enum TaskStatus {
 struct DownloadHandle {
     task_id: String,
     join_handle: JoinHandle<()>,
+    progress_handle: JoinHandle<()>,
     cancel_tx: mpsc::Sender<()>,
+    // snapshot of the task for monitoring
+    task: DownloadTask,
 }
 
 impl QueueManager {
@@ -65,24 +69,48 @@ impl QueueManager {
     pub async fn add_task(&self, task: DownloadTask) -> Result<String> {
         let task_id = task.id.clone();
 
+        eprintln!("📥 [QUEUE] add_task called for: {}", task_id);
+
         // Add to queue
         {
             let mut queue = self.queue.lock().await;
             queue.push_back(task);
+            eprintln!("📋 [QUEUE] Task added, queue size: {}", queue.len());
         }
 
         info!("Added task {} to queue", task_id);
+        eprintln!("📋 [QUEUE] Triggering process_queue...");
 
-        // Start processing if not already running
+        // Start processing immediately
         self.process_queue().await;
+
+        eprintln!("✅ [QUEUE] add_task completed for: {}", task_id);
 
         Ok(task_id)
     }
 
     /// Start processing queue
     pub async fn start(&self) {
-        info!("Starting queue processing");
-        self.process_queue().await;
+        info!("Starting queue processing (persistent loop)");
+
+        loop {
+            // Process available queued tasks
+            self.process_queue().await;
+
+            // Short sleep between iterations to avoid busy-loop
+            tokio::time::sleep(Duration::from_millis(500)).await;
+
+            // If no work present, sleep a bit longer
+            let has_work = {
+                let queue = self.queue.lock().await;
+                let active = self.active_downloads.lock().await;
+                !queue.is_empty() || !active.is_empty()
+            };
+
+            if !has_work {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        }
     }
 
     /// Pause specific task
@@ -146,6 +174,8 @@ impl QueueManager {
 
             // Abort the task
             handle.join_handle.abort();
+            // Also abort the progress receiver task so it doesn't keep running
+            handle.progress_handle.abort();
 
             // Update task status
             self.update_task_status(task_id, TaskStatus::Cancelled).await?;
@@ -169,8 +199,25 @@ impl QueueManager {
 
     /// Get all tasks
     pub async fn get_all_tasks(&self) -> Vec<DownloadTask> {
-        let queue = self.queue.lock().await;
-        queue.iter().cloned().collect()
+        let mut tasks = Vec::new();
+
+        // Add queued tasks
+        {
+            let queue = self.queue.lock().await;
+            for t in queue.iter() {
+                tasks.push(t.clone());
+            }
+        }
+
+        // Add active tasks
+        {
+            let active = self.active_downloads.lock().await;
+            for (_k, handle) in active.iter() {
+                tasks.push(handle.task.clone());
+            }
+        }
+
+        tasks
     }
 
     /// Clear completed tasks
@@ -184,19 +231,25 @@ impl QueueManager {
 
     /// Process the queue
     async fn process_queue(&self) {
+        eprintln!("⚙️  [QUEUE] process_queue started");
+
         // Check if we can start more downloads
         let active_count = {
             let active = self.active_downloads.lock().await;
             active.len()
         };
+        eprintln!("   - Active downloads: {}", active_count);
+        eprintln!("   - Max concurrent: {}", self.max_concurrent);
 
         if active_count >= self.max_concurrent {
+            eprintln!("⚠️  [QUEUE] Max concurrent reached, skipping");
             return;
         }
 
         // Get tasks to process
         let tasks_to_process = {
             let mut queue = self.queue.lock().await;
+            eprintln!("   - Queue size: {}", queue.len());
             let mut tasks = Vec::new();
 
             while tasks.len() < self.max_concurrent - active_count {
@@ -217,9 +270,16 @@ impl QueueManager {
             tasks
         };
 
+        if tasks_to_process.is_empty() {
+            eprintln!("⚠️  [QUEUE] No queued tasks to start");
+        }
+
         // Process each task
         for task in tasks_to_process {
+            eprintln!("🎯 [QUEUE] Got task from queue: {}", task.id);
+            eprintln!("🚀 [QUEUE] Starting download for: {}", task.id);
             self.start_download(task).await;
+            eprintln!("✅ [QUEUE] start_download completed");
         }
     }
 
@@ -229,9 +289,26 @@ impl QueueManager {
         let url = task.format.url.clone();
         let output_path = task.output_path.clone();
 
+        eprintln!("💾 [DOWNLOAD] start_download called for: {}", task_id);
+        eprintln!("   - URL: {}", url);
+        eprintln!("   - Output: {:?}", output_path);
+
         // Create channels for progress updates and cancellation
         let (progress_tx, mut progress_rx) = mpsc::channel::<DownloadProgress>(100);
+
+        // 🧪 TEST: Verify channel works
+        eprintln!("🧪 [TEST] Testing channel immediately after creation...");
+        let test_progress = DownloadProgress::new(100, 1);
+        let test_tx = progress_tx.clone();
+        let test_result = test_tx.send(test_progress).await;
+        eprintln!("🧪 [TEST] Test send result: {:?}", test_result.is_ok());
+
+        let received_test = progress_rx.recv().await;
+        eprintln!("🧪 [TEST] Test receive result: {:?}", received_test.is_some());
         let (cancel_tx, mut cancel_rx) = mpsc::channel::<()>(1);
+
+        eprintln!("   - Created progress channel");
+        eprintln!("   - Starting download engine...");
 
         // Update task status
         task.status = TaskStatus::Downloading;
@@ -241,9 +318,108 @@ impl QueueManager {
         let engine = Arc::clone(&self.engine);
         let active_downloads = Arc::clone(&self.active_downloads);
         let queue = Arc::clone(&self.queue);
+        // Clone for progress handler to update active_downloads snapshot
+        let active_downloads_clone = Arc::clone(&self.active_downloads);
 
-        // Start download task
+        // Clone a snapshot of the task to keep in the active map
+        let task_for_handle = task.clone();
+
+        // Handle progress updates - spawn the receiver FIRST so the channel is ready
+        // before the engine attempts to send progress messages.
+        let queue_clone_for_progress = Arc::clone(&self.queue);
+        let task_id_for_progress = task_id.clone();
+        // snapshot of the task to use when inserting a placeholder into active_downloads
+        let task_snapshot_for_progress = task_for_handle.clone();
+        // Clone the active_downloads Arc into the progress handler so it can update
+        // the active snapshot when progress arrives.
+        let active_downloads_clone_for_progress = Arc::clone(&active_downloads_clone);
+        eprintln!("📡 [PROGRESS] Spawning progress receiver for: {}", task_id_for_progress);
+        let progress_handler = tokio::spawn(async move {
+            eprintln!("📡 [PROGRESS] Progress receiver started for: {}", task_id_for_progress);
+            loop {
+                match progress_rx.recv().await {
+                    Some(progress) => {
+                        eprintln!("🔁 [PROGRESS] Received for {}: {:.2}%", task_id_for_progress, progress.percentage() as f32);
+
+                        // Update task progress in the queued snapshot
+                        let mut queue = queue_clone_for_progress.lock().await;
+                        for t in queue.iter_mut() {
+                            if t.id == task_id_for_progress {
+                                t.progress = Some(progress.clone());
+                                break;
+                            }
+                        }
+                        drop(queue); // release queue lock immediately
+
+                        // CRITICAL: Also update the active_downloads snapshot so the monitor
+                        // (which reads active downloads) will see progress updates.
+                        let mut active = active_downloads_clone_for_progress.lock().await;
+                        if let Some(handle) = active.get_mut(&task_id_for_progress) {
+                            handle.task.progress = Some(progress.clone());
+                            eprintln!("✅ [PROGRESS] Updated active_downloads for: {}", task_id_for_progress);
+                        } else {
+                            // If no active handle exists yet (race), insert a placeholder
+                            // so the monitor can see the task snapshot with progress.
+                            let (dummy_cancel_tx, _dummy_cancel_rx) = mpsc::channel::<()>(1);
+                            let dummy_join = tokio::spawn(async {});
+                            let dummy_progress_handle = tokio::spawn(async {});
+                            active.insert(
+                                task_id_for_progress.clone(),
+                                DownloadHandle {
+                                    task_id: task_id_for_progress.clone(),
+                                    join_handle: dummy_join,
+                                    progress_handle: dummy_progress_handle,
+                                    cancel_tx: dummy_cancel_tx,
+                                    task: task_snapshot_for_progress.clone(),
+                                },
+                            );
+                            if let Some(h) = active.get_mut(&task_id_for_progress) {
+                                h.task.progress = Some(progress.clone());
+                            }
+                            eprintln!("✅ [PROGRESS] Inserted placeholder active_downloads for: {}", task_id_for_progress);
+                        }
+                        // active lock dropped at end of scope
+                    }
+                    None => {
+                        eprintln!("📡 [PROGRESS] progress_rx closed (None) for: {}", task_id_for_progress);
+                        break;
+                    }
+                }
+            }
+            eprintln!("📡 [PROGRESS] Progress receiver ended for: {}", task_id_for_progress);
+        });
+
+        eprintln!("   - Progress receiver spawned and waiting");
+
+        // 🧪 TEST2: send a message after the receiver is spawned
+        eprintln!("🧪 [TEST2] Sending test after spawning receiver...");
+        let test_progress2 = DownloadProgress::new(50, 1);
+        let test_result2 = progress_tx.clone().send(test_progress2).await;
+        eprintln!("🧪 [TEST2] send after spawn result: {:?}", test_result2.is_ok());
+
+        // Start download task (task moved into the spawned future)
+        let task_id_for_spawn = task_id.clone();
+
+        eprintln!("🔧 [SPAWN] About to spawn download engine for: {}", task_id_for_spawn);
+
+        // WATCHDOG: spawn a short monitor that will print if engine logs don't appear
+        {
+            let task_id_wd = task_id.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                eprintln!("⏰ [WATCHDOG] 2 seconds passed for task: {}", task_id_wd);
+                eprintln!("   - If no engine logs above, the engine task is blocked or not being polled");
+            });
+        }
+
+        // Prepare a clone of the task id for the spawned closure so we don't move the
+        // original `task_id_for_spawn` (we need it later for a debug print).
+        let task_id_for_closure = task_id_for_spawn.clone();
+
         let join_handle = tokio::spawn(async move {
+            eprintln!("👋 [SPAWN] Inside spawned task! Task: {}", task_id_for_closure);
+            eprintln!("👋 [SPAWN] About to call engine.download()");
+
             let mut cancelled = false;
 
             // Create a future that completes when either the download finishes or is cancelled
@@ -256,12 +432,14 @@ impl QueueManager {
                         Ok(()) => {
                             // Update task status to completed
                             task.status = TaskStatus::Completed;
-                            info!("Task {} completed successfully", task_id);
+                            eprintln!("✅ [ENGINE] Task {} completed successfully", task_id_for_closure);
+                            info!("Task {} completed successfully", task_id_for_closure);
                         }
                         Err(e) => {
                             // Update task status to failed
                             task.status = TaskStatus::Failed(e.to_string());
-                            error!("Task {} failed: {}", task_id, e);
+                            eprintln!("❌ [ENGINE] Task {} failed: {}", task_id_for_closure, e);
+                            error!("Task {} failed: {}", task_id_for_closure, e);
                         }
                     }
                 }
@@ -269,7 +447,8 @@ impl QueueManager {
                     // Task was cancelled
                     cancelled = true;
                     task.status = TaskStatus::Cancelled;
-                    info!("Task {} was cancelled", task_id);
+                    eprintln!("🛑 [ENGINE] Task {} was cancelled", task_id_for_closure);
+                    info!("Task {} was cancelled", task_id_for_closure);
                 }
             }
 
@@ -277,7 +456,7 @@ impl QueueManager {
             {
                 let mut q = queue.lock().await;
                 for t in q.iter_mut() {
-                    if t.id == task_id {
+                    if t.id == task_id_for_closure {
                         t.status = task.status.clone();
                         break;
                     }
@@ -287,54 +466,64 @@ impl QueueManager {
             // Remove from active downloads
             {
                 let mut active = active_downloads.lock().await;
-                active.remove(&task_id);
+                active.remove(&task_id_for_closure);
             }
 
             // If not cancelled, continue processing the queue
             if !cancelled {
-                // This is a bit of a hack to continue processing the queue
-                // In a real implementation, you might want a more elegant solution
                 drop(active_downloads);
                 drop(queue);
             }
         });
 
+        eprintln!("✅ [SPAWN] Spawned download engine task, join_handle created for: {}", task_id_for_spawn);
+
         // Add to active downloads
         {
             let mut active = self.active_downloads.lock().await;
+
+            // Preserve any progress that might have been recorded by the progress
+            // handler earlier (race) by copying it into the task snapshot we insert.
+            let existing_progress = if let Some(existing) = active.get(&task_id) {
+                existing.task.progress.clone()
+            } else {
+                None
+            };
+
+            let mut task_for_insert = task_for_handle.clone();
+            task_for_insert.progress = existing_progress;
+
             active.insert(
                 task_id.clone(),
                 DownloadHandle {
                     task_id: task_id.clone(),
                     join_handle,
+                    progress_handle: progress_handler,
                     cancel_tx,
+                    task: task_for_insert,
                 },
             );
         }
 
-        // Handle progress updates
-        let queue_clone = Arc::clone(&self.queue);
-        let task_id_clone = task_id.clone();
-        tokio::spawn(async move {
-            while let Some(progress) = progress_rx.recv().await {
-                // Update task progress
-                {
-                    let mut queue = queue_clone.lock().await;
-                    for task in queue.iter_mut() {
-                        if task.id == task_id_clone {
-                            task.progress = Some(progress);
-                            break;
-                        }
-                    }
-                }
-            }
-        });
+        eprintln!("✅ [DOWNLOAD] Task spawned and added to active_downloads: {}", task_id);
 
+        // We keep the progress_handler running alongside the engine.
+        // Note: if you want to monitor or join the handler, you can store the handle.
         info!("Started download for task {}", task_id);
     }
 
     /// Update task status in queue
     async fn update_task_status(&self, task_id: &str, status: TaskStatus) -> Result<()> {
+        // First try to update active downloads
+        {
+            let mut active = self.active_downloads.lock().await;
+            if let Some(handle) = active.get_mut(task_id) {
+                handle.task.status = status;
+                return Ok(());
+            }
+        }
+
+        // Then try queued tasks
         let mut queue = self.queue.lock().await;
         for task in queue.iter_mut() {
             if task.id == task_id {
@@ -342,16 +531,30 @@ impl QueueManager {
                 return Ok(());
             }
         }
+
         Err(RustloaderError::TaskNotFound(task_id.to_string()).into())
     }
 
     /// Update entire task in queue
     async fn update_task_in_queue(&self, task: DownloadTask) {
-        let mut queue = self.queue.lock().await;
-        for t in queue.iter_mut() {
-            if t.id == task.id {
-                *t = task;
-                break;
+        // Update queued task if present
+        let mut found = false;
+        {
+            let mut queue = self.queue.lock().await;
+            for t in queue.iter_mut() {
+                if t.id == task.id {
+                    *t = task.clone();
+                    found = true;
+                    break;
+                }
+            }
+        }
+
+        // If not found in queue, update active snapshot
+        if !found {
+            let mut active = self.active_downloads.lock().await;
+            if let Some(handle) = active.get_mut(&task.id) {
+                handle.task = task;
             }
         }
     }
@@ -362,10 +565,10 @@ impl Default for TaskStatus {
         Self::Queued
     }
 }
-            }
-        }
-    }
-}
+            
+        
+    
+
 
 impl DownloadTask {
     /// Create a new download task

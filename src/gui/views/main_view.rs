@@ -7,7 +7,7 @@ use iced::{Element, Length, Alignment};
 
 /// Create the main view
 pub fn main_view(
-    url_input: &str,
+    url_value: &str,
     downloads: &[DownloadTaskUI],
     status_message: &str,
     is_extracting: bool,
@@ -19,7 +19,7 @@ pub fn main_view(
 
     // URL input row
     let url_row = url_input(
-        url_input,
+        url_value,
         Message::UrlInputChanged,
         Message::PasteFromClipboard,
         Message::ClearUrlInput,
@@ -28,7 +28,7 @@ pub fn main_view(
     // Button row
     let button_row = row![
         button(if is_extracting { "Extracting..." } else { "▶ Download" })
-            .on_press_maybe(if !url_input.is_empty() && !is_extracting {
+            .on_press_maybe(if !url_value.is_empty() && !is_extracting {
                 Some(Message::DownloadButtonPressed)
             } else {
                 None

@@ -15,6 +15,7 @@ use anyhow::Result;
 use clap::Parser;
 use std::process::Command;
 use tracing_subscriber;
+use iced::Application;
 
 #[derive(Parser)]
 struct Args {
@@ -23,23 +24,25 @@ struct Args {
     test_download: Option<String>,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let args = Args::parse();
-    
+
     // Initialize logging
     tracing_subscriber::fmt::init();
-    
+
     // Check for yt-dlp
     check_ytdlp_installed();
-    
+
     if let Some(url) = args.test_download {
-        // Run headless test
-        test_download_cli(url).await;
+        // Run headless test inside a temporary Tokio runtime
+        let rt = tokio::runtime::Runtime::new()?;
+        rt.block_on(async move {
+            test_download_cli(url).await;
+        });
         return Ok(());
     }
-    
-    // Start the GUI application
+
+    // Start the GUI application (synchronous entrypoint)
     gui::RustloaderApp::run(iced::Settings {
         window: iced::window::Settings {
             size: iced::Size::new(800.0, 600.0),
@@ -48,7 +51,7 @@ async fn main() -> Result<()> {
         },
         ..Default::default()
     })?;
-    
+
     Ok(())
 }
 
@@ -105,7 +108,7 @@ async fn test_download_cli(url: String) {
     let output_path = std::path::PathBuf::from("./test_download.mp4");
     
     // Create progress channel
-    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel(100);
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel::<crate::downloader::DownloadProgress>(100);
     
     // Spawn progress reporter
     tokio::spawn(async move {
@@ -116,9 +119,24 @@ async fn test_download_cli(url: String) {
         }
     });
     
-    // Start download
+    // Ensure we have a direct URL to download. If extractor didn't populate `direct_url`,
+    // try to resolve one via extractor.get_direct_url using the first available format.
     println!("Starting download...");
-    match engine.download(&video_info.direct_url, &output_path, progress_tx).await {
+    let download_url = if !video_info.direct_url.is_empty() {
+        video_info.direct_url.clone()
+    } else if let Some(first_fmt) = video_info.formats.get(0) {
+        match extractor.get_direct_url(&video_info.url, &first_fmt.format_id).await {
+            Ok(u) => u,
+            Err(e) => {
+                eprintln!("Failed to resolve direct url via extractor: {}", e);
+                video_info.url.clone()
+            }
+        }
+    } else {
+        video_info.url.clone()
+    };
+
+    match engine.download(&download_url, &output_path, progress_tx).await {
         Ok(_) => println!("Download completed successfully!"),
         Err(e) => eprintln!("Download failed: {}", e),
     }

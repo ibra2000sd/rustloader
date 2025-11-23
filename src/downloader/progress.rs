@@ -36,7 +36,7 @@ impl DownloadProgress {
         // Calculate ETA if we have a speed
         if speed > 0.0 && self.downloaded_bytes < self.total_bytes {
             let remaining = self.total_bytes - self.downloaded_bytes;
-            self.eta = Some(Duration::from_secs_f64(remaining / speed));
+            self.eta = Some(Duration::from_secs_f64((remaining as f64) / speed));
         } else if self.downloaded_bytes >= self.total_bytes {
             self.eta = Some(Duration::from_secs(0));
         } else {
@@ -88,7 +88,7 @@ impl DownloadProgress {
 }
 
 /// Download status
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum DownloadStatus {
     Initializing,
     Downloading,

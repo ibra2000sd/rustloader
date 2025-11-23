@@ -127,7 +127,7 @@ impl VideoExtractor {
         if let Some(entries) = video_info.formats.get(0).and_then(|f| {
             // This is a workaround - in the actual implementation, we might need to handle
             // the search result format properly
-            None
+            None::<Format>
         }) {
             // Parse entries
         }

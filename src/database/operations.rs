@@ -31,7 +31,7 @@ impl DatabaseManager {
         .bind(&record.url)
         .bind(&record.title)
         .bind(&record.output_path.to_string_lossy())
-        .bind(record.file_size as i64)
+        .bind(record.file_size.map(|v| v as i64))
         .bind(&record.status)
         .bind(record.created_at)
         .bind(record.completed_at)

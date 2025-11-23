@@ -7,13 +7,18 @@ use serde::{Deserialize, Serialize};
 pub struct VideoInfo {
     pub id: String,
     pub title: String,
+    #[serde(alias = "webpage_url")]
     pub url: String,
-    pub direct_url: String,  // Actual download URL
+    #[serde(default)]
+    pub direct_url: String,  // Actual download URL (filled later)
+    #[serde(default)]
     pub duration: Option<u64>,
+    #[serde(default)]
     pub filesize: Option<u64>,
     pub thumbnail: Option<String>,
     pub uploader: Option<String>,
     pub upload_date: Option<String>,
+    #[serde(default)]
     pub formats: Vec<Format>,
     pub description: Option<String>,
     pub view_count: Option<u64>,
@@ -27,9 +32,10 @@ pub struct Format {
     pub format_id: String,
     pub ext: String,
     pub resolution: Option<String>,
+    #[serde(default)]
     pub filesize: Option<u64>,
     pub url: String,
-    pub quality: i32,
+    pub quality: Option<f32>,
     pub fps: Option<f32>,
     pub vcodec: Option<String>,
     pub acodec: Option<String>,

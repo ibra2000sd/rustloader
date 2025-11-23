@@ -18,7 +18,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 # Database
-sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio"] }
+sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "chrono"] }
 
 # Async utilities
 futures = "0.3"
@@ -42,6 +42,9 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # Path handling
 path-absolutize = "3.1"
+
+# UUID generation
+uuid = { version = "1.10", features = ["v4"] }
 
 # Clipboard support
 arboard = "3.4"

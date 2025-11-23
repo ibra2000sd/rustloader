@@ -1,6 +1,6 @@
 //! Settings view implementation
 
-use iced::widget::{button, column, container, pick_list, row, slider, text, text_input};
+use iced::widget::{button, column, container, pick_list, row, slider, text, text_input, Space};
 use iced::{Element, Length, Alignment};
 
 /// Create the settings view
@@ -46,7 +46,7 @@ pub fn settings_view(
         // Max concurrent downloads
         column![
             text(format!("Max concurrent downloads: {}", max_concurrent)),
-            slider(1..=10, max_concurrent, crate::gui::app::Message::MaxConcurrentChanged)
+            slider(1..=10, max_concurrent as u8, |v| crate::gui::app::Message::MaxConcurrentChanged(v as usize))
                 .width(Length::Fill),
         ]
         .spacing(5),
@@ -54,7 +54,7 @@ pub fn settings_view(
         // Segments per download
         column![
             text(format!("Segments per download: {}", segments)),
-            slider(4..=32, segments, crate::gui::app::Message::SegmentsChanged)
+            slider(4..=32, segments as u8, |v| crate::gui::app::Message::SegmentsChanged(v as usize))
                 .width(Length::Fill),
         ]
         .spacing(5),
@@ -68,7 +68,7 @@ pub fn settings_view(
         pick_list(
             quality_options,
             Some(&"Best Available"),
-            crate::gui::app::Message::QualityChanged,
+            |quality| crate::gui::app::Message::QualityChanged(quality.to_string()),
         )
         .width(Length::Fill),
     ]
