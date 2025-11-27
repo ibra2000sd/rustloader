@@ -173,6 +173,23 @@ impl BackendBridge {
                             warn!("Failed to send progress update: {}", e);
                             break;
                         }
+                    } else if matches!(task.status, TaskStatus::Completed) {
+                        // Synthesize a 100% progress event when completed but progress is None
+                        let downloaded = tokio::fs::metadata(&task.output_path)
+                            .await
+                            .map(|m| m.len())
+                            .unwrap_or(0);
+                        if let Err(e) = progress_tx_clone.send(ProgressUpdate::DownloadProgress {
+                            task_id: task.id.clone(),
+                            progress: 100.0,
+                            speed: 0.0,
+                            downloaded,
+                            total: downloaded,
+                            eta_seconds: Some(0),
+                        }).await {
+                            warn!("Failed to send synthesized completion progress: {}", e);
+                            break;
+                        }
                     }
 
                     last_statuses.insert(task.id.clone(), task.status);

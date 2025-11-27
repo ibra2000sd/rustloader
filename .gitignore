@@ -1,4 +1,3 @@
-cat > .gitignore << 'EOF'
 # Rust compilation artifacts
 /target/
 **/*.rs.bk
@@ -7,13 +6,28 @@ cat > .gitignore << 'EOF'
 # Cargo lock file (keep for binary projects)
 # Cargo.lock
 
+# Build outputs and distribution
+dist/
+*.tar.gz
+*.zip
+SHA256SUMS.txt
+SHA256SUMS
+
 # IDE files
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
+
+# OS files
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
 
 # Database files
 *.db
@@ -28,19 +42,28 @@ cat > .gitignore << 'EOF'
 *.m4a
 downloads/
 
-# Logs
+# Logs and process files
 *.log
+*.log.*
+logs/
+*.pid
 
 # Temporary files
 *.tmp
+*.bak
+*.backup
+*.old
+*_old.*
+*.orig
 .*.tmp
 segment_*.tmp
-
-# OS files
-Thumbs.db
-.DS_Store
 
 # Environment files
 .env
 .env.local
-EOF
+.env.*.local
+
+# Editor backups
+*.swp
+*.swo
+*~

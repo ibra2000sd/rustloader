@@ -20,51 +20,56 @@ pub fn download_item(task: &DownloadTaskUI) -> Element<'static, Message> {
     };
 
         let control_buttons = match task.status.as_str() {
-            "Downloading" => row![
-                button(text("Pause").size(12))
-                    .on_press(Message::PauseDownload(task.id.clone()))
-                    .padding([6, 12])
-                    .style(iced::theme::Button::Custom(Box::new(theme::SecondaryButton))),
-                button(text("Cancel").size(12))
-                    .on_press(Message::CancelDownload(task.id.clone()))
-                    .padding([6, 12])
-                    .style(iced::theme::Button::Custom(Box::new(theme::DestructiveButton))),
-            ],
-            "Paused" => row![
-                button(text("Resume").size(12))
-                    .on_press(Message::ResumeDownload(task.id.clone()))
-                    .padding([6, 12])
-                    .style(iced::theme::Button::Custom(Box::new(theme::PrimaryButton))),
-                button(text("Cancel").size(12))
-                    .on_press(Message::CancelDownload(task.id.clone()))
-                    .padding([6, 12])
-                    .style(iced::theme::Button::Custom(Box::new(theme::DestructiveButton))),
-            ],
-            "Completed" => row![
-                button(text("Open File").size(12))
-                    .on_press(Message::OpenFile(task.id.clone()))
-                    .padding([6, 12])
-                    .style(iced::theme::Button::Custom(Box::new(theme::PrimaryButton))),
-                button(text("Show in Folder").size(12))
-                    .on_press(Message::OpenDownloadFolder(task.id.clone()))
-                    .padding([6, 12])
-                    .style(iced::theme::Button::Custom(Box::new(theme::SecondaryButton))),
-                button(text("Remove").size(12))
-                    .on_press(Message::RemoveCompleted(task.id.clone()))
-                    .padding([6, 12])
-                    .style(iced::theme::Button::Custom(Box::new(theme::IconButton))),
-            ],
-            "Failed" => row![
-                button(text("Retry").size(12))
-                    .on_press(Message::RetryDownload(task.id.clone()))
-                    .padding([6, 12])
-                    .style(iced::theme::Button::Custom(Box::new(theme::PrimaryButton))),
-                button(text("Remove").size(12))
-                    .on_press(Message::RemoveCompleted(task.id.clone()))
-                    .padding([6, 12])
-                    .style(iced::theme::Button::Custom(Box::new(theme::IconButton))),
-            ],
-            _ => row![],
+                "Downloading" => row![
+                    button(text("Pause").size(12))
+                        .on_press(Message::PauseDownload(task.id.clone()))
+                        .padding([6, 12])
+                        .style(iced::theme::Button::Custom(Box::new(theme::SecondaryButton))),
+                    button(text("Cancel").size(12))
+                        .on_press(Message::CancelDownload(task.id.clone()))
+                        .padding([6, 12])
+                        .style(iced::theme::Button::Custom(Box::new(theme::DestructiveButton))),
+                ],
+                "Paused" => row![
+                    button(text("Resume").size(12))
+                        .on_press(Message::ResumeDownload(task.id.clone()))
+                        .padding([6, 12])
+                        .style(iced::theme::Button::Custom(Box::new(theme::PrimaryButton))),
+                    button(text("Cancel").size(12))
+                        .on_press(Message::CancelDownload(task.id.clone()))
+                        .padding([6, 12])
+                        .style(iced::theme::Button::Custom(Box::new(theme::DestructiveButton))),
+                ],
+                "Completed" => row![
+                    button(text("Open File").size(12))
+                        .on_press(Message::OpenFile(task.id.clone()))
+                        .padding([6, 12])
+                        .style(iced::theme::Button::Custom(Box::new(theme::PrimaryButton))),
+                    button(text("Show in Folder").size(12))
+                        .on_press(Message::OpenDownloadFolder(task.id.clone()))
+                        .padding([6, 12])
+                        .style(iced::theme::Button::Custom(Box::new(theme::SecondaryButton))),
+                    button(text("Remove").size(12))
+                        .on_press(Message::RemoveCompleted(task.id.clone()))
+                        .padding([6, 12])
+                        .style(iced::theme::Button::Custom(Box::new(theme::IconButton))),
+                ],
+                "Failed" => row![
+                    button(text("Retry").size(12))
+                        .on_press(Message::RetryDownload(task.id.clone()))
+                        .padding([6, 12])
+                        .style(iced::theme::Button::Custom(Box::new(theme::PrimaryButton))),
+                    button(text("Remove").size(12))
+                        .on_press(Message::RemoveCompleted(task.id.clone()))
+                        .padding([6, 12])
+                        .style(iced::theme::Button::Custom(Box::new(theme::IconButton))),
+                ],
+                _ => row![
+                    button(text("Cancel").size(12))
+                        .on_press(Message::CancelDownload(task.id.clone()))
+                        .padding([6, 12])
+                        .style(iced::theme::Button::Custom(Box::new(theme::DestructiveButton))),
+                ],
         };
 
     let speed_text = if task.status == "Completed" {
