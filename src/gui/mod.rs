@@ -5,6 +5,7 @@ pub mod views;
 pub mod components;
 pub mod integration;
 pub mod clipboard;
+pub mod theme;
 
 // Re-export for convenience
 pub use app::RustloaderApp;

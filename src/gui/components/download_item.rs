@@ -6,71 +6,89 @@ use iced::{Element, Length, Alignment, Color};
 use crate::gui::components::progress_bar;
 
 /// Create a download item widget
+/// Create a download item widget
 pub fn download_item(task: &DownloadTaskUI) -> Element<'static, Message> {
+    use crate::gui::theme;
+    use iced::Theme;
+
     let status_color = match task.status.as_str() {
-        "Downloading" => Color::from_rgb(0.2, 0.7, 1.0),
-        "Paused" => Color::from_rgb(0.8, 0.8, 0.2),
-        "Completed" => Color::from_rgb(0.2, 0.8, 0.3),
-        "Failed" => Color::from_rgb(0.9, 0.2, 0.2),
-        _ => Color::from_rgb(0.7, 0.7, 0.7),
+        "Downloading" => theme::ACCENT,
+        "Paused" => theme::WARNING,
+        "Completed" => theme::SUCCESS,
+        "Failed" => theme::DANGER,
+        _ => theme::TEXT_SECONDARY,
     };
 
-    let control_buttons = match task.status.as_str() {
-        "Downloading" => row![
-            button("⏸ Pause")
-                .on_press(Message::PauseDownload(task.id.clone()))
-                .padding([6, 12]),
-            button("✕ Cancel")
-                .on_press(Message::CancelDownload(task.id.clone()))
-                .padding([6, 12])
-                .style(iced::theme::Button::Destructive),
-        ],
-        "Paused" => row![
-            button("▶ Resume")
-                .on_press(Message::ResumeDownload(task.id.clone()))
-                .padding([6, 12]),
-            button("✕ Cancel")
-                .on_press(Message::CancelDownload(task.id.clone()))
-                .padding([6, 12])
-                .style(iced::theme::Button::Destructive),
-        ],
-        "Completed" => row![
-            button("📂 Open")
-                .on_press(Message::OpenDownloadFolder(task.id.clone()))
-                .padding([6, 12]),
-            button("✕ Remove")
-                .on_press(Message::RemoveCompleted(task.id.clone()))
-                .padding([6, 12])
-        ],
-        "Failed" => row![
-            button("🔄 Retry")
-                .on_press(Message::RetryDownload(task.id.clone()))
-                .padding([6, 12]),
-            button("✕ Remove")
-                .on_press(Message::RemoveCompleted(task.id.clone()))
-                .padding([6, 12])
-        ],
-        _ => row![],
-    };
+        let control_buttons = match task.status.as_str() {
+            "Downloading" => row![
+                button(text("Pause").size(12))
+                    .on_press(Message::PauseDownload(task.id.clone()))
+                    .padding([6, 12])
+                    .style(iced::theme::Button::Custom(Box::new(theme::SecondaryButton))),
+                button(text("Cancel").size(12))
+                    .on_press(Message::CancelDownload(task.id.clone()))
+                    .padding([6, 12])
+                    .style(iced::theme::Button::Custom(Box::new(theme::DestructiveButton))),
+            ],
+            "Paused" => row![
+                button(text("Resume").size(12))
+                    .on_press(Message::ResumeDownload(task.id.clone()))
+                    .padding([6, 12])
+                    .style(iced::theme::Button::Custom(Box::new(theme::PrimaryButton))),
+                button(text("Cancel").size(12))
+                    .on_press(Message::CancelDownload(task.id.clone()))
+                    .padding([6, 12])
+                    .style(iced::theme::Button::Custom(Box::new(theme::DestructiveButton))),
+            ],
+            "Completed" => row![
+                button(text("Open File").size(12))
+                    .on_press(Message::OpenFile(task.id.clone()))
+                    .padding([6, 12])
+                    .style(iced::theme::Button::Custom(Box::new(theme::PrimaryButton))),
+                button(text("Show in Folder").size(12))
+                    .on_press(Message::OpenDownloadFolder(task.id.clone()))
+                    .padding([6, 12])
+                    .style(iced::theme::Button::Custom(Box::new(theme::SecondaryButton))),
+                button(text("Remove").size(12))
+                    .on_press(Message::RemoveCompleted(task.id.clone()))
+                    .padding([6, 12])
+                    .style(iced::theme::Button::Custom(Box::new(theme::IconButton))),
+            ],
+            "Failed" => row![
+                button(text("Retry").size(12))
+                    .on_press(Message::RetryDownload(task.id.clone()))
+                    .padding([6, 12])
+                    .style(iced::theme::Button::Custom(Box::new(theme::PrimaryButton))),
+                button(text("Remove").size(12))
+                    .on_press(Message::RemoveCompleted(task.id.clone()))
+                    .padding([6, 12])
+                    .style(iced::theme::Button::Custom(Box::new(theme::IconButton))),
+            ],
+            _ => row![],
+        };
 
-    let speed_text = if task.speed > 0.0 {
+    let speed_text = if task.status == "Completed" {
+        "Complete".to_string()
+    } else if task.speed > 0.0 {
         format!("{:.1} MB/s", task.speed / 1024.0 / 1024.0)
     } else {
         "0.0 MB/s".to_string()
     };
 
-    let size_text = if task.total_mb > 0.0 {
+    let size_text = if task.status == "Completed" && task.total_mb > 0.0 {
+        format!("{:.1} MB", task.total_mb)
+    } else if task.total_mb > 0.0 {
         format!("{:.1} MB / {:.1} MB", task.downloaded_mb, task.total_mb)
     } else {
-        "0.0 MB".to_string()
+        format!("{:.1} MB", task.downloaded_mb)
     };
 
     let content = column![
         // Title and status
         row![
-            text(&task.title).size(16).width(Length::Fill),
+            text(&task.title).size(16).width(Length::Fill).style(theme::TEXT_PRIMARY),
             text(&task.status)
-                .size(14)
+                .size(12)
                 .style(status_color),
         ]
         .spacing(10)
@@ -81,22 +99,25 @@ pub fn download_item(task: &DownloadTaskUI) -> Element<'static, Message> {
 
         // Speed and size
         row![
-            text(speed_text).size(14),
+            text(speed_text).size(12).style(theme::TEXT_SECONDARY),
             Space::with_width(Length::Fill),
-            text(size_text).size(14),
+            text(size_text).size(12).style(theme::TEXT_SECONDARY),
         ]
         .spacing(10)
         .align_items(Alignment::Center),
 
         // Control buttons
-        control_buttons.spacing(8),
+        row![
+            Space::with_width(Length::Fill),
+            control_buttons.spacing(8),
+        ]
     ]
-    .spacing(10)
+    .spacing(12)
     .width(Length::Fill);
 
     container(content)
-        .padding(15)
+        .padding(16)
         .width(Length::Fill)
-        .style(iced::theme::Container::Box)
+        .style(iced::theme::Container::Custom(Box::new(theme::GlassContainer)))
         .into()
 }

@@ -1,6 +1,6 @@
 [package]
 name = "rustloader"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 
 [dependencies]
@@ -17,8 +17,9 @@ iced = { version = "0.12", features = ["tokio", "image", "advanced"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
-# Database
-sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "chrono"] }
+# Database - ONLY enable sqlite feature to avoid pulling in MySQL/Postgres (RSA vulnerability RUSTSEC-2023-0071)
+# default-features = false prevents automatic inclusion of all database backends
+sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio-rustls", "chrono"], default-features = false }
 
 # Async utilities
 futures = "0.3"
@@ -57,6 +58,7 @@ clap = { version = "4.5", features = ["derive"] }
 
 # Directory operations
 dirs = "5.0"
+open = "5.3.3"
 
 [dev-dependencies]
 tokio-test = "0.4"

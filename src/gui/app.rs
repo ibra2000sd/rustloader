@@ -38,6 +38,7 @@ pub struct RustloaderApp {
 
     // Flags
     is_extracting: bool,
+    url_error: Option<String>,
 }
 
 /// Application view
@@ -59,6 +60,7 @@ pub struct DownloadTaskUI {
     pub downloaded_mb: f64,
     pub total_mb: f64,
     pub eta_seconds: Option<u64>,
+    pub file_path: Option<String>, // Path to the downloaded file
 }
 
 /// Application messages
@@ -88,6 +90,7 @@ pub enum Message {
     RemoveCompleted(String),
     ClearAllCompleted,
     RetryDownload(String),
+    OpenFile(String),
     OpenDownloadFolder(String),
 
     // View navigation
@@ -173,6 +176,7 @@ impl Application for RustloaderApp {
             segments_per_download: settings.segments,
             quality: settings.quality,
             is_extracting: false,
+            url_error: None,
         };
 
         (app, Command::none())
@@ -187,6 +191,7 @@ impl Application for RustloaderApp {
             // Input events
             Message::UrlInputChanged(url) => {
                 self.url_input = url;
+                self.url_error = None; // Clear error when user types
                 Command::none()
             }
 
@@ -212,9 +217,21 @@ impl Application for RustloaderApp {
                             std::thread::spawn(move || {
                                 let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime for extractor thread");
                                 let res = rt.block_on(async move {
-                                    match backend_clone.lock() {
+                                    // FIX BUG-001: Clone bridge while holding lock, then release before await
+                                    let bridge_result = {
+                                        match backend_clone.lock() {
+                                            Ok(bridge) => {
+                                                // Clone the BackendBridge (cheap Arc clones)
+                                                Ok(bridge.clone())
+                                            }
+                                            Err(e) => Err(format!("Backend mutex poisoned: {}", e)),
+                                        }
+                                    }; // Lock is dropped here!
+                                    
+                                    // Now use cloned bridge with await (no lock held)
+                                    match bridge_result {
                                         Ok(mut bridge) => bridge.extract_video_info(&url_clone).await,
-                                        Err(e) => Err(format!("Backend mutex poisoned: {}", e)),
+                                        Err(e) => Err(e),
                                     }
                                 });
                                 let _ = tx.send(res);
@@ -266,8 +283,9 @@ impl Application for RustloaderApp {
                         let output_path = PathBuf::from(&self.download_location)
                             .join(format!("{}.mp4", sanitize_filename(&video_info.title)));
 
-                        // Clear URL input and update status while we start the download
+                        // Clear URL input, error, and update status while we start the download
                         self.url_input.clear();
+                        self.url_error = None;
                         self.status_message = format!("Starting download: {}", video_info.title.clone());
 
                         // Kick off start_download on backend and include video_info so UI can create an entry
@@ -292,9 +310,21 @@ impl Application for RustloaderApp {
                                     eprintln!("⏳ [GUI THREAD] calling backend.start_download for '{}'", vi_title);
                                     let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime for start_download thread");
                                     let res = rt.block_on(async move {
-                                        match backend_clone.lock() {
+                                        // FIX BUG-001: Clone bridge while holding lock, then release before await
+                                        let bridge_result = {
+                                            match backend_clone.lock() {
+                                                Ok(bridge) => {
+                                                    // Clone the BackendBridge (cheap Arc clones)
+                                                    Ok(bridge.clone())
+                                                }
+                                                Err(e) => Err(format!("Backend mutex poisoned: {}", e)),
+                                            }
+                                        }; // Lock is dropped here!
+                                        
+                                        // Now use cloned bridge with await (no lock held)
+                                        match bridge_result {
                                             Ok(mut bridge) => bridge.start_download(vi_for_call.clone(), out.clone(), None).await,
-                                            Err(e) => Err(format!("Backend mutex poisoned: {}", e)),
+                                            Err(e) => Err(e),
                                         }
                                     });
                                     eprintln!("⏳ [GUI THREAD] backend.start_download returned for '{}': {:?}", vi_title, res.as_ref().map(|s| s.as_str()).unwrap_or("Err"));
@@ -317,7 +347,9 @@ impl Application for RustloaderApp {
                         );
                     }
                     Err(e) => {
-                        self.status_message = format!("Failed to extract video info: {}", e);
+                        let friendly_error = make_error_user_friendly(&e);
+                        self.url_error = Some(friendly_error.clone());
+                        self.status_message = "Ready".to_string();
                     }
                 }
 
@@ -348,6 +380,7 @@ impl Application for RustloaderApp {
                     downloaded_mb: 0.0,
                     total_mb: video_info.filesize.unwrap_or(0) as f64 / (1024.0 * 1024.0),
                     eta_seconds: None,
+                    file_path: None,
                 };
 
                 self.active_downloads.push(task_ui);
@@ -384,39 +417,198 @@ impl Application for RustloaderApp {
 
             // Queue control
             Message::PauseDownload(task_id) => {
-                // This would call the backend
+                let backend = self.backend.clone();
+                let id = task_id.clone();
+                
+                // Update local UI state immediately
                 if let Some(task) = self.active_downloads.iter_mut().find(|t| t.id == task_id) {
-                    task.status = "Paused".to_string();
+                    task.status = "Pausing...".to_string();
                 }
-                Command::none()
+                
+                Command::perform(
+                    async move {
+                        // Clone bridge before await to avoid deadlock
+                        let bridge_result = {
+                            match backend.lock() {
+                                Ok(bridge) => Ok(bridge.clone()),
+                                Err(e) => Err(format!("Backend mutex poisoned: {}", e)),
+                            }
+                        }; // Lock dropped here
+                        
+                        match bridge_result {
+                            Ok(mut bridge) => {
+                                match bridge.pause_download(&id).await {
+                                    Ok(_) => {
+                                        eprintln!("✅ Paused download: {}", id);
+                                        Some(())
+                                    }
+                                    Err(e) => {
+                                        eprintln!("❌ Failed to pause task {}: {}", id, e);
+                                        None
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("❌ Backend error: {}", e);
+                                None
+                            }
+                        }
+                    },
+                    |_| Message::Tick, // Trigger UI refresh
+                )
             }
 
             Message::ResumeDownload(task_id) => {
-                // This would call the backend
+                let backend = self.backend.clone();
+                let id = task_id.clone();
+                
+                // Update local UI state immediately
                 if let Some(task) = self.active_downloads.iter_mut().find(|t| t.id == task_id) {
-                    task.status = "Downloading".to_string();
+                    task.status = "Resuming...".to_string();
                 }
-                Command::none()
+                
+                Command::perform(
+                    async move {
+                        // Clone bridge before await to avoid deadlock
+                        let bridge_result = {
+                            match backend.lock() {
+                                Ok(bridge) => Ok(bridge.clone()),
+                                Err(e) => Err(format!("Backend mutex poisoned: {}", e)),
+                            }
+                        }; // Lock dropped here
+                        
+                        match bridge_result {
+                            Ok(mut bridge) => {
+                                match bridge.resume_download(&id).await {
+                                    Ok(_) => {
+                                        eprintln!("✅ Resumed download: {}", id);
+                                        Some(())
+                                    }
+                                    Err(e) => {
+                                        eprintln!("❌ Failed to resume task {}: {}", id, e);
+                                        None
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("❌ Backend error: {}", e);
+                                None
+                            }
+                        }
+                    },
+                    |_| Message::Tick, // Trigger UI refresh
+                )
             }
 
             Message::CancelDownload(task_id) => {
-                // This would call the backend
-                if let Some(index) = self.active_downloads.iter().position(|t| t.id == task_id) {
-                    self.active_downloads.remove(index);
+                let backend = self.backend.clone();
+                let id = task_id.clone();
+                
+                // Update local UI state immediately
+                if let Some(task) = self.active_downloads.iter_mut().find(|t| t.id == task_id) {
+                    task.status = "Cancelling...".to_string();
                 }
-                Command::none()
+                
+                Command::perform(
+                    async move {
+                        // Clone bridge before await to avoid deadlock
+                        let bridge_result = {
+                            match backend.lock() {
+                                Ok(bridge) => Ok(bridge.clone()),
+                                Err(e) => Err(format!("Backend mutex poisoned: {}", e)),
+                            }
+                        }; // Lock dropped here
+                        
+                        match bridge_result {
+                            Ok(mut bridge) => {
+                                match bridge.cancel_download(&id).await {
+                                    Ok(_) => {
+                                        eprintln!("✅ Cancelled download: {}", id);
+                                        Some(id.clone())
+                                    }
+                                    Err(e) => {
+                                        eprintln!("❌ Failed to cancel task {}: {}", id, e);
+                                        None
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("❌ Backend error: {}", e);
+                                None
+                            }
+                        }
+                    },
+                    |result| {
+                        match result {
+                            Some(task_id) => Message::RemoveCompleted(task_id),
+                            None => Message::Tick,
+                        }
+                    },
+                )
             }
 
             Message::RemoveCompleted(task_id) => {
+                let backend = self.backend.clone();
+                let id = task_id.clone();
+                
+                // Remove from UI immediately
                 if let Some(index) = self.active_downloads.iter().position(|t| t.id == task_id) {
                     self.active_downloads.remove(index);
                 }
-                Command::none()
+                
+                // Also remove from backend queue
+                Command::perform(
+                    async move {
+                        let bridge_result = {
+                            match backend.lock() {
+                                Ok(bridge) => Ok(bridge.clone()),
+                                Err(e) => Err(format!("Backend mutex poisoned: {}", e)),
+                            }
+                        };
+                        
+                        match bridge_result {
+                            Ok(mut bridge) => {
+                                bridge.remove_task(&id).await.ok();
+                            }
+                            Err(e) => {
+                                eprintln!("❌ Failed to remove task from backend: {}", e);
+                            }
+                        }
+                    },
+                    |_| Message::Tick,
+                )
             }
 
             Message::ClearAllCompleted => {
+                let backend = self.backend.clone();
+                
+                // Remove from UI immediately
                 self.active_downloads.retain(|t| t.status != "Completed");
-                Command::none()
+                
+                // Also clear from backend queue
+                Command::perform(
+                    async move {
+                        let bridge_result = {
+                            match backend.lock() {
+                                Ok(bridge) => Ok(bridge.clone()),
+                                Err(e) => Err(format!("Backend mutex poisoned: {}", e)),
+                            }
+                        };
+                        
+                        match bridge_result {
+                            Ok(mut bridge) => {
+                                match bridge.clear_completed().await {
+                                    Ok(_) => eprintln!("✅ Cleared completed tasks from backend"),
+                                    Err(e) => eprintln!("❌ Failed to clear completed: {}", e),
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("❌ Backend error: {}", e);
+                            }
+                        }
+                    },
+                    |_| Message::Tick,
+                )
             }
 
             Message::RetryDownload(task_id) => {
@@ -428,8 +620,49 @@ impl Application for RustloaderApp {
                 Command::none()
             }
 
-            Message::OpenDownloadFolder(_task_id) => {
-                // This would open the download folder
+            Message::OpenFile(task_id) => {
+                // Open the downloaded file with the default application
+                if let Some(task) = self.active_downloads.iter().find(|t| t.id == task_id) {
+                    if let Some(file_path) = &task.file_path {
+                        let path = std::path::PathBuf::from(file_path);
+                        if path.exists() {
+                            if let Err(e) = open::that(&path) {
+                                eprintln!("Failed to open file: {}", e);
+                            }
+                        } else {
+                            eprintln!("File not found: {:?}", path);
+                        }
+                    } else {
+                        eprintln!("File path not available for task: {}", task_id);
+                    }
+                }
+                Command::none()
+            }
+
+            Message::OpenDownloadFolder(task_id) => {
+                // Open the folder containing the downloaded file
+                if let Some(task) = self.active_downloads.iter().find(|t| t.id == task_id) {
+                    if let Some(file_path) = &task.file_path {
+                        let path = std::path::PathBuf::from(file_path);
+                        if let Some(parent) = path.parent() {
+                            if let Err(e) = open::that(parent) {
+                                eprintln!("Failed to open folder: {}", e);
+                            }
+                        }
+                    } else {
+                        // Fallback to opening the download location
+                        let folder = std::path::PathBuf::from(&self.download_location);
+                        if let Err(e) = open::that(&folder) {
+                            eprintln!("Failed to open folder: {}", e);
+                        }
+                    }
+                } else {
+                    // Task not found, open default download location
+                    let folder = std::path::PathBuf::from(&self.download_location);
+                    if let Err(e) = open::that(&folder) {
+                        eprintln!("Failed to open folder: {}", e);
+                    }
+                }
                 Command::none()
             }
 
@@ -451,7 +684,10 @@ impl Application for RustloaderApp {
             }
 
             Message::BrowseDownloadLocation => {
-                // This would open a file dialog
+                // Open file dialog to select download location
+                if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                    self.download_location = path.to_string_lossy().to_string();
+                }
                 Command::none()
             }
 
@@ -468,6 +704,9 @@ impl Application for RustloaderApp {
             Message::QualityChanged(quality) => {
                 self.quality = match quality.as_str() {
                     "Best Available" => VideoQuality::Best,
+                    "1080p" => VideoQuality::Specific("1080".to_string()),
+                    "720p" => VideoQuality::Specific("720".to_string()),
+                    "480p" => VideoQuality::Specific("480".to_string()),
                     "Worst Available" => VideoQuality::Worst,
                     _ => VideoQuality::Best,
                 };
@@ -538,6 +777,7 @@ impl Application for RustloaderApp {
                                     downloaded_mb: 0.0,
                                     total_mb: video_info.filesize.unwrap_or(0) as f64 / (1024.0 * 1024.0),
                                     eta_seconds: None,
+                                    file_path: None,
                                 };
 
                                 self.active_downloads.push(task_ui);
@@ -557,13 +797,14 @@ impl Application for RustloaderApp {
                                     eprintln!("⚠️ Task {} not found in active_downloads!", task_id);
                                 }
                             }
-                            ProgressUpdate::DownloadComplete(task_id) => {
+                            ProgressUpdate::DownloadComplete { task_id, file_path } => {
                                 if let Some(task) = self.active_downloads.iter_mut().find(|t| t.id == task_id) {
                                     task.status = "Completed".to_string();
                                     task.progress = 1.0;
+                                    task.file_path = Some(file_path.clone());
                                 }
                                 self.status_message = "Download completed".to_string();
-                                eprintln!("🎉 Download complete for task {}", task_id);
+                                eprintln!("✅ [GUI] Download complete signal received for task {} at path: {}", task_id, file_path);
                             }
                             ProgressUpdate::DownloadFailed { task_id, error } => {
                                 if let Some(task) = self.active_downloads.iter_mut().find(|t| t.id == task_id) {
@@ -572,7 +813,7 @@ impl Application for RustloaderApp {
                                 self.status_message = format!("Download failed: {}", error);
                                 eprintln!("❌ Download failed for {}: {}", task_id, error);
                             }
-                            ProgressUpdate::TaskStatusChanged { task_id, status } => {
+                            ProgressUpdate::TaskStatusChanged { task_id, status, file_path } => {
                                 if let Some(task) = self.active_downloads.iter_mut().find(|t| t.id == task_id) {
                                     task.status = match status {
                                         TaskStatus::Queued => "Queued".to_string(),
@@ -582,6 +823,9 @@ impl Application for RustloaderApp {
                                         TaskStatus::Failed(_) => "Failed".to_string(),
                                         TaskStatus::Cancelled => "Cancelled".to_string(),
                                     };
+                                    if let Some(path) = file_path {
+                                        task.file_path = Some(path);
+                                    }
                                     eprintln!("ℹ️ Task {} status changed -> {}", task.title, task.status);
                                 } else {
                                     eprintln!("⚠️ Task {} not found for status change", task_id);
@@ -606,14 +850,64 @@ impl Application for RustloaderApp {
     }
 
     fn view(&self) -> Element<Message> {
-        match self.current_view {
+        use iced::widget::{column, row, container, text, button, Space};
+        use iced::Length;
+        use crate::gui::theme;
+
+        // Sidebar
+        let sidebar = container(
+            column![
+                // App Title / Logo Area
+                container(
+                    text("Rustloader")
+                        .size(24)
+                        .style(theme::TEXT_PRIMARY)
+                )
+                .padding(20),
+                
+                Space::with_height(20),
+
+                // Navigation Items
+                button(
+                    text("Downloads").size(16)
+                )
+                .style(iced::theme::Button::Custom(Box::new(if self.current_view == View::Main { theme::SidebarButtonStyle::Active } else { theme::SidebarButtonStyle::Inactive })))
+                .width(Length::Fill)
+                .padding(12)
+                .on_press(Message::SwitchToMain),
+
+                button(
+                    text("Settings").size(16)
+                )
+                .style(iced::theme::Button::Custom(Box::new(if self.current_view == View::Settings { theme::SidebarButtonStyle::Active } else { theme::SidebarButtonStyle::Inactive })))
+                .width(Length::Fill)
+                .padding(12)
+                .on_press(Message::SwitchToSettings),
+            ]
+            .spacing(10)
+            .padding(10)
+        )
+        .width(Length::Fixed(250.0))
+        .height(Length::Fill)
+        .style(iced::theme::Container::Custom(Box::new(theme::SidebarContainer)));
+
+        // Main Content Area
+        let content = match self.current_view {
             View::Main => {
                 use crate::gui::views::main_view;
+                let quality_str = match self.quality {
+                    VideoQuality::Best => "Best Available",
+                    VideoQuality::Worst => "Worst Available",
+                    VideoQuality::Specific(_) => "Custom",
+                };
                 main_view(
                     &self.url_input,
                     &self.active_downloads,
                     &self.status_message,
                     self.is_extracting,
+                    self.url_error.as_deref(),
+                    quality_str,
+                    self.segments_per_download,
                 )
             }
             View::Settings => {
@@ -624,7 +918,23 @@ impl Application for RustloaderApp {
                     self.segments_per_download,
                 )
             }
-        }
+        };
+
+        // Combine Sidebar and Content
+        let main_layout = row![
+            sidebar,
+            container(content)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .padding(20)
+        ];
+
+        // Wrap in Gradient Container
+        container(main_layout)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(iced::theme::Container::Custom(Box::new(theme::MainGradientContainer)))
+            .into()
     }
 
     fn subscription(&self) -> Subscription<Message> {
@@ -697,4 +1007,31 @@ async fn save_settings_to_db(db_manager: &DatabaseManager, settings: &AppSetting
 
     Ok(())
 }
+
+/// Convert technical error messages to user-friendly text
+fn make_error_user_friendly(error: &str) -> String {
+    let error_lower = error.to_lowercase();
+    
+    if error_lower.contains("truncated") || error_lower.contains("incomplete") {
+        "Please enter a complete and valid URL".to_string()
+    } else if error_lower.contains("invalid url") || error_lower.contains("malformed") {
+        "This doesn't appear to be a valid video URL".to_string()
+    } else if error_lower.contains("network") || error_lower.contains("connection") || error_lower.contains("timeout") {
+        "Unable to connect. Please check your internet connection".to_string()
+    } else if error_lower.contains("unavailable") || error_lower.contains("not found") || error_lower.contains("removed") {
+        "This video is not available or has been removed".to_string()
+    } else if error_lower.contains("private") || error_lower.contains("restricted") {
+        "This video is private or restricted".to_string()
+    } else if error_lower.contains("age") && error_lower.contains("restricted") {
+        "This video is age-restricted and cannot be downloaded".to_string()
+    } else if error_lower.contains("geo") || error_lower.contains("region") {
+        "This video is not available in your region".to_string()
+    } else if error_lower.contains("copyright") {
+        "This video cannot be downloaded due to copyright restrictions".to_string()
+    } else {
+        // Generic fallback
+        "Unable to process this URL. Please try a different video".to_string()
+    }
+}
+
 

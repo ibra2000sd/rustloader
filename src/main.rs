@@ -45,10 +45,13 @@ fn main() -> Result<()> {
     // Start the GUI application (synchronous entrypoint)
     gui::RustloaderApp::run(iced::Settings {
         window: iced::window::Settings {
-            size: iced::Size::new(800.0, 600.0),
-            min_size: Some(iced::Size::new(600.0, 400.0)),
+            size: iced::Size::new(900.0, 600.0),
+            min_size: Some(iced::Size::new(800.0, 500.0)),
+            decorations: true, // Keep decorations for now as custom title bars are complex in Iced without winit direct access
+            transparent: false, // Transparency can be tricky across platforms
             ..Default::default()
         },
+        antialiasing: true,
         ..Default::default()
     })?;
 

@@ -1,18 +1,15 @@
 //! Database schema
 
 use anyhow::Result;
-use sqlx::{migrate::MigrateDatabase, sqlite::SqlitePoolOptions, Pool, Sqlite};
+use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
 use tracing::{debug, info};
 
 /// Initialize the database
 pub async fn initialize_database(db_path: &str) -> Result<Pool<Sqlite>> {
-    // Create database if it doesn't exist
-    if !Sqlite::database_exists(db_path).await? {
-        debug!("Creating database at: {}", db_path);
-        Sqlite::create_database(db_path).await?;
-    }
-
-    // Connect to the database
+    // For SQLite, the database file is created automatically on connect if it doesn't exist
+    // No need to explicitly check/create like with MySQL/Postgres
+    
+    // Connect to the database (creates file if doesn't exist)
     let pool = SqlitePoolOptions::new()
         .max_connections(10)
         .connect(db_path)

@@ -5,30 +5,32 @@ use crate::downloader::merger::{cleanup_segments, merge_segments, MergeProgress}
 use crate::downloader::segment::{calculate_segments, download_segment, SegmentProgress};
 use anyhow::Result;
 use futures::stream::{self, StreamExt};
-use reqwest::{Client, Response};
+use reqwest::Client;
+use tokio::time::{timeout, Duration as TokioDuration};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::fs::File;
-use tokio::io::{AsyncWriteExt, BufWriter};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::sleep;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 use tokio::process::Command as AsyncCommand;
 use std::process::Stdio;
 use crate::downloader::progress::{DownloadProgress, DownloadStatus};
 
-fn parse_yt_dlp_progress(line: &str) -> Option<(f64, f64)> {
-    // crude parser: find numeric percentage then optional speed
+fn parse_yt_dlp_progress(line: &str) -> Option<(f64, f64, u64)> {
+    // Expected format: [download]  42.5% of ~ 150.00MiB at  5.20MiB/s ETA 00:15
     if !line.contains('%') {
         return None;
     }
+    
+    // 1. Parse Percentage
     let pct_pos = line.find('%')?;
     let before = &line[..pct_pos];
     let mut num_start = before.len();
     for (i, c) in before.chars().rev().enumerate() {
-        if c.is_digit(10) || c == '.' {
+        if c.is_ascii_digit() || c == '.' {
             num_start = before.len() - i - 1;
         } else if num_start != before.len() {
             break;
@@ -38,7 +40,46 @@ fn parse_yt_dlp_progress(line: &str) -> Option<(f64, f64)> {
     let num_str = &before[num_start..].trim();
     let pct = num_str.parse::<f64>().ok()?;
 
-    // parse speed (look for ' at ' and '/s')
+    // 2. Parse Total Size (look for "of " or "of ~ ")
+    let mut total_bytes = 0;
+    if let Some(of_idx) = line.find(" of ") {
+        let after_of = &line[of_idx + 4..];
+        // Check for "~" (approximate)
+        let size_str_start = if after_of.trim_start().starts_with('~') {
+            if let Some(tilde_pos) = after_of.find('~') {
+                &after_of[tilde_pos + 1..]
+            } else {
+                after_of
+            }
+        } else {
+            after_of
+        };
+        
+        // Find the end of the size string (usually before " at ")
+        let size_end = size_str_start.find(" at ").unwrap_or(size_str_start.len());
+        let size_token = size_str_start[..size_end].trim();
+        
+        // Parse number and unit
+        let mut idx = 0;
+        for (i, ch) in size_token.chars().enumerate() {
+            if ch.is_digit(10) || ch == '.' { idx = i + 1; } else { break; }
+        }
+        
+        if idx > 0 {
+             if let Ok(num) = size_token[..idx].parse::<f64>() {
+                let unit = size_token[idx..].trim();
+                total_bytes = match unit {
+                    "KiB" => (num * 1024.0) as u64,
+                    "MiB" => (num * 1024.0 * 1024.0) as u64,
+                    "GiB" => (num * 1024.0 * 1024.0 * 1024.0) as u64,
+                    "B" | "" => num as u64,
+                    _ => num as u64,
+                };
+            }
+        }
+    }
+
+    // 3. Parse Speed (look for ' at ' and '/s')
     let mut speed_bps = 0.0;
     if let Some(at_idx) = line.find(" at ") {
         let after = &line[at_idx + 4..];
@@ -46,7 +87,7 @@ fn parse_yt_dlp_progress(line: &str) -> Option<(f64, f64)> {
             let token = &after[..slash_idx].trim();
             let mut idx = 0;
             for (i, ch) in token.chars().enumerate() {
-                if ch.is_digit(10) || ch == '.' { idx = i + 1; } else { break; }
+                if ch.is_ascii_digit() || ch == '.' { idx = i + 1; } else { break; }
             }
             if idx > 0 {
                 if let Ok(num) = token[..idx].parse::<f64>() {
@@ -63,7 +104,7 @@ fn parse_yt_dlp_progress(line: &str) -> Option<(f64, f64)> {
         }
     }
 
-    Some((pct, speed_bps))
+    Some((pct, speed_bps, total_bytes))
 }
 
 /// Download configuration
@@ -98,6 +139,8 @@ pub struct DownloadEngine {
     config: DownloadConfig,
 }
 
+
+
 impl DownloadEngine {
     /// Create new download engine with configuration
     pub fn new(config: DownloadConfig) -> Self {
@@ -131,6 +174,17 @@ impl DownloadEngine {
         } else {
             eprintln!("✅ [ENGINE] Initial progress sent");
         }
+
+        // CRITICAL FIX: If URL is a YouTube page, bypass HTTP probing entirely.
+        // YouTube URLs redirect to HLS manifests when probed via HTTP HEAD/GET,
+        // causing the engine to incorrectly report 50-byte manifest as file size.
+        if url.contains("youtube.com/watch") || url.contains("youtu.be/") {
+            eprintln!("🔀 [ENGINE] YouTube URL detected - bypassing probe, using yt-dlp directly");
+            eprintln!("   - Reason: YouTube URLs redirect to HLS manifests during HTTP probing");
+            eprintln!("   - Solution: yt-dlp handles YouTube streams natively");
+            return self.download_via_ytdlp(url, output_path, progress_tx).await;
+        }
+
         // Quick HLS detection: if URL looks like a playlist, fallback to yt-dlp
         if url.contains(".m3u8") || url.contains("/manifest") || url.contains("playlist") {
             eprintln!("🔀 [ENGINE] Taking path: yt-dlp fallback (HLS/playlist detected)");
@@ -381,8 +435,7 @@ impl DownloadEngine {
         output_path: &Path,
         progress_tx: mpsc::Sender<DownloadProgress>,
     ) -> Result<()> {
-        eprintln!("🎬 [YT-DLP] download_via_ytdlp called");
-        eprintln!("   - URL: {}", url);
+        debug!("download_via_ytdlp called for URL: {}", url);
 
         // Clone the sender before spawning any background tasks and
         // use a best-effort initial send so a dropped receiver doesn't fail us.
@@ -396,52 +449,135 @@ impl DownloadEngine {
         // Best-effort: don't propagate an error if receiver was dropped.
         let _ = progress_tx_for_spawn.send(initial.clone()).await;
 
-        // Prepare command: yt-dlp -f best -o <output_path> <url>
-        eprintln!("🔧 [YT-DLP] Spawning yt-dlp process...");
-        let out = output_path.to_string_lossy().to_string();
-        let mut cmd = AsyncCommand::new("yt-dlp");
-        cmd.arg("-f").arg("best").arg("-o").arg(out).arg(url);
-        cmd.stderr(Stdio::piped());
-        cmd.stdout(Stdio::null());
+          // Prepare command: yt-dlp with explicit progress flags
+          eprintln!("🔧 [YT-DLP] Spawning yt-dlp process...");
+          let out = output_path.to_string_lossy().to_string();
+          let mut cmd = AsyncCommand::new("yt-dlp");
+          cmd.arg("-f").arg("best")
+              .arg("--newline")        // Force newline after each progress line (critical for non-TTY)
+              .arg("--no-warnings")    // Reduce stderr noise
+              .arg("--progress")       // Explicitly enable progress output
+              .arg("-o").arg(out)
+              .arg(url);
+          // Combine stderr and stdout to capture all output
+          cmd.stderr(Stdio::piped());
+          cmd.stdout(Stdio::piped());
 
+        eprintln!("🚀 [YT-DLP] About to spawn yt-dlp command...");
         let mut child = cmd.spawn()?;
+        eprintln!("✅ [YT-DLP] Command spawned successfully, checking stderr pipe...");
 
         // Read stderr for progress lines — spawn a task that holds a clone of the sender
-        if let Some(stderr) = child.stderr.take() {
-            let reader = BufReader::new(stderr);
-            let mut lines = reader.lines();
-            // Clone the sender and move it into the spawned task so the sender
-            // remains alive while we parse and forward stderr progress lines.
+        // Use a handle to track the reader task so we can detect if it completes
+        let reader_handle = if let Some(stderr) = child.stderr.take() {
+            eprintln!("✅ [YT-DLP] Stderr pipe available, spawning reader task...");
             let progress_for_reader = progress_tx_for_spawn.clone();
-
-            tokio::spawn(async move {
-                while let Some(Ok(line)) = lines.next_line().await.transpose() {
-                    eprintln!("📄 [YT-DLP] stderr: {}", line);
+            
+            eprintln!("🎬 [YT-DLP] About to call tokio::spawn for stderr reader...");
+            let handle = tokio::spawn(async move {
+                eprintln!("📖 [YT-DLP] INSIDE SPAWNED TASK - stderr reader starting!");
+                use tokio::io::AsyncBufReadExt;
+                let reader = tokio::io::BufReader::new(stderr);
+                let mut lines = reader.lines();
+                
+                eprintln!("📖 [YT-DLP] Starting stderr reader...");
+                let mut line_count = 0;
+                
+                while let Ok(Some(line)) = lines.next_line().await {
+                    line_count += 1;
+                    eprintln!("📄 [YT-DLP] stderr #{}: {}", line_count, line);
+                    
+                    // Detect errors from yt-dlp
+                    if line.contains("ERROR:") || line.contains("error:") {
+                        eprintln!("❌ [YT-DLP] Error detected: {}", line);
+                        let mut p = DownloadProgress::new(100, 1);
+                        p.status = DownloadStatus::Failed(line.clone());
+                        let _ = progress_for_reader.send(p).await;
+                        break;
+                    }
+                    
                     // Try to parse percentage and speed from lines like:
                     // [download]  12.5% of ~10.50MiB at 1.23MiB/s ETA 00:07
-                    if let Some((pct, speed_bps)) = parse_yt_dlp_progress(&line) {
-                        eprintln!("🔁 [YT-DLP] Parsed progress: {}% speed={} B/s", pct, speed_bps);
+                    if let Some((pct, speed_bps, total_bytes)) = parse_yt_dlp_progress(&line) {
+                        eprintln!("🔁 [YT-DLP] Parsed progress: {}% speed={} B/s total={} B", pct, speed_bps, total_bytes);
                         let mut p = DownloadProgress::new(100, 1);
                         p.status = DownloadStatus::Downloading;
-                        // represent percentage on a 0..100 scale when total size unknown
-                        p.downloaded_bytes = pct.round() as u64;
+                        // Calculate downloaded bytes from percentage and total
+                        p.downloaded_bytes = if total_bytes > 0 {
+                            (pct / 100.0 * total_bytes as f64) as u64
+                        } else {
+                            pct.round() as u64
+                        };
+                        p.total_bytes = total_bytes;
                         p.speed = speed_bps;
                         p.segments_completed = 0;
 
                         // Best-effort send: don't treat a closed receiver as fatal here
                         if let Err(e) = progress_for_reader.send(p).await {
                             eprintln!("⚠️ [YT-DLP] Failed to send parsed progress: {}", e);
-                            warn!("Failed to send parsed progress (yt-dlp): {}", e);
                             break;
                         }
+                    }
+                }
+                
+                eprintln!("📖 [YT-DLP] Stderr reader finished. Read {} lines total", line_count);
+            });
+            eprintln!("✅ [YT-DLP] tokio::spawn returned, reader task is now running");
+            Some(handle)
+        } else {
+            eprintln!("❌ [YT-DLP] ERROR: No stderr pipe available - child.stderr.take() returned None!");
+            eprintln!("   This means stderr was not properly set up or was already taken");
+            None
+        };
+
+        // Also consume stdout and parse progress
+        if let Some(stdout) = child.stdout.take() {
+            let progress_for_stdout = progress_tx_for_spawn.clone();
+            tokio::spawn(async move {
+                use tokio::io::AsyncBufReadExt;
+                let reader = tokio::io::BufReader::new(stdout);
+                let mut lines = reader.lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    // Try to parse percentage and speed from stdout
+                    if let Some((pct, speed_bps, total_bytes)) = parse_yt_dlp_progress(&line) {
+                        let mut p = DownloadProgress::new(100, 1);
+                        p.status = DownloadStatus::Downloading;
+                        p.downloaded_bytes = if total_bytes > 0 {
+                            (pct / 100.0 * total_bytes as f64) as u64
+                        } else {
+                            pct.round() as u64
+                        };
+                        p.total_bytes = total_bytes;
+                        p.speed = speed_bps;
+                        p.segments_completed = 0;
+
+                        let _ = progress_for_stdout.send(p).await;
                     }
                 }
             });
         }
 
-        // Wait for child to finish
-        eprintln!("🔚 [YT-DLP] Waiting for yt-dlp process to exit...");
-        let status = child.wait().await?;
+        // Wait for child to finish with 30-minute timeout
+        // Yield to allow spawned tasks to start
+        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let wait_result = timeout(TokioDuration::from_secs(1800), child.wait()).await;
+        
+        let status = match wait_result {
+            Ok(Ok(status)) => status,
+            Ok(Err(e)) => return Err(anyhow::anyhow!("Failed to wait for yt-dlp process: {}", e)),
+            Err(_) => {
+                let _ = child.kill().await;
+                return Err(anyhow::anyhow!("yt-dlp process timed out after 30 minutes"));
+            }
+        };
+        
+        // Give the reader task a moment to finish reading any buffered output
+        if let Some(handle) = reader_handle {
+            eprintln!("⏳ [YT-DLP] Waiting for stderr reader to finish...");
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
+        }
         eprintln!("🔚 [YT-DLP] Process exited with: {:?}", status.code());
         if status.success() {
             eprintln!("✅ [YT-DLP] Download successful");

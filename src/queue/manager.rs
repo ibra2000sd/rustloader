@@ -3,6 +3,7 @@
 use crate::downloader::{DownloadEngine, DownloadProgress};
 use crate::extractor::{Format, VideoInfo};
 use crate::utils::error::RustloaderError;
+use crate::utils::{FileOrganizer, MetadataManager, ContentType, VideoMetadata};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use std::time::Duration;
@@ -19,6 +20,8 @@ pub struct QueueManager {
     active_downloads: Arc<Mutex<HashMap<String, DownloadHandle>>>,
     max_concurrent: usize,
     engine: Arc<DownloadEngine>,
+    file_organizer: Arc<FileOrganizer>,
+    metadata_manager: Arc<MetadataManager>,
 }
 
 /// Download task
@@ -56,12 +59,19 @@ struct DownloadHandle {
 
 impl QueueManager {
     /// Create new queue manager
-    pub fn new(max_concurrent: usize, engine: DownloadEngine) -> Self {
+    pub fn new(
+        max_concurrent: usize,
+        engine: DownloadEngine,
+        file_organizer: FileOrganizer,
+        metadata_manager: MetadataManager,
+    ) -> Self {
         Self {
             queue: Arc::new(Mutex::new(VecDeque::new())),
             active_downloads: Arc::new(Mutex::new(HashMap::new())),
             max_concurrent,
             engine: Arc::new(engine),
+            file_organizer: Arc::new(file_organizer),
+            metadata_manager: Arc::new(metadata_manager),
         }
     }
 
@@ -79,10 +89,13 @@ impl QueueManager {
         }
 
         info!("Added task {} to queue", task_id);
-        eprintln!("📋 [QUEUE] Triggering process_queue...");
+        eprintln!("📋 [QUEUE] Task added, waiting for persistent loop to pick it up...");
 
-        // Start processing immediately
-        self.process_queue().await;
+        // DO NOT call process_queue() here.
+        // If we call it here, it runs in the caller's runtime context.
+        // The GUI creates a temporary runtime for the add_task call, which is dropped immediately.
+        // If we spawn the download task here, it dies with the temporary runtime.
+        // We must let the persistent start() loop (running on the main app runtime) pick it up.
 
         eprintln!("✅ [QUEUE] add_task completed for: {}", task_id);
 
@@ -224,8 +237,29 @@ impl QueueManager {
     pub async fn clear_completed(&self) -> Result<()> {
         let mut queue = self.queue.lock().await;
         queue.retain(|task| task.status != TaskStatus::Completed);
+        
+        let mut active = self.active_downloads.lock().await;
+        active.retain(|_, handle| handle.task.status != TaskStatus::Completed);
 
-        info!("Cleared completed tasks from queue");
+        info!("Cleared completed tasks from queue and active downloads");
+        Ok(())
+    }
+
+    /// Remove a specific task (for Remove button on individual tasks)
+    pub async fn remove_task(&self, task_id: &str) -> Result<()> {
+        // Remove from queue
+        {
+            let mut queue = self.queue.lock().await;
+            queue.retain(|task| task.id != task_id);
+        }
+
+        // Remove from active downloads
+        {
+            let mut active = self.active_downloads.lock().await;
+            active.remove(task_id);
+        }
+
+        info!("Removed task {} from queue and active downloads", task_id);
         Ok(())
     }
 
@@ -285,9 +319,16 @@ impl QueueManager {
 
     /// Start downloading a task
     async fn start_download(&self, mut task: DownloadTask) {
+        eprintln!("\n🎬 [QUEUE] ========== start_download CALLED ==========");
+        eprintln!("   - Task ID: {}", task.id);
+        eprintln!("   - Title: {}", task.video_info.title);
+        eprintln!("   - Output: {:?}", task.output_path);
+        eprintln!("   - Format: {}", task.format.format_id);
+        eprintln!("   - Format URL: {}", task.format.url);
+        
         let task_id = task.id.clone();
-        let url = task.format.url.clone();
         let output_path = task.output_path.clone();
+        let url = task.format.url.clone();
 
         eprintln!("💾 [DOWNLOAD] start_download called for: {}", task_id);
         eprintln!("   - URL: {}", url);
@@ -295,16 +336,6 @@ impl QueueManager {
 
         // Create channels for progress updates and cancellation
         let (progress_tx, mut progress_rx) = mpsc::channel::<DownloadProgress>(100);
-
-        // 🧪 TEST: Verify channel works
-        eprintln!("🧪 [TEST] Testing channel immediately after creation...");
-        let test_progress = DownloadProgress::new(100, 1);
-        let test_tx = progress_tx.clone();
-        let test_result = test_tx.send(test_progress).await;
-        eprintln!("🧪 [TEST] Test send result: {:?}", test_result.is_ok());
-
-        let received_test = progress_rx.recv().await;
-        eprintln!("🧪 [TEST] Test receive result: {:?}", received_test.is_some());
         let (cancel_tx, mut cancel_rx) = mpsc::channel::<()>(1);
 
         eprintln!("   - Created progress channel");
@@ -320,6 +351,10 @@ impl QueueManager {
         let queue = Arc::clone(&self.queue);
         // Clone for progress handler to update active_downloads snapshot
         let active_downloads_clone = Arc::clone(&self.active_downloads);
+        
+        // Clone file organizer and metadata manager for the spawned task
+        let file_organizer = Arc::clone(&self.file_organizer);
+        let metadata_manager = Arc::clone(&self.metadata_manager);
 
         // Clone a snapshot of the task to keep in the active map
         let task_for_handle = task.clone();
@@ -391,12 +426,6 @@ impl QueueManager {
 
         eprintln!("   - Progress receiver spawned and waiting");
 
-        // 🧪 TEST2: send a message after the receiver is spawned
-        eprintln!("🧪 [TEST2] Sending test after spawning receiver...");
-        let test_progress2 = DownloadProgress::new(50, 1);
-        let test_result2 = progress_tx.clone().send(test_progress2).await;
-        eprintln!("🧪 [TEST2] send after spawn result: {:?}", test_result2.is_ok());
-
         // Start download task (task moved into the spawned future)
         let task_id_for_spawn = task_id.clone();
 
@@ -430,10 +459,29 @@ impl QueueManager {
                 result = download_task => {
                     match result {
                         Ok(()) => {
-                            // Update task status to completed
-                            task.status = TaskStatus::Completed;
-                            eprintln!("✅ [ENGINE] Task {} completed successfully", task_id_for_closure);
-                            info!("Task {} completed successfully", task_id_for_closure);
+                            eprintln!("✅ [ENGINE] Task {} download completed successfully", task_id_for_closure);
+                            
+                            // Organize the downloaded file
+                            eprintln!("🎯 [ORGANIZE] Starting file organization for task {}", task_id_for_closure);
+                            match Self::organize_completed_file_static(
+                                file_organizer.clone(),
+                                metadata_manager.clone(),
+                                &task,
+                                &output_path,
+                            ).await {
+                                Ok(final_path) => {
+                                    eprintln!("✅ [ORGANIZE] File organized at: {:?}", final_path);
+                                    task.output_path = final_path;
+                                    task.status = TaskStatus::Completed;
+                                    info!("Task {} completed and organized successfully", task_id_for_closure);
+                                }
+                                Err(e) => {
+                                    eprintln!("⚠️  [ORGANIZE] Organization failed (non-fatal): {}", e);
+                                    // Don't fail the task, file is still downloaded
+                                    task.status = TaskStatus::Completed;
+                                    warn!("Task {} completed but organization failed: {}", task_id_for_closure, e);
+                                }
+                            }
                         }
                         Err(e) => {
                             // Update task status to failed
@@ -458,15 +506,25 @@ impl QueueManager {
                 for t in q.iter_mut() {
                     if t.id == task_id_for_closure {
                         t.status = task.status.clone();
+                        t.output_path = task.output_path.clone();
                         break;
                     }
                 }
             }
 
-            // Remove from active downloads
+            // Update task in active downloads (keep completed tasks for GUI display)
+            // Only remove if cancelled or failed
             {
                 let mut active = active_downloads.lock().await;
-                active.remove(&task_id_for_closure);
+                if let Some(handle) = active.get_mut(&task_id_for_closure) {
+                    handle.task.status = task.status.clone();
+                    handle.task.output_path = task.output_path.clone();
+                    
+                    // Only remove if cancelled - keep completed tasks for GUI
+                    if cancelled {
+                        active.remove(&task_id_for_closure);
+                    }
+                }
             }
 
             // If not cancelled, continue processing the queue
@@ -557,6 +615,120 @@ impl QueueManager {
                 handle.task = task;
             }
         }
+    }
+    
+    /// Organize completed file (static version for use in spawned tasks)
+    async fn organize_completed_file_static(
+        file_organizer: Arc<FileOrganizer>,
+        metadata_manager: Arc<MetadataManager>,
+        task: &DownloadTask,
+        downloaded_file_path: &std::path::Path,
+    ) -> Result<PathBuf> {
+        eprintln!("🎯 [ORGANIZE] Starting file organization...");
+        eprintln!("   - Downloaded file: {:?}", downloaded_file_path);
+        eprintln!("   - Video: {}", task.video_info.title);
+        eprintln!("   - Format: {}", task.format.format_id);
+        
+        // Check if file exists
+        if !downloaded_file_path.exists() {
+            eprintln!("❌ [ORGANIZE] Downloaded file not found!");
+            return Err(anyhow::anyhow!("Downloaded file not found: {:?}", downloaded_file_path));
+        }
+        
+        // Determine quality string from format
+        let quality = Self::determine_quality_string_static(&task.format);
+        eprintln!("   - Detected quality: {}", quality);
+        
+        // Determine content type (default to Video for now)
+        let content_type = ContentType::Video;
+        
+        // Organize the file (move to proper location)
+        let final_path = file_organizer
+            .organize_file(downloaded_file_path, &task.video_info, &quality, &content_type)
+            .await
+            .map_err(|e| {
+                eprintln!("❌ [ORGANIZE] Failed to organize file: {}", e);
+                anyhow::anyhow!("Failed to organize file: {}", e)
+            })?;
+        
+        eprintln!("✅ [ORGANIZE] File organized at: {:?}", final_path);
+        
+        // Get file size
+        let file_size = tokio::fs::metadata(&final_path)
+            .await
+            .map(|m| m.len())
+            .unwrap_or(0);
+        
+        // Extract video ID
+        let video_id = FileOrganizer::extract_video_id(&task.video_info.url)
+            .unwrap_or(&task.video_info.id)
+            .to_string();
+        
+        // Create and save metadata
+        let metadata = VideoMetadata {
+            video_id: video_id.clone(),
+            title: task.video_info.title.clone(),
+            url: task.video_info.url.clone(),
+            source_platform: FileOrganizer::detect_source_platform(&task.video_info.url),
+            duration: task.video_info.duration.map(|d| d as f64),
+            resolution: quality.clone(),
+            format: task.format.ext.clone(),
+            file_size,
+            download_date: chrono::Utc::now(),
+            channel: task.video_info.uploader.clone(),
+            uploader: task.video_info.uploader.clone(),
+            description: task.video_info.description.clone(),
+            thumbnail_url: task.video_info.thumbnail.clone(),
+            quality_tier: format!("{:?}", FileOrganizer::determine_quality_tier(&quality)),
+            content_type: format!("{:?}", content_type),
+            tags: Vec::new(),
+            favorite: false,
+            watch_count: 0,
+            last_accessed: chrono::Utc::now(),
+        };
+        
+        match metadata_manager.save_metadata(&video_id, &metadata).await {
+            Ok(_) => {
+                eprintln!("💾 [ORGANIZE] Metadata saved successfully");
+            }
+            Err(e) => {
+                eprintln!("⚠️  [ORGANIZE] Failed to save metadata (non-fatal): {}", e);
+                // Don't fail the whole operation if metadata save fails
+            }
+        }
+        
+        eprintln!("🎉 [ORGANIZE] Organization complete!");
+        Ok(final_path)
+    }
+    
+    /// Extract quality string from format (static version)
+    fn determine_quality_string_static(format: &Format) -> String {
+        // Try height first
+        if let Some(height) = format.height {
+            return format!("{}p", height);
+        }
+        
+        // Try format_note
+        if let Some(ref note) = format.format_note {
+            if !note.is_empty() {
+                return note.clone();
+            }
+        }
+        
+        // Try resolution string
+        if let Some(ref res) = format.resolution {
+            if !res.is_empty() && res != "audio only" {
+                return res.clone();
+            }
+        }
+        
+        // Try abr for audio
+        if let Some(abr) = format.abr {
+            return format!("{}kbps", abr as u32);
+        }
+        
+        // Fallback
+        "unknown".to_string()
     }
 }
 

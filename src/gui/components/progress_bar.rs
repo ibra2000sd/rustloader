@@ -9,20 +9,29 @@ pub fn progress_bar(
     progress: f32,
     eta_seconds: Option<u64>,
 ) -> Element<'static, crate::gui::app::Message> {
-    let bar = iced_progress_bar(0.0..=1.0, progress);
+    let bar = iced_progress_bar(0.0..=1.0, progress)
+        .style(iced::theme::ProgressBar::Custom(Box::new(crate::gui::theme::ProgressBarStyle)));
 
-    let eta_text = if let Some(seconds) = eta_seconds {
-        let duration = Duration::from_secs(seconds);
-        format!("{} remaining", format_duration(duration))
+    let eta_text = if progress >= 1.0 {
+        "Completed".to_string()
+    } else if let Some(seconds) = eta_seconds {
+        if seconds == 0 {
+            "Almost done...".to_string()
+        } else {
+            let duration = Duration::from_secs(seconds);
+            format!("{} remaining", format_duration(duration))
+        }
     } else {
         "Calculating...".to_string()
     };
 
     column![
         bar,
-        text(eta_text).size(14),
+        text(eta_text)
+            .size(12)
+            .style(iced::theme::Text::Color(crate::gui::theme::TEXT_SECONDARY)),
     ]
-    .spacing(5)
+    .spacing(6)
     .into()
 }
 
