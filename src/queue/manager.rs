@@ -131,17 +131,32 @@ impl QueueManager {
         // Check if task is in active downloads
         let mut active = self.active_downloads.lock().await;
 
-        if let Some(handle) = active.get(task_id) {
+        if let Some(handle) = active.remove(task_id) {
             // Send cancel signal
             if let Err(e) = handle.cancel_tx.send(()).await {
                 warn!("Failed to send pause signal to task {}: {}", task_id, e);
                 return Err(RustloaderError::OperationFailed(format!("Failed to pause task: {}", e)).into());
             }
 
-            // Update task status
+            // Abort the download task
+            handle.join_handle.abort();
+            handle.progress_handle.abort();
+            
+            // Update task status to Paused
             self.update_task_status(task_id, TaskStatus::Paused).await?;
+            
+            // ✅ FIX: Move task to queue so resume can find it
+            let task = {
+                let queue = self.queue.lock().await;
+                queue.iter().find(|t| t.id == task_id).cloned()
+            };
+            
+            if task.is_none() {
+                // Task not in queue, need to fetch it from database
+                eprintln!("⚠️  [PAUSE] Task {} not found in queue, fetching from DB", task_id);
+            }
 
-            info!("Paused task {}", task_id);
+            info!("Paused task {} and moved to queue", task_id);
             return Ok(());
         }
 
@@ -160,16 +175,39 @@ impl QueueManager {
 
     /// Resume specific task
     pub async fn resume_task(&self, task_id: &str) -> Result<()> {
+        eprintln!("🔄 [RESUME] Attempting to resume task: {}", task_id);
+        
         // Check if task is in queue and paused
         let mut queue = self.queue.lock().await;
+        let mut found = false;
+        
         for task in queue.iter_mut() {
-            if task.id == task_id && task.status == TaskStatus::Paused {
-                task.status = TaskStatus::Queued;
-                info!("Resumed task {}", task_id);
-                return Ok(());
+            if task.id == task_id {
+                if task.status == TaskStatus::Paused {
+                    task.status = TaskStatus::Queued;
+                    found = true;
+                    eprintln!("✅ [RESUME] Changed task status from Paused to Queued");
+                    info!("Resumed task {}", task_id);
+                    break;
+                } else {
+                    eprintln!("⚠️  [RESUME] Task found but not paused, current status: {:?}", task.status);
+                    return Err(RustloaderError::OperationFailed(
+                        format!("Task {} is not paused (status: {:?})", task_id, task.status)
+                    ).into());
+                }
             }
         }
+        
+        drop(queue); // Release lock before potential re-processing
+        
+        if found {
+            // Trigger queue processing to restart the download
+            eprintln!("🚀 [RESUME] Triggering queue processing to restart download");
+            // The periodic process_queue will pick this up
+            return Ok(());
+        }
 
+        eprintln!("❌ [RESUME] Task {} not found in queue", task_id);
         // Task not found or not paused
         Err(RustloaderError::TaskNotFound(task_id.to_string()).into())
     }
@@ -463,6 +501,16 @@ impl QueueManager {
                             
                             // Organize the downloaded file
                             eprintln!("🎯 [ORGANIZE] Starting file organization for task {}", task_id_for_closure);
+                            
+                            // ✅ DEBUG BUG-007: Log pre-organization state
+                            eprintln!("🔍 [ORGANIZE DEBUG] Pre-organization checks:");
+                            eprintln!("   - File exists: {}", output_path.exists());
+                            eprintln!("   - File path: {:?}", output_path);
+                            eprintln!("   - File size: {} bytes", 
+                                     std::fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0));
+                            eprintln!("   - Video title: {}", task.video_info.title);
+                            eprintln!("   - Base dir: {:?}", file_organizer.base_dir);
+                            
                             match Self::organize_completed_file_static(
                                 file_organizer.clone(),
                                 metadata_manager.clone(),
@@ -476,10 +524,19 @@ impl QueueManager {
                                     info!("Task {} completed and organized successfully", task_id_for_closure);
                                 }
                                 Err(e) => {
-                                    eprintln!("⚠️  [ORGANIZE] Organization failed (non-fatal): {}", e);
+                                    // ✅ DEBUG BUG-007: Enhanced error logging
+                                    eprintln!("❌ [ORGANIZE] Organization failed: {}", e);
+                                    eprintln!("❌ [ORGANIZE] Error details: {:?}", e);
+                                    eprintln!("❌ [ORGANIZE] File remains at: {:?}", output_path);
+                                    eprintln!("❌ [ORGANIZE] File size: {} bytes", 
+                                             std::fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0));
+                                    
                                     // Don't fail the task, file is still downloaded
                                     task.status = TaskStatus::Completed;
-                                    warn!("Task {} completed but organization failed: {}", task_id_for_closure, e);
+                                    task.output_path = output_path.clone();  // Keep original path
+                                    
+                                    warn!("Task {} completed but organization failed: {}. File at: {:?}", 
+                                          task_id_for_closure, e, output_path);
                                 }
                             }
                         }

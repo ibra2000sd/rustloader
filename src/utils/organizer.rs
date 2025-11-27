@@ -121,7 +121,24 @@ impl FileOrganizer {
         let metadata_dir = self.base_dir.join(".metadata");
         fs::create_dir_all(&metadata_dir).await?;
         
-        eprintln!("✅ [ORGANIZER] Directory structure created successfully");
+        // ✅ DEBUG BUG-007: Verify all directories were created
+        let dirs_to_verify = vec![
+            self.base_dir.join("Videos/High-Quality"),
+            self.base_dir.join("Videos/Standard"),
+            self.base_dir.join("Videos/Low-Quality"),
+            self.base_dir.join("Audio"),
+            self.base_dir.join("Temp"),
+        ];
+
+        for dir in &dirs_to_verify {
+            if !dir.exists() {
+                eprintln!("❌ [ORGANIZER] Directory missing: {:?}", dir);
+                return Err(anyhow::anyhow!("Failed to create directory: {:?}", dir));
+            }
+            eprintln!("✅ [ORGANIZER] Verified: {:?}", dir);
+        }
+        
+        eprintln!("✅ [ORGANIZER] Directory structure created and verified successfully");
         Ok(())
     }
     

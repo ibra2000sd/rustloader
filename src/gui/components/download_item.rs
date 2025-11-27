@@ -13,7 +13,7 @@ pub fn download_item(task: &DownloadTaskUI) -> Element<'static, Message> {
 
     let status_color = match task.status.as_str() {
         "Downloading" => theme::ACCENT,
-        "Paused" => theme::WARNING,
+        "Paused" | "Pausing..." | "Resuming..." => theme::WARNING,
         "Completed" => theme::SUCCESS,
         "Failed" => theme::DANGER,
         _ => theme::TEXT_SECONDARY,
@@ -30,7 +30,9 @@ pub fn download_item(task: &DownloadTaskUI) -> Element<'static, Message> {
                         .padding([6, 12])
                         .style(iced::theme::Button::Custom(Box::new(theme::DestructiveButton))),
                 ],
-                "Paused" => row![
+                
+                // ✅ FIX BUG-008: Handle "Pausing...", "Paused", and "Resuming..." states
+                "Pausing..." | "Paused" | "Resuming..." => row![
                     button(text("Resume").size(12))
                         .on_press(Message::ResumeDownload(task.id.clone()))
                         .padding([6, 12])
@@ -40,6 +42,7 @@ pub fn download_item(task: &DownloadTaskUI) -> Element<'static, Message> {
                         .padding([6, 12])
                         .style(iced::theme::Button::Custom(Box::new(theme::DestructiveButton))),
                 ],
+                
                 "Completed" => row![
                     button(text("Open File").size(12))
                         .on_press(Message::OpenFile(task.id.clone()))
@@ -54,6 +57,7 @@ pub fn download_item(task: &DownloadTaskUI) -> Element<'static, Message> {
                         .padding([6, 12])
                         .style(iced::theme::Button::Custom(Box::new(theme::IconButton))),
                 ],
+                
                 "Failed" => row![
                     button(text("Retry").size(12))
                         .on_press(Message::RetryDownload(task.id.clone()))
@@ -64,6 +68,13 @@ pub fn download_item(task: &DownloadTaskUI) -> Element<'static, Message> {
                         .padding([6, 12])
                         .style(iced::theme::Button::Custom(Box::new(theme::IconButton))),
                 ],
+                
+                // ✅ FIX BUG-008: Handle "Cancelling..." state
+                "Cancelling..." => row![
+                    text("Cancelling...").size(12).style(iced::theme::Text::Color(theme::TEXT_SECONDARY)),
+                ],
+                
+                // Default for any unknown states
                 _ => row![
                     button(text("Cancel").size(12))
                         .on_press(Message::CancelDownload(task.id.clone()))

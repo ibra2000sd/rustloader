@@ -389,11 +389,22 @@ impl Application for RustloaderApp {
             }
 
             Message::DownloadProgress(task_id, progress_data) => {
+                // ✅ DEBUG BUG-006: Log progress updates
+                eprintln!("📊 [GUI PROGRESS] Task: {} | Progress: {:.1}% | Speed: {:.1} MB/s", 
+                          task_id, 
+                          progress_data.progress * 100.0,
+                          progress_data.speed / 1024.0 / 1024.0);
+                
                 if let Some(task) = self.active_downloads.iter_mut().find(|t| t.id == task_id) {
+                    eprintln!("   ✅ Task found, updating UI");
                     task.progress = progress_data.progress;
                     task.speed = progress_data.speed;
                     task.downloaded_mb = progress_data.downloaded as f64 / (1024.0 * 1024.0);
                     task.eta_seconds = progress_data.eta;
+                } else {
+                    eprintln!("   ❌ Task NOT found in active_downloads!");
+                    eprintln!("   ❌ Current task IDs: {:?}", 
+                              self.active_downloads.iter().map(|t| &t.id).collect::<Vec<_>>());
                 }
                 Command::none()
             }
@@ -402,6 +413,29 @@ impl Application for RustloaderApp {
                 if let Some(task) = self.active_downloads.iter_mut().find(|t| t.id == task_id) {
                     task.status = "Completed".to_string();
                     task.progress = 1.0;
+                    
+                    // ✅ FIX: Calculate actual file size for display
+                    if task.downloaded_mb > 0.0 {
+                        // Size already set by progress updates
+                        task.total_mb = task.downloaded_mb;
+                    } else if let Some(ref file_path) = task.file_path {
+                        // Fallback: try to read actual file size
+                        let output_path = std::path::PathBuf::from(file_path);
+                        if output_path.exists() {
+                            if let Ok(metadata) = std::fs::metadata(&output_path) {
+                                let size_mb = metadata.len() as f64 / (1024.0 * 1024.0);
+                                task.downloaded_mb = size_mb;
+                                task.total_mb = size_mb;
+                                eprintln!("✅ [COMPLETED] Set file size: {:.1} MB for {}", size_mb, task_id);
+                            } else {
+                                eprintln!("⚠️  [COMPLETED] Could not read file metadata for {}", task_id);
+                            }
+                        } else {
+                            eprintln!("⚠️  [COMPLETED] File not found: {:?}", output_path);
+                        }
+                    } else {
+                        eprintln!("⚠️  [COMPLETED] No file_path set for task {}", task_id);
+                    }
                 }
                 self.status_message = "Download completed".to_string();
                 Command::none()
@@ -504,10 +538,8 @@ impl Application for RustloaderApp {
                 let backend = self.backend.clone();
                 let id = task_id.clone();
                 
-                // Update local UI state immediately
-                if let Some(task) = self.active_downloads.iter_mut().find(|t| t.id == task_id) {
-                    task.status = "Cancelling...".to_string();
-                }
+                // ✅ FIX: Remove from UI immediately instead of showing "Cancelling..."
+                self.active_downloads.retain(|t| t.id != task_id);
                 
                 Command::perform(
                     async move {
@@ -524,26 +556,21 @@ impl Application for RustloaderApp {
                                 match bridge.cancel_download(&id).await {
                                     Ok(_) => {
                                         eprintln!("✅ Cancelled download: {}", id);
-                                        Some(id.clone())
+                                        true
                                     }
                                     Err(e) => {
                                         eprintln!("❌ Failed to cancel task {}: {}", id, e);
-                                        None
+                                        false
                                     }
                                 }
                             }
                             Err(e) => {
                                 eprintln!("❌ Backend error: {}", e);
-                                None
+                                false
                             }
                         }
                     },
-                    |result| {
-                        match result {
-                            Some(task_id) => Message::RemoveCompleted(task_id),
-                            None => Message::Tick,
-                        }
-                    },
+                    |_success| Message::Tick, // Just refresh UI
                 )
             }
 
