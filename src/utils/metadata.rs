@@ -1,4 +1,5 @@
 //! Metadata management system for tracking file information
+#![allow(dead_code, unused_variables, unused_mut)]
 
 use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};

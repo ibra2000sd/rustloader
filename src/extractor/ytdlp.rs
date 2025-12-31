@@ -1,11 +1,11 @@
 //! yt-dlp wrapper for video extraction
+#![allow(dead_code, unused_variables, unused_imports)]
 
 use crate::extractor::models::{VideoInfo, Format};
 use crate::utils::error::RustloaderError;
 use anyhow::Result;
 use serde_json;
 use std::path::PathBuf;
-use std::process::Command;
 use tokio::process::Command as AsyncCommand;
 use tracing::{debug, error, info};
 use which::which;

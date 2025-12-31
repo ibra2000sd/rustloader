@@ -1,0 +1,5 @@
+[advisories]
+# RUSTSEC-2023-0071 is reported via sqlx-mysql -> rsa, but mysql feature is disabled
+# and cargo tree confirms neither mysql nor rsa are in the built dependency graph.
+# This ignore documents the false positive until sqlx removes mysql from lock metadata.
+ignore = ["RUSTSEC-2023-0071"]

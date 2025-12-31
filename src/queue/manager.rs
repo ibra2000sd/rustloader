@@ -1,4 +1,5 @@
 //! Download queue manager with concurrent download support
+#![allow(dead_code, unused_variables, unused_assignments, unused_imports, unused_mut)]
 
 use crate::downloader::{DownloadEngine, DownloadProgress};
 use crate::extractor::{Format, VideoInfo};
@@ -328,8 +329,14 @@ impl QueueManager {
                 if let Some(task) = queue.front() {
                     if task.status == TaskStatus::Queued {
                         // Get the task and remove it from the front
-                        let task = queue.pop_front().unwrap();
-                        tasks.push(task);
+                        match queue.pop_front() {
+                            Some(t) => tasks.push(t),
+                            None => {
+                                // This shouldn't happen, but handle gracefully
+                                eprintln!("⚠️  [QUEUE] Queue became empty unexpectedly");
+                                break;
+                            }
+                        }
                     } else {
                         // Skip non-queued tasks
                         queue.pop_front();

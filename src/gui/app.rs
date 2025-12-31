@@ -1,4 +1,5 @@
 //! Main GUI application
+#![allow(dead_code, unused_imports, unused_variables, unused_mut)]
 
 use crate::database::{DatabaseManager, initialize_database};
 use crate::extractor::VideoInfo;
@@ -230,7 +231,7 @@ impl Application for RustloaderApp {
                                     
                                     // Now use cloned bridge with await (no lock held)
                                     match bridge_result {
-                                        Ok(mut bridge) => bridge.extract_video_info(&url_clone).await,
+                                        Ok(bridge) => bridge.extract_video_info(&url_clone).await,
                                         Err(e) => Err(e),
                                     }
                                 });
@@ -323,7 +324,7 @@ impl Application for RustloaderApp {
                                         
                                         // Now use cloned bridge with await (no lock held)
                                         match bridge_result {
-                                            Ok(mut bridge) => bridge.start_download(vi_for_call.clone(), out.clone(), None).await,
+                                            Ok(bridge) => bridge.start_download(vi_for_call.clone(), out.clone(), None).await,
                                             Err(e) => Err(e),
                                         }
                                     });
@@ -512,7 +513,7 @@ impl Application for RustloaderApp {
                         }; // Lock dropped here
                         
                         match bridge_result {
-                            Ok(mut bridge) => {
+                            Ok(bridge) => {
                                 match bridge.resume_download(&id).await {
                                     Ok(_) => {
                                         eprintln!("✅ Resumed download: {}", id);
@@ -552,7 +553,7 @@ impl Application for RustloaderApp {
                         }; // Lock dropped here
                         
                         match bridge_result {
-                            Ok(mut bridge) => {
+                            Ok(bridge) => {
                                 match bridge.cancel_download(&id).await {
                                     Ok(_) => {
                                         eprintln!("✅ Cancelled download: {}", id);
@@ -594,7 +595,7 @@ impl Application for RustloaderApp {
                         };
                         
                         match bridge_result {
-                            Ok(mut bridge) => {
+                            Ok(bridge) => {
                                 bridge.remove_task(&id).await.ok();
                             }
                             Err(e) => {
@@ -623,7 +624,7 @@ impl Application for RustloaderApp {
                         };
                         
                         match bridge_result {
-                            Ok(mut bridge) => {
+                            Ok(bridge) => {
                                 match bridge.clear_completed().await {
                                     Ok(_) => eprintln!("✅ Cleared completed tasks from backend"),
                                     Err(e) => eprintln!("❌ Failed to clear completed: {}", e),

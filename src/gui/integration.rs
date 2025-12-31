@@ -297,7 +297,7 @@ impl BackendBridge {
                     
                     if is_combined {
                         eprintln!("✅ [FORMAT] Combined format: {} ({}x{}, vcodec={:?}, acodec={:?})", 
-                            f.format_id, f.width.unwrap(), f.height.unwrap(), f.vcodec, f.acodec);
+                            f.format_id, f.width.unwrap_or(0), f.height.unwrap_or(0), f.vcodec, f.acodec);
                     }
                     
                     is_combined
@@ -327,7 +327,7 @@ impl BackendBridge {
                 match best_format {
                     Some(fmt) => {
                         eprintln!("🎯 [FORMAT] Selected combined format: {} ({}x{}, quality={:?})", 
-                            fmt.format_id, fmt.width.unwrap(), fmt.height.unwrap(), fmt.quality);
+                            fmt.format_id, fmt.width.unwrap_or(0), fmt.height.unwrap_or(0), fmt.quality);
                         (*fmt).clone()
                     }
                     None => {

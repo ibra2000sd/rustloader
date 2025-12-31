@@ -1,4 +1,5 @@
 //! GUI module
+#![allow(unused_imports)]
 
 pub mod app;
 pub mod views;

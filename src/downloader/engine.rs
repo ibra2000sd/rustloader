@@ -1,4 +1,5 @@
 //! High-performance multi-threaded download engine
+#![allow(dead_code, unused_imports, unused_variables, unused_mut, unused_assignments)]
 
 use crate::downloader::merger::{cleanup_segments, merge_segments, MergeProgress};
 // progress types already imported above

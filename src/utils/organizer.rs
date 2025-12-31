@@ -321,15 +321,70 @@ impl FileOrganizer {
         }
     }
     
-    /// Sanitize filename by removing/replacing invalid characters
+    /// Sanitizes a filename by removing invalid characters and preventing security issues.
+    /// 
+    /// # Security
+    /// - Removes path traversal sequences (`..`)
+    /// - Removes leading dots (prevents hidden files)
+    /// - Removes invalid filesystem characters
+    /// - Handles empty strings
+    /// - Limits filename length to 200 characters
+    /// 
+    /// # Examples
+    /// ```
+    /// use rustloader::utils::organizer::FileOrganizer;
+    /// assert_eq!(FileOrganizer::sanitize_filename("../../etc/passwd"), "_etc_passwd");
+    /// assert_eq!(FileOrganizer::sanitize_filename(".hidden"), "hidden");
+    /// assert_eq!(FileOrganizer::sanitize_filename("normal_file.mp4"), "normal_file.mp4");
+    /// ```
     pub fn sanitize_filename(name: &str) -> String {
-        let invalid_chars = ['/', '\\', ':', '*', '?', '"', '<', '>', '|'];
+        // Characters invalid on Windows/macOS/Linux filesystems
+        let invalid_chars = ['/', '\\', ':', '*', '?', '"', '<', '>', '|', '\0'];
         
-        name.chars()
+        // Step 1: Remove path traversal sequences
+        let mut sanitized = name.replace("..", "");
+        
+        // Step 2: Remove invalid characters
+        sanitized = sanitized
+            .chars()
             .map(|c| if invalid_chars.contains(&c) { '_' } else { c })
-            .collect::<String>()
+            .collect();
+        
+        // Step 3: Remove leading dots (hidden files) and whitespace
+        sanitized = sanitized
             .trim()
-            .to_string()
+            .trim_start_matches('.')
+            .to_string();
+        
+        // Step 4: Remove trailing dots and spaces (Windows issue)
+        sanitized = sanitized
+            .trim_end_matches('.')
+            .trim_end()
+            .to_string();
+        
+        // Step 5: Collapse multiple underscores
+        while sanitized.contains("__") {
+            sanitized = sanitized.replace("__", "_");
+        }
+        
+        // Step 6: Ensure not empty
+        if sanitized.is_empty() {
+            return "unnamed_file".to_string();
+        }
+        
+        // Step 7: Limit length (preserve extension if possible)
+        if sanitized.len() > 200 {
+            if let Some(dot_pos) = sanitized.rfind('.') {
+                let extension = &sanitized[dot_pos..];
+                if extension.len() < 10 {
+                    let name_part = &sanitized[..200 - extension.len()];
+                    return format!("{}{}", name_part, extension);
+                }
+            }
+            sanitized = sanitized[..200].to_string();
+        }
+        
+        sanitized
     }
     
     /// Truncate title to fit within filename length limits
@@ -395,6 +450,74 @@ mod tests {
         assert_eq!(FileOrganizer::sanitize_filename("Hello <World>"), "Hello _World_");
         assert_eq!(FileOrganizer::sanitize_filename("Normal Title"), "Normal Title");
     }
+    
+    #[test]
+    fn test_sanitize_filename_path_traversal() {
+        // Test path traversal attack prevention
+        // Note: ".." gets removed, then slashes become underscores, then underscores collapse
+        assert_eq!(FileOrganizer::sanitize_filename("../../etc/passwd"), "_etc_passwd");
+        assert_eq!(FileOrganizer::sanitize_filename("..\\..\\windows\\system32"), "_windows_system32");
+        assert_eq!(FileOrganizer::sanitize_filename("normal/../secret"), "normal_secret");
+        assert_eq!(FileOrganizer::sanitize_filename("../../../root"), "_root");
+    }
+    
+    #[test]
+    fn test_sanitize_filename_hidden_files() {
+        // Test hidden file prevention
+        assert_eq!(FileOrganizer::sanitize_filename(".hidden"), "hidden");
+        assert_eq!(FileOrganizer::sanitize_filename("...dots"), "dots");
+        assert_eq!(FileOrganizer::sanitize_filename("."), "unnamed_file");
+        assert_eq!(FileOrganizer::sanitize_filename(".."), "unnamed_file");
+    }
+    
+    #[test]
+    fn test_sanitize_filename_invalid_chars() {
+        // Test invalid character removal
+        assert_eq!(FileOrganizer::sanitize_filename("file:name"), "file_name");
+        assert_eq!(FileOrganizer::sanitize_filename("what?"), "what_");
+        assert_eq!(FileOrganizer::sanitize_filename("a/b\\c"), "a_b_c");
+        assert_eq!(FileOrganizer::sanitize_filename("file<>name"), "file_name");  // <> becomes __, then collapses to _
+        assert_eq!(FileOrganizer::sanitize_filename("bad*file"), "bad_file");
+    }
+    
+    #[test]
+    fn test_sanitize_filename_empty() {
+        // Test empty string handling
+        assert_eq!(FileOrganizer::sanitize_filename(""), "unnamed_file");
+        assert_eq!(FileOrganizer::sanitize_filename("   "), "unnamed_file");
+        assert_eq!(FileOrganizer::sanitize_filename("..."), "unnamed_file");
+        assert_eq!(FileOrganizer::sanitize_filename("___"), "_");
+    }
+    
+    #[test]
+    fn test_sanitize_filename_normal() {
+        // Test normal filenames pass through correctly
+        assert_eq!(FileOrganizer::sanitize_filename("video.mp4"), "video.mp4");
+        assert_eq!(FileOrganizer::sanitize_filename("My Video - 2025.mp4"), "My Video - 2025.mp4");
+        assert_eq!(FileOrganizer::sanitize_filename("simple_name"), "simple_name");
+    }
+    
+    #[test]
+    fn test_sanitize_filename_length() {
+        // Test length limiting with extension preservation
+        let long_name = "a".repeat(300) + ".mp4";
+        let result = FileOrganizer::sanitize_filename(&long_name);
+        assert!(result.len() <= 200);
+        assert!(result.ends_with(".mp4"));
+        
+        // Test length limiting without extension
+        let long_name_no_ext = "b".repeat(250);
+        let result2 = FileOrganizer::sanitize_filename(&long_name_no_ext);
+        assert_eq!(result2.len(), 200);
+    }
+    
+    #[test]
+    fn test_sanitize_filename_collapse_underscores() {
+        // Test multiple underscores collapse
+        assert_eq!(FileOrganizer::sanitize_filename("file___name"), "file_name");
+        assert_eq!(FileOrganizer::sanitize_filename("a____b"), "a_b");
+    }
+
     
     #[test]
     fn test_quality_tier_detection() {

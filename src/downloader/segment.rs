@@ -1,14 +1,14 @@
 //! Segment-based parallel downloading
+#![allow(dead_code, unused_imports, unused_variables, unused_mut, unused_assignments)]
 
-use crate::downloader::progress::{DownloadProgress, DownloadStatus};
+use crate::downloader::progress::DownloadProgress;
 use anyhow::Result;
 use futures::stream::{self, StreamExt};
-use reqwest::{Client, Response};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use reqwest::Client;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tokio::fs::File;
-use tokio::io::{AsyncWriteExt, BufWriter};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
