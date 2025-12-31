@@ -3,3 +3,13 @@
 # and cargo tree confirms neither mysql nor rsa are in the built dependency graph.
 # This ignore documents the false positive until sqlx removes mysql from lock metadata.
 ignore = ["RUSTSEC-2023-0071"]
+
+# Severity threshold for warnings
+# Only report vulnerabilities of this severity level or higher
+severity_threshold = "low"
+
+# Informational warnings to report
+# "unsound" = unsound API usage
+# "unmaintained" = crate is no longer maintained
+# We report both but won't fail on unmaintained warnings
+informational_warnings = ["unsound", "unmaintained"]
