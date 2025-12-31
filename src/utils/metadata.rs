@@ -164,12 +164,10 @@ impl MetadataManager {
             .into_iter()
             .filter(|m| {
                 m.title.to_lowercase().contains(&query_lower)
-                    || m
-                        .channel
+                    || m.channel
                         .as_ref()
                         .is_some_and(|c| c.to_lowercase().contains(&query_lower))
-                    || m
-                        .uploader
+                    || m.uploader
                         .as_ref()
                         .is_some_and(|u| u.to_lowercase().contains(&query_lower))
             })

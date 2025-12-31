@@ -155,8 +155,160 @@ impl VideoExtractor {
     }
 }
 
+/// Parse a raw yt-dlp JSON response into a `VideoInfo` structure.
+/// This helper is pure and testable without requiring the yt-dlp binary.
+pub fn parse_video_info(json: &str) -> Result<VideoInfo> {
+    let info: VideoInfo = serde_json::from_str(json)?;
+    Ok(info)
+}
+
+/// Select the format closest to (but not exceeding) a target height.
+/// Falls back to the smallest available height when no candidate is below the target.
+pub fn select_best_format(formats: &[Format], target_height: u32) -> Option<Format> {
+    let mut with_height: Vec<&Format> = formats.iter().filter(|f| f.height.is_some()).collect();
+
+    if with_height.is_empty() {
+        return None;
+    }
+
+    with_height.sort_by_key(|f| f.height.unwrap_or(0));
+
+    let best_below = with_height
+        .iter()
+        .rev()
+        .find(|f| f.height.unwrap_or(0) <= target_height)
+        .copied();
+
+    best_below
+        .cloned()
+        .or_else(|| with_height.first().copied().cloned())
+}
+
+/// Build the command-line arguments used to extract metadata via yt-dlp.
+/// Returned as a Vec<String> for easy inspection and testing.
+pub fn build_extract_command(url: &str) -> Vec<String> {
+    vec![
+        "yt-dlp".to_string(),
+        "--dump-json".to_string(),
+        "--no-download".to_string(),
+        url.to_string(),
+    ]
+}
+
 impl Default for VideoExtractor {
     fn default() -> Self {
         Self::new().expect("Failed to initialize VideoExtractor")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_video_info_handles_valid_json() {
+        let json = r#"{
+            "id": "abc123",
+            "title": "Test Video",
+            "url": "https://example.com/watch?v=abc123",
+            "direct_url": "",
+            "duration": 120,
+            "filesize": null,
+            "thumbnail": null,
+            "uploader": "Uploader",
+            "upload_date": "20240101",
+            "formats": [
+                {"format_id": "18", "ext": "mp4", "resolution": "360p", "filesize": null, "url": "https://cdn/18", "quality": null, "fps": null, "vcodec": null, "acodec": null, "format_note": null, "width": null, "height": 360, "tbr": null, "vbr": null, "abr": null},
+                {"format_id": "22", "ext": "mp4", "resolution": "720p", "filesize": null, "url": "https://cdn/22", "quality": null, "fps": null, "vcodec": null, "acodec": null, "format_note": null, "width": null, "height": 720, "tbr": null, "vbr": null, "abr": null}
+            ],
+            "description": null,
+            "view_count": null,
+            "like_count": null,
+            "extractor": "youtube"
+        }"#;
+
+        let info = parse_video_info(json).expect("should parse json");
+        assert_eq!(info.id, "abc123");
+        assert_eq!(info.title, "Test Video");
+        assert_eq!(info.duration, Some(120));
+        assert_eq!(info.formats.len(), 2);
+    }
+
+    #[test]
+    fn parse_video_info_rejects_invalid_json() {
+        let result = parse_video_info("not-json");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn select_best_format_prefers_target_or_lower() {
+        let formats = vec![
+            Format {
+                format_id: "18".into(),
+                ext: "mp4".into(),
+                resolution: Some("360p".into()),
+                filesize: None,
+                url: "https://cdn/18".into(),
+                quality: None,
+                fps: None,
+                vcodec: None,
+                acodec: None,
+                format_note: None,
+                width: None,
+                height: Some(360),
+                tbr: None,
+                vbr: None,
+                abr: None,
+            },
+            Format {
+                format_id: "22".into(),
+                ext: "mp4".into(),
+                resolution: Some("720p".into()),
+                filesize: None,
+                url: "https://cdn/22".into(),
+                quality: None,
+                fps: None,
+                vcodec: None,
+                acodec: None,
+                format_note: None,
+                width: None,
+                height: Some(720),
+                tbr: None,
+                vbr: None,
+                abr: None,
+            },
+            Format {
+                format_id: "137".into(),
+                ext: "mp4".into(),
+                resolution: Some("1080p".into()),
+                filesize: None,
+                url: "https://cdn/137".into(),
+                quality: None,
+                fps: None,
+                vcodec: None,
+                acodec: None,
+                format_note: None,
+                width: None,
+                height: Some(1080),
+                tbr: None,
+                vbr: None,
+                abr: None,
+            },
+        ];
+
+        let best = select_best_format(&formats, 720).expect("format expected");
+        assert_eq!(best.format_id, "22");
+
+        let best_low = select_best_format(&formats, 480).expect("format expected");
+        assert_eq!(best_low.format_id, "18");
+    }
+
+    #[test]
+    fn build_extract_command_contains_core_flags() {
+        let url = "https://example.com/watch?v=test";
+        let cmd = build_extract_command(url);
+        assert!(cmd.contains(&"yt-dlp".to_string()));
+        assert!(cmd.contains(&"--dump-json".to_string()));
+        assert!(cmd.contains(&url.to_string()));
     }
 }

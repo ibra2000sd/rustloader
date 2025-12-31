@@ -63,6 +63,21 @@ segment_*.tmp
 .env.local
 .env.*.local
 
+# Coverage outputs
+coverage/
+lcov.info
+*.profraw
+*.profdata
+
+# Benchmark results
+target/criterion/
+benchmarks/
+
+# Temporary analysis files
+*_REPORT.md
+*_PROMPT.md
+*.analysis
+
 # Editor backups
 *.swp
 *.swo
