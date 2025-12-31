@@ -1,5 +1,11 @@
 //! Segment-based parallel downloading
-#![allow(dead_code, unused_imports, unused_variables, unused_mut, unused_assignments)]
+#![allow(
+    dead_code,
+    unused_imports,
+    unused_variables,
+    unused_mut,
+    unused_assignments
+)]
 
 use crate::downloader::progress::DownloadProgress;
 use anyhow::Result;
@@ -38,12 +44,22 @@ pub async fn download_segment(
         match download_segment_attempt(client, url, segment, &progress_tx).await {
             Ok(()) => return Ok(()),
             Err(e) if attempts < retry_attempts => {
-                warn!("Segment {} download failed (attempt {}): {}", segment.id, attempts + 1, e);
+                warn!(
+                    "Segment {} download failed (attempt {}): {}",
+                    segment.id,
+                    attempts + 1,
+                    e
+                );
                 sleep(retry_delay).await;
                 attempts += 1;
             }
             Err(e) => {
-                error!("Segment {} download failed after {} attempts: {}", segment.id, retry_attempts + 1, e);
+                error!(
+                    "Segment {} download failed after {} attempts: {}",
+                    segment.id,
+                    retry_attempts + 1,
+                    e
+                );
                 return Err(e);
             }
         }
@@ -59,7 +75,10 @@ async fn download_segment_attempt(
     segment: &Segment,
     progress_tx: &mpsc::Sender<SegmentProgress>,
 ) -> Result<()> {
-    debug!("Downloading segment {} (bytes {}-{})", segment.id, segment.start, segment.end);
+    debug!(
+        "Downloading segment {} (bytes {}-{})",
+        segment.id, segment.start, segment.end
+    );
 
     // Create range header for this segment
     let range = if segment.start == segment.end {
@@ -69,11 +88,7 @@ async fn download_segment_attempt(
     };
 
     // Send request with range header
-    let response = client
-        .get(url)
-        .header("Range", range)
-        .send()
-        .await?;
+    let response = client.get(url).header("Range", range).send().await?;
 
     if !response.status().is_success() {
         return Err(anyhow::anyhow!("HTTP error: {}", response.status()));
@@ -102,16 +117,26 @@ async fn download_segment_attempt(
         let now = Instant::now();
         if now.duration_since(last_update_time) >= Duration::from_secs(1) {
             let elapsed = now.duration_since(start_time).as_secs_f64();
-            let speed = if elapsed > 0.0 { downloaded as f64 / elapsed } else { 0.0 };
+            let speed = if elapsed > 0.0 {
+                downloaded as f64 / elapsed
+            } else {
+                0.0
+            };
 
             // Send progress update
-            if let Err(e) = progress_tx.send(SegmentProgress {
-                segment_id: segment.id,
-                downloaded_bytes: downloaded,
-                total_bytes: total_size,
-                speed,
-            }).await {
-                warn!("Failed to send progress update for segment {}: {}", segment.id, e);
+            if let Err(e) = progress_tx
+                .send(SegmentProgress {
+                    segment_id: segment.id,
+                    downloaded_bytes: downloaded,
+                    total_bytes: total_size,
+                    speed,
+                })
+                .await
+            {
+                warn!(
+                    "Failed to send progress update for segment {}: {}",
+                    segment.id, e
+                );
             }
 
             last_update_time = now;
@@ -124,18 +149,31 @@ async fn download_segment_attempt(
 
     // Final progress update
     let elapsed = start_time.elapsed().as_secs_f64();
-    let speed = if elapsed > 0.0 { downloaded as f64 / elapsed } else { 0.0 };
+    let speed = if elapsed > 0.0 {
+        downloaded as f64 / elapsed
+    } else {
+        0.0
+    };
 
-    if let Err(e) = progress_tx.send(SegmentProgress {
-        segment_id: segment.id,
-        downloaded_bytes: downloaded,
-        total_bytes: total_size,
-        speed,
-    }).await {
-        warn!("Failed to send final progress update for segment {}: {}", segment.id, e);
+    if let Err(e) = progress_tx
+        .send(SegmentProgress {
+            segment_id: segment.id,
+            downloaded_bytes: downloaded,
+            total_bytes: total_size,
+            speed,
+        })
+        .await
+    {
+        warn!(
+            "Failed to send final progress update for segment {}: {}",
+            segment.id, e
+        );
     }
 
-    info!("Segment {} downloaded successfully ({} bytes)", segment.id, downloaded);
+    info!(
+        "Segment {} downloaded successfully ({} bytes)",
+        segment.id, downloaded
+    );
 
     Ok(())
 }
@@ -156,14 +194,15 @@ pub fn calculate_segments(file_size: u64, max_segments: usize) -> Vec<Segment> {
     }
 
     // Determine number of segments based on file size
-    let segment_count = if file_size < 10 * 1024 * 1024 { // < 10MB
+    let mb = 1024 * 1024;
+    let segment_count = if file_size < 10 * mb as u64 {
         1
-    } else if file_size < 100 * 1024 * 1024 { // < 100MB
-        std::cmp::min(4, max_segments)
-    } else if file_size < 1024 * 1024 * 1024 { // < 1GB
-        std::cmp::min(8, max_segments)
+    } else if file_size < 50 * mb as u64 {
+        std::cmp::min(4, max_segments.max(1))
+    } else if file_size < 500 * mb as u64 {
+        std::cmp::min(16, max_segments.max(1))
     } else {
-        max_segments
+        std::cmp::max(1, max_segments)
     };
 
     let segment_size = file_size / segment_count as u64;
@@ -189,4 +228,42 @@ pub fn calculate_segments(file_size: u64, max_segments: usize) -> Vec<Segment> {
     }
 
     segments
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_calculate_segments_small_file() {
+        let segments = calculate_segments(1_000, 16);
+        assert!(segments.len() <= 16);
+        if let Some(last) = segments.last() {
+            assert_eq!(last.end, 999);
+        }
+    }
+
+    #[test]
+    fn test_calculate_segments_large_file() {
+        let segments = calculate_segments(100_000_000, 16);
+        assert_eq!(segments.len(), 16);
+    }
+
+    #[test]
+    fn test_segment_ranges_no_overlap() {
+        let segments = calculate_segments(10_000, 4);
+        for window in segments.windows(2) {
+            let first = &window[0];
+            let second = &window[1];
+            assert!(
+                first.end < second.start,
+                "segments overlap or touch incorrectly"
+            );
+        }
+        // Ensure full coverage
+        if let (Some(first), Some(last)) = (segments.first(), segments.last()) {
+            assert_eq!(first.start, 0);
+            assert!(last.end >= 9_999);
+        }
+    }
 }

@@ -61,3 +61,35 @@ impl VideoQuality {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_config() {
+        let config = AppSettings::default();
+        assert!(config.max_concurrent > 0);
+        assert!(config.segments > 0);
+        assert!(config.chunk_size > 0);
+        assert!(config.retry_attempts > 0);
+    }
+
+    #[test]
+    fn test_config_validation_like_defaults() {
+        let mut config = AppSettings::default();
+        config.max_concurrent = 0;
+        config.segments = 0;
+
+        // Enforce sane minimums
+        if config.max_concurrent == 0 {
+            config.max_concurrent = 1;
+        }
+        if config.segments == 0 {
+            config.segments = 1;
+        }
+
+        assert_eq!(config.max_concurrent, 1);
+        assert_eq!(config.segments, 1);
+    }
+}

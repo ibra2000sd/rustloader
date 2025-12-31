@@ -3,4 +3,4 @@
 pub mod manager;
 
 // Re-export for convenience
-pub use manager::{QueueManager, DownloadTask, TaskStatus};
+pub use manager::{DownloadTask, QueueManager, TaskStatus};

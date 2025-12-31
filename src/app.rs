@@ -1,11 +1,12 @@
 //! Application initialization and main entry point
 
-use anyhow::Result;
 use crate::gui::RustloaderApp;
-use iced::{Application, Settings};
+use anyhow::Result;
 use iced::Size;
+use iced::{Application, Settings};
 
 /// Run the Rustloader application
+#[allow(dead_code)] // Retained for embedding/integration entrypoints
 pub async fn run() -> Result<()> {
     // Initialize the application
     let mut settings = Settings::default();

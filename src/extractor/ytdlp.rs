@@ -1,7 +1,7 @@
 //! yt-dlp wrapper for video extraction
 #![allow(dead_code, unused_variables, unused_imports)]
 
-use crate::extractor::models::{VideoInfo, Format};
+use crate::extractor::models::{Format, VideoInfo};
 use crate::utils::error::RustloaderError;
 use anyhow::Result;
 use serde_json;
@@ -124,12 +124,8 @@ impl VideoExtractor {
         let video_info: VideoInfo = serde_json::from_str(&json_str)?;
 
         // For search results, the response contains a single video with an "entries" field
-        if let Some(entries) = video_info.formats.get(0).and_then(|f| {
-            // This is a workaround - in the actual implementation, we might need to handle
-            // the search result format properly
-            None::<Format>
-        }) {
-            // Parse entries
+        if !video_info.formats.is_empty() {
+            // TODO: handle search result entries in detail when backend supports playlists
         }
 
         // For now, return a simple implementation

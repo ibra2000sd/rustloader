@@ -31,7 +31,7 @@ impl DatabaseManager {
         .bind(&record.id)
         .bind(&record.url)
         .bind(&record.title)
-        .bind(&record.output_path.to_string_lossy())
+        .bind(record.output_path.to_string_lossy())
         .bind(record.file_size.map(|v| v as i64))
         .bind(&record.status)
         .bind(record.created_at)
@@ -122,16 +122,21 @@ impl DatabaseManager {
         .execute(&self.pool)
         .await?;
 
-        debug!("Saved segment {} for download {}", segment.segment_number, segment.download_id);
+        debug!(
+            "Saved segment {} for download {}",
+            segment.segment_number, segment.download_id
+        );
         Ok(())
     }
 
     /// Get download segments
     pub async fn get_segments(&self, download_id: &str) -> Result<Vec<SegmentRecord>> {
-        let rows = sqlx::query("SELECT * FROM download_segments WHERE download_id = ? ORDER BY segment_number")
-            .bind(download_id)
-            .fetch_all(&self.pool)
-            .await?;
+        let rows = sqlx::query(
+            "SELECT * FROM download_segments WHERE download_id = ? ORDER BY segment_number",
+        )
+        .bind(download_id)
+        .fetch_all(&self.pool)
+        .await?;
 
         let mut segments = Vec::with_capacity(rows.len());
         for row in rows {

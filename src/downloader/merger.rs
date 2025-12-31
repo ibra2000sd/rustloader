@@ -16,7 +16,11 @@ pub async fn merge_segments(
         return Err(anyhow::anyhow!("No segments to merge"));
     }
 
-    debug!("Merging {} segments into {}", segments.len(), output_path.display());
+    debug!(
+        "Merging {} segments into {}",
+        segments.len(),
+        output_path.display()
+    );
 
     // Create output file
     let mut output_file = OpenOptions::new()
@@ -32,7 +36,6 @@ pub async fn merge_segments(
     for (i, segment_path) in segments.iter().enumerate() {
         // Open segment file
         let mut segment_file = File::open(segment_path).await?;
-        let segment_size = segment_file.metadata().await?.len();
 
         // Copy segment to output file
         let mut buffer = [0; 8192];
@@ -50,11 +53,12 @@ pub async fn merge_segments(
 
             // Send progress update if channel is provided
             if let Some(ref tx) = progress_tx {
-                let _ = tx.send(MergeProgress {
-                    segment_index: i,
-                    segment_progress: bytes_copied as f64 / segment_size as f64,
-                    total_bytes,
-                }).await;
+                let _ = tx
+                    .send(MergeProgress {
+                        segment_index: i,
+                        total_bytes,
+                    })
+                    .await;
             }
         }
 
@@ -64,7 +68,11 @@ pub async fn merge_segments(
     // Ensure all data is written
     output_file.flush().await?;
 
-    info!("Successfully merged {} bytes into {}", total_bytes, output_path.display());
+    info!(
+        "Successfully merged {} bytes into {}",
+        total_bytes,
+        output_path.display()
+    );
 
     Ok(())
 }
@@ -74,7 +82,11 @@ pub async fn cleanup_segments(segments: &[PathBuf]) -> Result<()> {
     for segment_path in segments {
         if segment_path.exists() {
             if let Err(e) = tokio::fs::remove_file(segment_path).await {
-                warn!("Failed to remove segment file {}: {}", segment_path.display(), e);
+                warn!(
+                    "Failed to remove segment file {}: {}",
+                    segment_path.display(),
+                    e
+                );
             } else {
                 debug!("Removed segment file: {}", segment_path.display());
             }
@@ -87,6 +99,5 @@ pub async fn cleanup_segments(segments: &[PathBuf]) -> Result<()> {
 #[derive(Debug, Clone)]
 pub struct MergeProgress {
     pub segment_index: usize,
-    pub segment_progress: f64, // 0.0 to 1.0
     pub total_bytes: u64,
 }

@@ -1,31 +1,37 @@
 //! High-performance multi-threaded download engine
-#![allow(dead_code, unused_imports, unused_variables, unused_mut, unused_assignments)]
+#![allow(
+    dead_code,
+    unused_imports,
+    unused_variables,
+    unused_mut,
+    unused_assignments
+)]
 
 use crate::downloader::merger::{cleanup_segments, merge_segments, MergeProgress};
 // progress types already imported above
+use crate::downloader::progress::{DownloadProgress, DownloadStatus};
 use crate::downloader::segment::{calculate_segments, download_segment, SegmentProgress};
 use anyhow::Result;
 use futures::stream::{self, StreamExt};
 use reqwest::Client;
-use tokio::time::{timeout, Duration as TokioDuration};
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
+use tokio::process::Command as AsyncCommand;
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::sleep;
+use tokio::time::{timeout, Duration as TokioDuration};
 use tracing::{debug, error, warn};
-use tokio::process::Command as AsyncCommand;
-use std::process::Stdio;
-use crate::downloader::progress::{DownloadProgress, DownloadStatus};
 
 fn parse_yt_dlp_progress(line: &str) -> Option<(f64, f64, u64)> {
     // Expected format: [download]  42.5% of ~ 150.00MiB at  5.20MiB/s ETA 00:15
     if !line.contains('%') {
         return None;
     }
-    
+
     // 1. Parse Percentage
     let pct_pos = line.find('%')?;
     let before = &line[..pct_pos];
@@ -37,7 +43,9 @@ fn parse_yt_dlp_progress(line: &str) -> Option<(f64, f64, u64)> {
             break;
         }
     }
-    if num_start >= before.len() { return None; }
+    if num_start >= before.len() {
+        return None;
+    }
     let num_str = &before[num_start..].trim();
     let pct = num_str.parse::<f64>().ok()?;
 
@@ -55,19 +63,23 @@ fn parse_yt_dlp_progress(line: &str) -> Option<(f64, f64, u64)> {
         } else {
             after_of
         };
-        
+
         // Find the end of the size string (usually before " at ")
         let size_end = size_str_start.find(" at ").unwrap_or(size_str_start.len());
         let size_token = size_str_start[..size_end].trim();
-        
+
         // Parse number and unit
         let mut idx = 0;
         for (i, ch) in size_token.chars().enumerate() {
-            if ch.is_digit(10) || ch == '.' { idx = i + 1; } else { break; }
+            if ch.is_ascii_digit() || ch == '.' {
+                idx = i + 1;
+            } else {
+                break;
+            }
         }
-        
+
         if idx > 0 {
-             if let Ok(num) = size_token[..idx].parse::<f64>() {
+            if let Ok(num) = size_token[..idx].parse::<f64>() {
                 let unit = size_token[idx..].trim();
                 total_bytes = match unit {
                     "KiB" => (num * 1024.0) as u64,
@@ -88,7 +100,11 @@ fn parse_yt_dlp_progress(line: &str) -> Option<(f64, f64, u64)> {
             let token = &after[..slash_idx].trim();
             let mut idx = 0;
             for (i, ch) in token.chars().enumerate() {
-                if ch.is_ascii_digit() || ch == '.' { idx = i + 1; } else { break; }
+                if ch.is_ascii_digit() || ch == '.' {
+                    idx = i + 1;
+                } else {
+                    break;
+                }
             }
             if idx > 0 {
                 if let Ok(num) = token[..idx].parse::<f64>() {
@@ -111,13 +127,13 @@ fn parse_yt_dlp_progress(line: &str) -> Option<(f64, f64, u64)> {
 /// Download configuration
 #[derive(Debug, Clone)]
 pub struct DownloadConfig {
-    pub segments: usize,           // Number of parallel segments (default: 16)
+    pub segments: usize,                // Number of parallel segments (default: 16)
     pub connections_per_segment: usize, // Connections per segment (default: 1)
-    pub chunk_size: usize,         // Chunk size for streaming (default: 8192)
-    pub retry_attempts: usize,     // Retry attempts per segment (default: 3)
-    pub retry_delay: Duration,     // Delay between retries
-    pub enable_resume: bool,       // Enable resume capability
-    pub request_delay: Duration,   // Delay between segment requests
+    pub chunk_size: usize,              // Chunk size for streaming (default: 8192)
+    pub retry_attempts: usize,          // Retry attempts per segment (default: 3)
+    pub retry_delay: Duration,          // Delay between retries
+    pub enable_resume: bool,            // Enable resume capability
+    pub request_delay: Duration,        // Delay between segment requests
 }
 
 impl Default for DownloadConfig {
@@ -139,8 +155,6 @@ pub struct DownloadEngine {
     client: Client,
     config: DownloadConfig,
 }
-
-
 
 impl DownloadEngine {
     /// Create new download engine with configuration
@@ -197,9 +211,15 @@ impl DownloadEngine {
         // fall back to yt-dlp to handle complex cases (HLS, DASH, etc.).
         eprintln!("🔍 [ENGINE] Probing server for range support and file size...");
         let supports_ranges_res = self.supports_ranges(url).await;
-        eprintln!("✅ [ENGINE] supports_ranges() await returned: {:?}", &supports_ranges_res);
+        eprintln!(
+            "✅ [ENGINE] supports_ranges() await returned: {:?}",
+            &supports_ranges_res
+        );
         let file_size_res = self.get_file_size(url).await;
-        eprintln!("✅ [ENGINE] get_file_size() await returned: {:?}", &file_size_res);
+        eprintln!(
+            "✅ [ENGINE] get_file_size() await returned: {:?}",
+            &file_size_res
+        );
 
         let (supports_ranges, file_size) = match (supports_ranges_res, file_size_res) {
             (Ok(r), Ok(s)) => {
@@ -215,24 +235,33 @@ impl DownloadEngine {
         };
 
         // Initialize progress
-        eprintln!("📊 [ENGINE] Initializing progress with file_size={} and segments={}", file_size, self.config.segments);
+        eprintln!(
+            "📊 [ENGINE] Initializing progress with file_size={} and segments={}",
+            file_size, self.config.segments
+        );
         let mut progress = DownloadProgress::new(file_size, self.config.segments);
 
         // Send initial progress
         eprintln!("📤 [ENGINE] Sending initial progress (based on probed file size)...");
         if let Err(e) = progress_tx.send(progress.clone()).await {
-            eprintln!("⚠️ [ENGINE] Failed to send initial progress (probed): {}", e);
+            eprintln!(
+                "⚠️ [ENGINE] Failed to send initial progress (probed): {}",
+                e
+            );
             warn!("Failed to send initial progress: {}", e);
         }
 
         // Determine download strategy
-        if !supports_ranges || file_size < 1024 * 1024 { // < 1MB or no range support
+        if !supports_ranges || file_size < 1024 * 1024 {
+            // < 1MB or no range support
             eprintln!("🔀 [ENGINE] Taking path: simple download (no ranges or small file). supports_ranges={}, file_size={}", supports_ranges, file_size);
             eprintln!("📥 [ENGINE] Using simple download (no ranges or small file). supports_ranges={}, file_size={}", supports_ranges, file_size);
             return self.download_simple(url, output_path, progress_tx).await;
         }
 
-        eprintln!("📦 [ENGINE] Using segmented download path (ranges supported and file large enough)");
+        eprintln!(
+            "📦 [ENGINE] Using segmented download path (ranges supported and file large enough)"
+        );
 
         // Calculate segments
         let segments = calculate_segments(file_size, self.config.segments);
@@ -274,9 +303,14 @@ impl DownloadEngine {
                         segment_progress_tx,
                         retry_attempts,
                         retry_delay,
-                    ).await;
+                    )
+                    .await;
 
-                    eprintln!("✅ [ENGINE] download_segment completed for segment {}: success={}", i, result.is_ok());
+                    eprintln!(
+                        "✅ [ENGINE] download_segment completed for segment {}: success={}",
+                        i,
+                        result.is_ok()
+                    );
 
                     // Update segment progress
                     if result.is_ok() {
@@ -314,16 +348,15 @@ impl DownloadEngine {
                 let now = std::time::Instant::now();
                 if now.duration_since(last_update_time) >= Duration::from_secs(1) {
                     let elapsed = now.duration_since(last_update_time).as_secs_f64();
-                    let speed = if elapsed > 0.0 { 
-                        (total_downloaded - last_downloaded) as f64 / elapsed 
-                    } else { 
-                        0.0 
+                    let speed = if elapsed > 0.0 {
+                        (total_downloaded - last_downloaded) as f64 / elapsed
+                    } else {
+                        0.0
                     };
 
                     // Send progress update
                     let mut progress = DownloadProgress::new(file_size, segments_count);
-                    progress.downloaded_bytes = total_downloaded;
-                    progress.speed = speed;
+                    progress.update(total_downloaded, speed);
                     progress.status = DownloadStatus::Downloading;
 
                     if let Err(e) = progress_tx_clone.send(progress).await {
@@ -373,6 +406,7 @@ impl DownloadEngine {
         }
 
         // Update progress to merging state
+        progress.update_segment(completed_segments);
         progress.status = DownloadStatus::Merging;
         if let Err(e) = progress_tx.send(progress.clone()).await {
             warn!("Failed to send merging progress: {}", e);
@@ -386,7 +420,12 @@ impl DownloadEngine {
         let segments_paths_clone = segments_paths.clone();
         let output_path_clone = output_path.to_path_buf();
         let merge_task = tokio::spawn(async move {
-            merge_segments(&segments_paths_clone, &output_path_clone, Some(merge_progress_tx)).await
+            merge_segments(
+                &segments_paths_clone,
+                &output_path_clone,
+                Some(merge_progress_tx),
+            )
+            .await
         });
 
         // Process merge progress
@@ -450,19 +489,21 @@ impl DownloadEngine {
         // Best-effort: don't propagate an error if receiver was dropped.
         let _ = progress_tx_for_spawn.send(initial.clone()).await;
 
-          // Prepare command: yt-dlp with explicit progress flags
-          eprintln!("🔧 [YT-DLP] Spawning yt-dlp process...");
-          let out = output_path.to_string_lossy().to_string();
-          let mut cmd = AsyncCommand::new("yt-dlp");
-          cmd.arg("-f").arg("best")
-              .arg("--newline")        // Force newline after each progress line (critical for non-TTY)
-              .arg("--no-warnings")    // Reduce stderr noise
-              .arg("--progress")       // Explicitly enable progress output
-              .arg("-o").arg(out)
-              .arg(url);
-          // Combine stderr and stdout to capture all output
-          cmd.stderr(Stdio::piped());
-          cmd.stdout(Stdio::piped());
+        // Prepare command: yt-dlp with explicit progress flags
+        eprintln!("🔧 [YT-DLP] Spawning yt-dlp process...");
+        let out = output_path.to_string_lossy().to_string();
+        let mut cmd = AsyncCommand::new("yt-dlp");
+        cmd.arg("-f")
+            .arg("best")
+            .arg("--newline") // Force newline after each progress line (critical for non-TTY)
+            .arg("--no-warnings") // Reduce stderr noise
+            .arg("--progress") // Explicitly enable progress output
+            .arg("-o")
+            .arg(out)
+            .arg(url);
+        // Combine stderr and stdout to capture all output
+        cmd.stderr(Stdio::piped());
+        cmd.stdout(Stdio::piped());
 
         eprintln!("🚀 [YT-DLP] About to spawn yt-dlp command...");
         let mut child = cmd.spawn()?;
@@ -473,21 +514,21 @@ impl DownloadEngine {
         let reader_handle = if let Some(stderr) = child.stderr.take() {
             eprintln!("✅ [YT-DLP] Stderr pipe available, spawning reader task...");
             let progress_for_reader = progress_tx_for_spawn.clone();
-            
+
             eprintln!("🎬 [YT-DLP] About to call tokio::spawn for stderr reader...");
             let handle = tokio::spawn(async move {
                 eprintln!("📖 [YT-DLP] INSIDE SPAWNED TASK - stderr reader starting!");
                 use tokio::io::AsyncBufReadExt;
                 let reader = tokio::io::BufReader::new(stderr);
                 let mut lines = reader.lines();
-                
+
                 eprintln!("📖 [YT-DLP] Starting stderr reader...");
                 let mut line_count = 0;
-                
+
                 while let Ok(Some(line)) = lines.next_line().await {
                     line_count += 1;
                     eprintln!("📄 [YT-DLP] stderr #{}: {}", line_count, line);
-                    
+
                     // Detect errors from yt-dlp
                     if line.contains("ERROR:") || line.contains("error:") {
                         eprintln!("❌ [YT-DLP] Error detected: {}", line);
@@ -496,11 +537,14 @@ impl DownloadEngine {
                         let _ = progress_for_reader.send(p).await;
                         break;
                     }
-                    
+
                     // Try to parse percentage and speed from lines like:
                     // [download]  12.5% of ~10.50MiB at 1.23MiB/s ETA 00:07
                     if let Some((pct, speed_bps, total_bytes)) = parse_yt_dlp_progress(&line) {
-                        eprintln!("🔁 [YT-DLP] Parsed progress: {}% speed={} B/s total={} B", pct, speed_bps, total_bytes);
+                        eprintln!(
+                            "🔁 [YT-DLP] Parsed progress: {}% speed={} B/s total={} B",
+                            pct, speed_bps, total_bytes
+                        );
                         let mut p = DownloadProgress::new(100, 1);
                         p.status = DownloadStatus::Downloading;
                         // Calculate downloaded bytes from percentage and total
@@ -520,13 +564,18 @@ impl DownloadEngine {
                         }
                     }
                 }
-                
-                eprintln!("📖 [YT-DLP] Stderr reader finished. Read {} lines total", line_count);
+
+                eprintln!(
+                    "📖 [YT-DLP] Stderr reader finished. Read {} lines total",
+                    line_count
+                );
             });
             eprintln!("✅ [YT-DLP] tokio::spawn returned, reader task is now running");
             Some(handle)
         } else {
-            eprintln!("❌ [YT-DLP] ERROR: No stderr pipe available - child.stderr.take() returned None!");
+            eprintln!(
+                "❌ [YT-DLP] ERROR: No stderr pipe available - child.stderr.take() returned None!"
+            );
             eprintln!("   This means stderr was not properly set up or was already taken");
             None
         };
@@ -564,7 +613,7 @@ impl DownloadEngine {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         let wait_result = timeout(TokioDuration::from_secs(1800), child.wait()).await;
-        
+
         let status = match wait_result {
             Ok(Ok(status)) => status,
             Ok(Err(e)) => return Err(anyhow::anyhow!("Failed to wait for yt-dlp process: {}", e)),
@@ -573,7 +622,7 @@ impl DownloadEngine {
                 return Err(anyhow::anyhow!("yt-dlp process timed out after 30 minutes"));
             }
         };
-        
+
         // Give the reader task a moment to finish reading any buffered output
         if let Some(handle) = reader_handle {
             eprintln!("⏳ [YT-DLP] Waiting for stderr reader to finish...");
@@ -634,58 +683,71 @@ impl DownloadEngine {
         let start_time = std::time::Instant::now();
         let mut last_update_time = start_time;
         let mut last_downloaded = 0u64;
-        
+
         // Stream response to file
         let mut stream = response.bytes_stream();
-        
+
         while let Some(chunk_result) = stream.next().await {
             let chunk = chunk_result?;
             file.write_all(&chunk).await?;
-            
+
             downloaded += chunk.len() as u64;
-            
+
             // Update progress every second
             let now = std::time::Instant::now();
             if now.duration_since(last_update_time) >= Duration::from_secs(1) {
                 let elapsed = now.duration_since(start_time).as_secs_f64();
-                let speed = if elapsed > 0.0 { downloaded as f64 / elapsed } else { 0.0 };
-                
+                let speed = if elapsed > 0.0 {
+                    downloaded as f64 / elapsed
+                } else {
+                    0.0
+                };
+
                 // Update progress
                 progress.downloaded_bytes = downloaded;
                 progress.speed = speed;
-                
+
                 if let Err(e) = progress_tx.send(progress.clone()).await {
                     warn!("Failed to send progress update: {}", e);
                     break;
                 }
-                
+
                 last_update_time = now;
                 last_downloaded = downloaded;
             }
         }
-        
+
         // Ensure file is flushed
         file.flush().await?;
-        
+
         // Final progress update
         let elapsed = start_time.elapsed().as_secs_f64();
-        let speed = if elapsed > 0.0 { downloaded as f64 / elapsed } else { 0.0 };
-        
+        let speed = if elapsed > 0.0 {
+            downloaded as f64 / elapsed
+        } else {
+            0.0
+        };
+
         progress.downloaded_bytes = downloaded;
         progress.speed = speed;
         progress.complete();
-        
+
         if let Err(e) = progress_tx.send(progress).await {
             warn!("Failed to send final progress: {}", e);
         }
-        
+
         Ok(())
     }
-    
+
     /// Check if server supports range requests
     async fn supports_ranges(&self, url: &str) -> Result<bool> {
         // wrap HEAD in a timeout to avoid blocking indefinitely
-        match tokio::time::timeout(std::time::Duration::from_secs(10), self.client.head(url).send()).await {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            self.client.head(url).send(),
+        )
+        .await
+        {
             Ok(Ok(response)) => {
                 let accepts_ranges = response
                     .headers()
@@ -706,11 +768,16 @@ impl DownloadEngine {
             }
         }
     }
-    
+
     /// Get total file size
     async fn get_file_size(&self, url: &str) -> Result<u64> {
         // wrap HEAD in a timeout to avoid blocking indefinitely
-        match tokio::time::timeout(std::time::Duration::from_secs(10), self.client.head(url).send()).await {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            self.client.head(url).send(),
+        )
+        .await
+        {
             Ok(Ok(response)) => {
                 let size = response
                     .content_length()
@@ -728,7 +795,7 @@ impl DownloadEngine {
             }
         }
     }
-} 
+}
 
 impl Default for DownloadEngine {
     fn default() -> Self {

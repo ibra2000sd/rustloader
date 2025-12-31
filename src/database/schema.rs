@@ -8,7 +8,7 @@ use tracing::{debug, info};
 pub async fn initialize_database(db_path: &str) -> Result<Pool<Sqlite>> {
     // For SQLite, the database file is created automatically on connect if it doesn't exist
     // No need to explicitly check/create like with MySQL/Postgres
-    
+
     // Connect to the database (creates file if doesn't exist)
     let pool = SqlitePoolOptions::new()
         .max_connections(10)
@@ -78,9 +78,11 @@ async fn create_tables(pool: &Pool<Sqlite>) -> Result<()> {
         .execute(pool)
         .await?;
 
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_segments_download ON download_segments(download_id)")
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_segments_download ON download_segments(download_id)",
+    )
+    .execute(pool)
+    .await?;
 
     debug!("Database tables created successfully");
     Ok(())

@@ -1,7 +1,7 @@
 //! Progress bar component
 
-use iced::widget::{progress_bar as iced_progress_bar, text, column};
-use iced::{Element, Length, Color};
+use iced::widget::{column, progress_bar as iced_progress_bar, text};
+use iced::{Color, Element, Length};
 use std::time::Duration;
 
 /// Create a progress bar with percentage and ETA
@@ -9,8 +9,13 @@ pub fn progress_bar(
     progress: f32,
     eta_seconds: Option<u64>,
 ) -> Element<'static, crate::gui::app::Message> {
-    let bar = iced_progress_bar(0.0..=1.0, progress)
-        .style(iced::theme::ProgressBar::Custom(Box::new(crate::gui::theme::ProgressBarStyle)));
+    let style = if progress >= 1.0 {
+        iced::theme::ProgressBar::Custom(Box::new(crate::gui::theme::ProgressBarCompleted))
+    } else {
+        iced::theme::ProgressBar::Custom(Box::new(crate::gui::theme::ProgressBarStyle))
+    };
+
+    let bar = iced_progress_bar(0.0..=1.0, progress).style(style);
 
     let eta_text = if progress >= 1.0 {
         "Completed".to_string()

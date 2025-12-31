@@ -7,7 +7,7 @@ use std::time::Duration;
 pub struct DownloadProgress {
     pub total_bytes: u64,
     pub downloaded_bytes: u64,
-    pub speed: f64,  // bytes per second
+    pub speed: f64, // bytes per second
     pub eta: Option<Duration>,
     pub status: DownloadStatus,
     pub segments_completed: usize,
@@ -69,11 +69,13 @@ impl DownloadProgress {
     }
 
     /// Mark as paused
+    #[allow(dead_code)] // Reserved for pause/resume controls
     pub fn pause(&mut self) {
         self.status = DownloadStatus::Paused;
     }
 
     /// Resume from paused state
+    #[allow(dead_code)] // Reserved for pause/resume controls
     pub fn resume(&mut self) {
         self.status = DownloadStatus::Downloading;
     }
@@ -88,18 +90,14 @@ impl DownloadProgress {
 }
 
 /// Download status
-#[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)] // Additional states kept for GUI/queue status mapping
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum DownloadStatus {
+    #[default]
     Initializing,
     Downloading,
     Merging,
     Completed,
     Failed(String),
     Paused,
-}
-
-impl Default for DownloadStatus {
-    fn default() -> Self {
-        Self::Initializing
-    }
 }

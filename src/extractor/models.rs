@@ -10,7 +10,7 @@ pub struct VideoInfo {
     #[serde(alias = "webpage_url")]
     pub url: String,
     #[serde(default)]
-    pub direct_url: String,  // Actual download URL (filled later)
+    pub direct_url: String, // Actual download URL (filled later)
     #[serde(default)]
     pub duration: Option<u64>,
     #[serde(default)]
@@ -42,7 +42,7 @@ pub struct Format {
     pub format_note: Option<String>,
     pub width: Option<u32>,
     pub height: Option<u32>,
-    pub tbr: Option<f32>,  // Total bitrate
-    pub vbr: Option<f32>,  // Video bitrate
-    pub abr: Option<f32>,  // Audio bitrate
+    pub tbr: Option<f32>, // Total bitrate
+    pub vbr: Option<f32>, // Video bitrate
+    pub abr: Option<f32>, // Audio bitrate
 }

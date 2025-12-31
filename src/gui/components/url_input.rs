@@ -1,8 +1,8 @@
 //! URL input component
 
-use iced::widget::{button, text_input, row, tooltip, text, column};
-use iced::{Element, Length, Alignment};
 use crate::gui::app::Message;
+use iced::widget::{button, column, row, text, text_input, tooltip};
+use iced::{Alignment, Element, Length};
 
 /// Create a URL input field with paste button and optional error message
 pub fn url_input(
@@ -46,7 +46,9 @@ pub fn url_input(
             input_row,
             row![
                 text("Warning: ").size(14).style(theme::DANGER),
-                text(error).size(14).style(iced::theme::Text::Color(theme::DANGER)),
+                text(error)
+                    .size(14)
+                    .style(iced::theme::Text::Color(theme::DANGER)),
             ]
             .spacing(4)
         ]

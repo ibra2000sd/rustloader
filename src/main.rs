@@ -1,21 +1,20 @@
 //! Rustloader - High-Performance Video Downloader
-//! 
+//!
 //! A cross-platform video downloader that combines yt-dlp extraction capabilities
 //! with a fast Rust-based download engine and a simple, practical GUI.
 
 mod app;
-mod extractor;
-mod downloader;
-mod queue;
 mod database;
+mod downloader;
+mod extractor;
 mod gui;
+mod queue;
 mod utils;
 
 use anyhow::Result;
 use clap::Parser;
-use std::process::Command;
-use tracing_subscriber;
 use iced::Application;
+use std::process::Command;
 
 #[derive(Parser)]
 struct Args {
@@ -59,10 +58,8 @@ fn main() -> Result<()> {
 }
 
 fn check_ytdlp_installed() {
-    let check = Command::new("yt-dlp")
-        .arg("--version")
-        .output();
-        
+    let check = Command::new("yt-dlp").arg("--version").output();
+
     match check {
         Ok(output) if output.status.success() => {
             println!("✓ yt-dlp found");
@@ -79,7 +76,7 @@ fn check_ytdlp_installed() {
 
 async fn test_download_cli(url: String) {
     println!("Testing download: {}", url);
-    
+
     // Initialize extractor
     let extractor = match extractor::VideoExtractor::new() {
         Ok(e) => e,
@@ -88,7 +85,7 @@ async fn test_download_cli(url: String) {
             return;
         }
     };
-    
+
     // Extract video info
     println!("Extracting video info...");
     let video_info = match extractor.extract_info(&url).await {
@@ -98,37 +95,43 @@ async fn test_download_cli(url: String) {
             return;
         }
     };
-    
+
     println!("Title: {}", video_info.title);
     println!("Duration: {:?}", video_info.duration);
     println!("File size: {:?}", video_info.filesize);
-    
+
     // Initialize download engine
     let config = downloader::DownloadConfig::default();
     let engine = downloader::DownloadEngine::new(config);
-    
+
     // Create output path
     let output_path = std::path::PathBuf::from("./test_download.mp4");
-    
+
     // Create progress channel
-    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel::<crate::downloader::DownloadProgress>(100);
-    
+    let (progress_tx, mut progress_rx) =
+        tokio::sync::mpsc::channel::<crate::downloader::DownloadProgress>(100);
+
     // Spawn progress reporter
     tokio::spawn(async move {
         while let Some(progress) = progress_rx.recv().await {
-            println!("Progress: {:.1}%, Speed: {:.2} MB/s", 
-                progress.percentage() * 100.0, 
-                progress.speed / 1024.0 / 1024.0);
+            println!(
+                "Progress: {:.1}%, Speed: {:.2} MB/s",
+                progress.percentage() * 100.0,
+                progress.speed / 1024.0 / 1024.0
+            );
         }
     });
-    
+
     // Ensure we have a direct URL to download. If extractor didn't populate `direct_url`,
     // try to resolve one via extractor.get_direct_url using the first available format.
     println!("Starting download...");
     let download_url = if !video_info.direct_url.is_empty() {
         video_info.direct_url.clone()
-    } else if let Some(first_fmt) = video_info.formats.get(0) {
-        match extractor.get_direct_url(&video_info.url, &first_fmt.format_id).await {
+    } else if let Some(first_fmt) = video_info.formats.first() {
+        match extractor
+            .get_direct_url(&video_info.url, &first_fmt.format_id)
+            .await
+        {
             Ok(u) => u,
             Err(e) => {
                 eprintln!("Failed to resolve direct url via extractor: {}", e);
@@ -139,7 +142,10 @@ async fn test_download_cli(url: String) {
         video_info.url.clone()
     };
 
-    match engine.download(&download_url, &output_path, progress_tx).await {
+    match engine
+        .download(&download_url, &output_path, progress_tx)
+        .await
+    {
         Ok(_) => println!("Download completed successfully!"),
         Err(e) => eprintln!("Download failed: {}", e),
     }

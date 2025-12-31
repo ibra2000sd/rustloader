@@ -1,15 +1,15 @@
 //! Main view implementation - Light Theme
 
-use crate::gui::app::{Message, DownloadTaskUI};
-use crate::gui::components::{url_input, download_item};
-use iced::widget::{button, column, container, row, text, scrollable, Space, pick_list, slider};
-use iced::{Element, Length, Alignment};
+use crate::gui::app::{DownloadTaskUI, Message};
+use crate::gui::components::{download_item, url_input};
+use iced::widget::{button, column, container, pick_list, row, scrollable, slider, text, Space};
+use iced::{Alignment, Element, Length};
 
 /// Create the main view
 pub fn main_view(
     url_value: &str,
     downloads: &[DownloadTaskUI],
-    status_message: &str,
+    _status_message: &str,
     is_extracting: bool,
     url_error: Option<&str>,
     quality: &str,
@@ -23,7 +23,6 @@ pub fn main_view(
             text("Download Video")
                 .size(30)
                 .style(iced::theme::Text::Color(theme::GRAY_800)),
-            
             url_input(
                 url_value,
                 Message::UrlInputChanged,
@@ -31,20 +30,25 @@ pub fn main_view(
                 Message::ClearUrlInput,
                 url_error,
             ),
-            
             // Download button row
             row![
                 Space::with_width(Length::Fill),
-                button(text(if is_extracting { "Extracting..." } else { "Download" }).size(16))
-                    .on_press_maybe(if !url_value.is_empty() && !is_extracting {
-                        Some(Message::DownloadButtonPressed)
+                button(
+                    text(if is_extracting {
+                        "Extracting..."
                     } else {
-                        None
+                        "Download"
                     })
-                    .padding([16, 32])
-                    .style(iced::theme::Button::Custom(Box::new(theme::PrimaryButton))),
+                    .size(16)
+                )
+                .on_press_maybe(if !url_value.is_empty() && !is_extracting {
+                    Some(Message::DownloadButtonPressed)
+                } else {
+                    None
+                })
+                .padding([16, 32])
+                .style(iced::theme::Button::Custom(Box::new(theme::PrimaryButton))),
             ],
-            
             // Info row with interactive dropdowns
             row![
                 // Quality dropdown
@@ -54,7 +58,12 @@ pub fn main_view(
                             .size(11)
                             .style(iced::theme::Text::Color(theme::GRAY_500)),
                         pick_list(
-                            vec!["Best Available".to_string(), "1080p".to_string(), "720p".to_string(), "480p".to_string()],
+                            vec![
+                                "Best Available".to_string(),
+                                "1080p".to_string(),
+                                "720p".to_string(),
+                                "480p".to_string()
+                            ],
                             Some(quality.to_string()),
                             Message::QualityChanged
                         )
@@ -65,10 +74,7 @@ pub fn main_view(
                     .spacing(4)
                 )
                 .padding([8, 12])
-                .style(iced::theme::Container::Custom(
-                    Box::new(InfoTagStyle)
-                )),
-                
+                .style(iced::theme::Container::Custom(Box::new(InfoTagStyle))),
                 // Format tag (static for now - could be made selectable)
                 container(
                     column![
@@ -82,10 +88,7 @@ pub fn main_view(
                     .spacing(4)
                 )
                 .padding([8, 12])
-                .style(iced::theme::Container::Custom(
-                    Box::new(InfoTagStyle)
-                )),
-                
+                .style(iced::theme::Container::Custom(Box::new(InfoTagStyle))),
                 // Segments slider
                 container(
                     column![
@@ -98,23 +101,25 @@ pub fn main_view(
                                 .size(11)
                                 .style(iced::theme::Text::Color(theme::GRAY_800)),
                         ],
-                        iced::widget::slider(4..=32, segments as u8, |v| Message::SegmentsChanged(v as usize))
-                            .width(iced::Length::Fixed(120.0)),
+                        iced::widget::slider(4..=32, segments as u8, |v| Message::SegmentsChanged(
+                            v as usize
+                        ))
+                        .width(iced::Length::Fixed(120.0)),
                     ]
                     .spacing(4)
                 )
                 .padding([8, 12])
-                .style(iced::theme::Container::Custom(
-                    Box::new(InfoTagStyle)
-                )),
+                .style(iced::theme::Container::Custom(Box::new(InfoTagStyle))),
             ]
             .spacing(12),
         ]
-        .spacing(20)
+        .spacing(20),
     )
     .padding(32)
     .width(Length::Fill)
-    .style(iced::theme::Container::Custom(Box::new(theme::GlassContainer)));
+    .style(iced::theme::Container::Custom(Box::new(
+        theme::GlassContainer,
+    )));
 
     // Downloads section
     let downloads_section: Element<'static, Message> = if downloads.is_empty() {
@@ -128,7 +133,7 @@ pub fn main_view(
                     .style(iced::theme::Text::Color(theme::GRAY_400)),
             ]
             .spacing(10)
-            .align_items(Alignment::Center)
+            .align_items(Alignment::Center),
         )
         .width(Length::Fill)
         .height(Length::Fill)
@@ -136,19 +141,19 @@ pub fn main_view(
         .center_y()
         .into()
     } else {
-        let mut downloads_col = column![
-            row![
-                text("Active Downloads")
-                    .size(24)
-                    .style(iced::theme::Text::Color(theme::GRAY_800)),
-                Space::with_width(Length::Fill),
-                button(text("Clear Completed").size(14))
-                    .on_press(Message::ClearAllCompleted)
-                    .padding([10, 16])
-                    .style(iced::theme::Button::Custom(Box::new(theme::SecondaryButton))),
-            ]
-            .align_items(Alignment::Center)
+        let mut downloads_col = column![row![
+            text("Active Downloads")
+                .size(24)
+                .style(iced::theme::Text::Color(theme::GRAY_800)),
+            Space::with_width(Length::Fill),
+            button(text("Clear Completed").size(14))
+                .on_press(Message::ClearAllCompleted)
+                .padding([10, 16])
+                .style(iced::theme::Button::Custom(Box::new(
+                    theme::SecondaryButton
+                ))),
         ]
+        .align_items(Alignment::Center)]
         .spacing(24);
 
         for task in downloads {
@@ -158,20 +163,19 @@ pub fn main_view(
         scrollable(downloads_col)
             .width(Length::Fill)
             .height(Length::Fill)
-            .style(iced::theme::Scrollable::Custom(Box::new(theme::ScrollableStyle)))
+            .style(iced::theme::Scrollable::Custom(Box::new(
+                theme::ScrollableStyle,
+            )))
             .into()
     };
 
     // Main content
-    column![
-        hero_section,
-        downloads_section,
-    ]
-    .spacing(32)
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .padding([32, 32, 32, 32])
-    .into()
+    column![hero_section, downloads_section,]
+        .spacing(32)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .padding([32, 32, 32, 32])
+        .into()
 }
 
 // Info tag style
@@ -182,7 +186,7 @@ impl iced::widget::container::StyleSheet for InfoTagStyle {
 
     fn appearance(&self, _style: &Self::Style) -> iced::widget::container::Appearance {
         use crate::gui::theme;
-        
+
         iced::widget::container::Appearance {
             background: Some(iced::Background::Color(theme::GRAY_100)),
             border: iced::Border {

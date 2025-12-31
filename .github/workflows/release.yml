@@ -1,0 +1,35 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-release:
+    name: Build Release
+    runs-on: macos-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Setup Rust
+      uses: dtolnay/rust-action@stable
+    
+    - name: Build release binary
+      run: cargo build --release
+    
+    - name: Create release archive
+      run: |
+        cd target/release
+        tar -czvf rustloader-${{ github.ref_name }}-macos.tar.gz rustloader
+    
+    - name: Upload release artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: rustloader-macos
+        path: target/release/rustloader-${{ github.ref_name }}-macos.tar.gz

@@ -4,14 +4,16 @@ use crate::downloader::{DownloadConfig, DownloadEngine};
 use crate::extractor::{Format, VideoExtractor, VideoInfo};
 use crate::queue::{DownloadTask, QueueManager, TaskStatus};
 use crate::utils::config::AppSettings;
-use crate::utils::{FileOrganizer, MetadataManager, OrganizationSettings, VideoMetadata, ContentType};
+use crate::utils::{
+    ContentType, FileOrganizer, MetadataManager, OrganizationSettings, VideoMetadata,
+};
 use anyhow::Result;
-use std::path::PathBuf;
+use chrono::Utc;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
-use chrono::Utc;
 
 /// Backend bridge for communication between GUI and backend components
 pub struct BackendBridge {
@@ -24,9 +26,10 @@ pub struct BackendBridge {
 }
 
 /// Progress update from backend to GUI
+#[allow(dead_code)] // Some variants are reserved for future granular progress events
 #[derive(Debug, Clone)]
 pub enum ProgressUpdate {
-    ExtractionComplete(VideoInfo),
+    ExtractionComplete(Box<VideoInfo>),
     DownloadProgress {
         task_id: String,
         progress: f32,
@@ -57,7 +60,7 @@ impl Clone for BackendBridge {
         // Note: We can't clone progress_rx (Receiver is not Clone)
         // Create a dummy channel for the clone - the original holds the real receiver
         let (_dummy_tx, dummy_rx) = mpsc::channel(100);
-        
+
         Self {
             extractor: Arc::clone(&self.extractor),
             queue_manager: Arc::clone(&self.queue_manager),
@@ -78,9 +81,9 @@ impl BackendBridge {
         let extractor = Arc::new(VideoExtractor::new()?);
 
         // Initialize download engine
-            eprintln!("🏗️ [BRIDGE-NEW] BackendBridge::new() called!");
-            let (progress_tx, progress_rx) = mpsc::channel(100);
-            eprintln!("🏗️ [BRIDGE-NEW] Created progress channel");
+        eprintln!("🏗️ [BRIDGE-NEW] BackendBridge::new() called!");
+        let (progress_tx, progress_rx) = mpsc::channel(100);
+        eprintln!("🏗️ [BRIDGE-NEW] Created progress channel");
 
         let download_config = DownloadConfig {
             segments: settings.segments,
@@ -93,13 +96,14 @@ impl BackendBridge {
         };
 
         let engine = DownloadEngine::new(download_config);
-        
+
         // Initialize file organization system
         eprintln!("🏗️ [BRIDGE-NEW] Initializing file organizer...");
         let org_settings = OrganizationSettings::default();
-        let file_organizer = FileOrganizer::new(org_settings).await
+        let file_organizer = FileOrganizer::new(org_settings)
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to initialize file organizer: {}", e))?;
-        
+
         let metadata_manager = MetadataManager::new(&file_organizer.base_dir);
         eprintln!("✅ [BRIDGE-NEW] File organization system initialized");
 
@@ -138,9 +142,16 @@ impl BackendBridge {
 
                 eprintln!("🔍 [MONITOR] Polling: {} tasks", tasks.len());
                 for task in tasks {
-                    eprintln!("🔍 [MONITOR] Task {}: status={:?}, progress={:?}", 
-                        &task.id[..8], task.status, task.progress.as_ref().map(|p| p.percentage()));
-                    let last_status = last_statuses.get(&task.id).cloned().unwrap_or(TaskStatus::Queued);
+                    eprintln!(
+                        "🔍 [MONITOR] Task {}: status={:?}, progress={:?}",
+                        &task.id[..8],
+                        task.status,
+                        task.progress.as_ref().map(|p| p.percentage())
+                    );
+                    let last_status = last_statuses
+                        .get(&task.id)
+                        .cloned()
+                        .unwrap_or(TaskStatus::Queued);
 
                     // Check if status changed
                     if task.status != last_status {
@@ -149,12 +160,15 @@ impl BackendBridge {
                         } else {
                             None
                         };
-                        
-                        if let Err(e) = progress_tx_clone.send(ProgressUpdate::TaskStatusChanged {
-                            task_id: task.id.clone(),
-                            status: task.status.clone(),
-                            file_path,
-                        }).await {
+
+                        if let Err(e) = progress_tx_clone
+                            .send(ProgressUpdate::TaskStatusChanged {
+                                task_id: task.id.clone(),
+                                status: task.status.clone(),
+                                file_path,
+                            })
+                            .await
+                        {
                             warn!("Failed to send status update: {}", e);
                             break;
                         }
@@ -162,14 +176,17 @@ impl BackendBridge {
 
                     // Send progress updates
                     if let Some(progress) = &task.progress {
-                        if let Err(e) = progress_tx_clone.send(ProgressUpdate::DownloadProgress {
-                            task_id: task.id.clone(),
-                            progress: progress.percentage() as f32,
-                            speed: progress.speed,
-                            downloaded: progress.downloaded_bytes,
-                            total: progress.total_bytes,
-                            eta_seconds: progress.eta.map(|d| d.as_secs()),
-                        }).await {
+                        if let Err(e) = progress_tx_clone
+                            .send(ProgressUpdate::DownloadProgress {
+                                task_id: task.id.clone(),
+                                progress: progress.percentage() as f32,
+                                speed: progress.speed,
+                                downloaded: progress.downloaded_bytes,
+                                total: progress.total_bytes,
+                                eta_seconds: progress.eta.map(|d| d.as_secs()),
+                            })
+                            .await
+                        {
                             warn!("Failed to send progress update: {}", e);
                             break;
                         }
@@ -179,14 +196,17 @@ impl BackendBridge {
                             .await
                             .map(|m| m.len())
                             .unwrap_or(0);
-                        if let Err(e) = progress_tx_clone.send(ProgressUpdate::DownloadProgress {
-                            task_id: task.id.clone(),
-                            progress: 100.0,
-                            speed: 0.0,
-                            downloaded,
-                            total: downloaded,
-                            eta_seconds: Some(0),
-                        }).await {
+                        if let Err(e) = progress_tx_clone
+                            .send(ProgressUpdate::DownloadProgress {
+                                task_id: task.id.clone(),
+                                progress: 100.0,
+                                speed: 0.0,
+                                downloaded,
+                                total: downloaded,
+                                eta_seconds: Some(0),
+                            })
+                            .await
+                        {
                             warn!("Failed to send synthesized completion progress: {}", e);
                             break;
                         }
@@ -201,7 +221,7 @@ impl BackendBridge {
 
         eprintln!("🏗️ [BRIDGE-NEW] Monitor spawned");
         eprintln!("🏗️ [BRIDGE-NEW] Returning BackendBridge");
-        
+
         Ok(Self {
             extractor,
             queue_manager,
@@ -236,7 +256,8 @@ impl BackendBridge {
 
         // FIX: Ensure download goes to Rustloader directory
         let filename = output_path.file_name().ok_or("Invalid output path")?;
-        let downloads_dir = dirs::download_dir().ok_or("Could not find downloads directory")
+        let downloads_dir = dirs::download_dir()
+            .ok_or("Could not find downloads directory")
             .map_err(|e| e.to_string())?;
         let rustloader_dir = downloads_dir.join("Rustloader");
         if !rustloader_dir.exists() {
@@ -260,16 +281,23 @@ impl BackendBridge {
                     format.clone()
                 }
                 None => {
-                    eprintln!("   [FORMAT-SELECT] ERROR: User-specified format not found: {}", id);
+                    eprintln!(
+                        "   [FORMAT-SELECT] ERROR: User-specified format not found: {}",
+                        id
+                    );
                     return Err("Format not found".to_string());
                 }
             }
         } else {
             eprintln!("   [FORMAT-SELECT] No format specified, auto-selecting...");
-            eprintln!("🔍 [FORMAT] Total formats available: {}", video_info.formats.len());
-            
+            eprintln!(
+                "🔍 [FORMAT] Total formats available: {}",
+                video_info.formats.len()
+            );
+
             // First, try to find formats with BOTH video and audio (combined formats)
-            let combined_formats: Vec<_> = video_info.formats
+            let combined_formats: Vec<_> = video_info
+                .formats
                 .iter()
                 .filter(|f| {
                     // Must have video codec
@@ -278,56 +306,69 @@ impl BackendBridge {
                     } else {
                         false
                     };
-                    
+
                     // Must have audio codec
                     let has_audio = if let Some(ref acodec) = f.acodec {
                         acodec != "none" && !acodec.is_empty()
                     } else {
                         false
                     };
-                    
+
                     // Exclude storyboards and images
                     let not_storyboard = !f.format_id.starts_with("sb");
                     let not_image = f.ext != "jpg" && f.ext != "png" && f.ext != "webp";
-                    
+
                     // Must have dimensions
                     let has_dimensions = f.width.is_some() && f.height.is_some();
-                    
-                    let is_combined = has_video && has_audio && not_storyboard && not_image && has_dimensions;
-                    
+
+                    let is_combined =
+                        has_video && has_audio && not_storyboard && not_image && has_dimensions;
+
                     if is_combined {
-                        eprintln!("✅ [FORMAT] Combined format: {} ({}x{}, vcodec={:?}, acodec={:?})", 
-                            f.format_id, f.width.unwrap_or(0), f.height.unwrap_or(0), f.vcodec, f.acodec);
+                        eprintln!(
+                            "✅ [FORMAT] Combined format: {} ({}x{}, vcodec={:?}, acodec={:?})",
+                            f.format_id,
+                            f.width.unwrap_or(0),
+                            f.height.unwrap_or(0),
+                            f.vcodec,
+                            f.acodec
+                        );
                     }
-                    
+
                     is_combined
                 })
                 .collect();
 
-            eprintln!("🔍 [FORMAT] Found {} combined (video+audio) formats", combined_formats.len());
+            eprintln!(
+                "🔍 [FORMAT] Found {} combined (video+audio) formats",
+                combined_formats.len()
+            );
 
             // If we have combined formats, use the best one
             if !combined_formats.is_empty() {
-                let best_format = combined_formats
-                    .iter()
-                    .max_by(|a, b| {
-                        let a_res = a.width.unwrap_or(0) * a.height.unwrap_or(0);
-                        let b_res = b.width.unwrap_or(0) * b.height.unwrap_or(0);
-                        
-                        match a_res.cmp(&b_res) {
-                            std::cmp::Ordering::Equal => {
-                                let aq = a.quality.unwrap_or(0.0);
-                                let bq = b.quality.unwrap_or(0.0);
-                                aq.partial_cmp(&bq).unwrap_or(std::cmp::Ordering::Equal)
-                            }
-                            other => other,
+                let best_format = combined_formats.iter().max_by(|a, b| {
+                    let a_res = a.width.unwrap_or(0) * a.height.unwrap_or(0);
+                    let b_res = b.width.unwrap_or(0) * b.height.unwrap_or(0);
+
+                    match a_res.cmp(&b_res) {
+                        std::cmp::Ordering::Equal => {
+                            let aq = a.quality.unwrap_or(0.0);
+                            let bq = b.quality.unwrap_or(0.0);
+                            aq.partial_cmp(&bq).unwrap_or(std::cmp::Ordering::Equal)
                         }
-                    });
-                
+                        other => other,
+                    }
+                });
+
                 match best_format {
                     Some(fmt) => {
-                        eprintln!("🎯 [FORMAT] Selected combined format: {} ({}x{}, quality={:?})", 
-                            fmt.format_id, fmt.width.unwrap_or(0), fmt.height.unwrap_or(0), fmt.quality);
+                        eprintln!(
+                            "🎯 [FORMAT] Selected combined format: {} ({}x{}, quality={:?})",
+                            fmt.format_id,
+                            fmt.width.unwrap_or(0),
+                            fmt.height.unwrap_or(0),
+                            fmt.quality
+                        );
                         (*fmt).clone()
                     }
                     None => {
@@ -348,12 +389,22 @@ impl BackendBridge {
         eprintln!("   - Format ext: {}", format.ext);
         eprintln!("   - Format vcodec: {:?}", format.vcodec);
         eprintln!("   - Format acodec: {:?}", format.acodec);
-        eprintln!("   - Format resolution: {:?}x{:?}", format.width, format.height);
+        eprintln!(
+            "   - Format resolution: {:?}x{:?}",
+            format.width, format.height
+        );
 
         // Get direct URL
-        eprintln!("\n🌐 [URL-FETCH] Fetching direct URL for format {}...", format.format_id);
+        eprintln!(
+            "\n🌐 [URL-FETCH] Fetching direct URL for format {}...",
+            format.format_id
+        );
         eprintln!("   - Selected format: {}", format.format_id);
-        let direct_url = match self.extractor.get_direct_url(&video_info.url, &format.format_id).await {
+        let direct_url = match self
+            .extractor
+            .get_direct_url(&video_info.url, &format.format_id)
+            .await
+        {
             Ok(url) => {
                 eprintln!("   - Direct URL obtained: {}", url);
                 url
@@ -378,7 +429,10 @@ impl BackendBridge {
             eprintln!("   - Will use: {}", video_info.url);
             video_info.url.clone()
         } else {
-            eprintln!("📦 [URL-DETECT] Direct download URL detected: {}", direct_url);
+            eprintln!(
+                "📦 [URL-DETECT] Direct download URL detected: {}",
+                direct_url
+            );
             direct_url.clone()
         };
 
@@ -449,6 +503,7 @@ impl BackendBridge {
     }
 
     /// Get all download tasks
+    #[allow(dead_code)] // Future GUI pagination / history views will call this
     pub async fn get_all_tasks(&self) -> Result<Vec<DownloadTask>, String> {
         Ok(self.queue_manager.get_all_tasks().await)
     }
@@ -494,46 +549,51 @@ impl BackendBridge {
             }
         }
     }
-    
+
     /// Organize downloaded file and save metadata
+    #[allow(dead_code)] // Reserved for richer post-processing flows
     pub async fn organize_completed_download(
         &self,
         task_id: &str,
-        temp_path: &PathBuf,
+        temp_path: &Path,
         video_info: &VideoInfo,
         format: &Format,
     ) -> Result<PathBuf, String> {
-        eprintln!("🗂️  [ORGANIZE] Starting file organization for task: {}", task_id);
-        
+        eprintln!(
+            "🗂️  [ORGANIZE] Starting file organization for task: {}",
+            task_id
+        );
+
         // Determine content type (for now, assume simple video)
         let content_type = ContentType::Video;
-        
+
         // Get quality string from format
-        let quality = if let (Some(w), Some(h)) = (format.width, format.height) {
+        let quality = if let (Some(_w), Some(h)) = (format.width, format.height) {
             format!("{}p", h)
         } else {
             "unknown".to_string()
         };
-        
+
         // Organize the file
-        let final_path = self.file_organizer
+        let final_path = self
+            .file_organizer
             .organize_file(temp_path, video_info, &quality, &content_type)
             .await
             .map_err(|e| format!("Failed to organize file: {}", e))?;
-        
+
         eprintln!("✅ [ORGANIZE] File organized to: {:?}", final_path);
-        
+
         // Extract video ID for metadata
         let video_id = FileOrganizer::extract_video_id(&video_info.url)
-            .unwrap_or(&task_id)
+            .unwrap_or(task_id)
             .to_string();
-        
+
         // Get file size
         let file_size = tokio::fs::metadata(&final_path)
             .await
             .map(|m| m.len())
             .unwrap_or(0);
-        
+
         // Create metadata
         let metadata = VideoMetadata {
             video_id: video_id.clone(),
@@ -556,23 +616,29 @@ impl BackendBridge {
             watch_count: 0,
             last_accessed: Utc::now(),
         };
-        
+
         // Save metadata
-        if let Err(e) = self.metadata_manager.save_metadata(&video_id, &metadata).await {
+        if let Err(e) = self
+            .metadata_manager
+            .save_metadata(&video_id, &metadata)
+            .await
+        {
             eprintln!("⚠️  [ORGANIZE] Failed to save metadata: {}", e);
         } else {
             eprintln!("✅ [ORGANIZE] Metadata saved successfully");
         }
-        
+
         Ok(final_path)
     }
-    
+
     /// Get file organizer reference
+    #[allow(dead_code)] // Exposed for integrations beyond the current GUI
     pub fn get_file_organizer(&self) -> Arc<FileOrganizer> {
         Arc::clone(&self.file_organizer)
     }
-    
+
     /// Get metadata manager reference
+    #[allow(dead_code)] // Exposed for integrations beyond the current GUI
     pub fn get_metadata_manager(&self) -> Arc<MetadataManager> {
         Arc::clone(&self.metadata_manager)
     }

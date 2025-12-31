@@ -1,10 +1,12 @@
 //! Download engine module
 
 pub mod engine;
-pub mod segment;
 pub mod merger;
 pub mod progress;
+pub mod segment;
 
 // Re-export for convenience
-pub use engine::{DownloadEngine, DownloadConfig};
+#[allow(unused_imports)] // Exposed for external callers; may be unused internally
+pub use engine::{DownloadConfig, DownloadEngine};
+#[allow(unused_imports)] // Exposed for external callers; may be unused internally
 pub use progress::{DownloadProgress, DownloadStatus};

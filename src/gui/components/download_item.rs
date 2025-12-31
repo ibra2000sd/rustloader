@@ -1,9 +1,9 @@
 //! Download item component
 
-use crate::gui::app::{Message, DownloadTaskUI};
-use iced::widget::{button, column, container, row, text, Space};
-use iced::{Element, Length, Alignment, Color};
+use crate::gui::app::{DownloadTaskUI, Message};
 use crate::gui::components::progress_bar;
+use iced::widget::{button, column, container, row, text, Space};
+use iced::{Alignment, Color, Element, Length};
 
 /// Create a download item widget
 /// Create a download item widget
@@ -19,69 +19,77 @@ pub fn download_item(task: &DownloadTaskUI) -> Element<'static, Message> {
         _ => theme::TEXT_SECONDARY,
     };
 
-        let control_buttons = match task.status.as_str() {
-                "Downloading" => row![
-                    button(text("Pause").size(12))
-                        .on_press(Message::PauseDownload(task.id.clone()))
-                        .padding([6, 12])
-                        .style(iced::theme::Button::Custom(Box::new(theme::SecondaryButton))),
-                    button(text("Cancel").size(12))
-                        .on_press(Message::CancelDownload(task.id.clone()))
-                        .padding([6, 12])
-                        .style(iced::theme::Button::Custom(Box::new(theme::DestructiveButton))),
-                ],
-                
-                // ✅ FIX BUG-008: Handle "Pausing...", "Paused", and "Resuming..." states
-                "Pausing..." | "Paused" | "Resuming..." => row![
-                    button(text("Resume").size(12))
-                        .on_press(Message::ResumeDownload(task.id.clone()))
-                        .padding([6, 12])
-                        .style(iced::theme::Button::Custom(Box::new(theme::PrimaryButton))),
-                    button(text("Cancel").size(12))
-                        .on_press(Message::CancelDownload(task.id.clone()))
-                        .padding([6, 12])
-                        .style(iced::theme::Button::Custom(Box::new(theme::DestructiveButton))),
-                ],
-                
-                "Completed" => row![
-                    button(text("Open File").size(12))
-                        .on_press(Message::OpenFile(task.id.clone()))
-                        .padding([6, 12])
-                        .style(iced::theme::Button::Custom(Box::new(theme::PrimaryButton))),
-                    button(text("Show in Folder").size(12))
-                        .on_press(Message::OpenDownloadFolder(task.id.clone()))
-                        .padding([6, 12])
-                        .style(iced::theme::Button::Custom(Box::new(theme::SecondaryButton))),
-                    button(text("Remove").size(12))
-                        .on_press(Message::RemoveCompleted(task.id.clone()))
-                        .padding([6, 12])
-                        .style(iced::theme::Button::Custom(Box::new(theme::IconButton))),
-                ],
-                
-                "Failed" => row![
-                    button(text("Retry").size(12))
-                        .on_press(Message::RetryDownload(task.id.clone()))
-                        .padding([6, 12])
-                        .style(iced::theme::Button::Custom(Box::new(theme::PrimaryButton))),
-                    button(text("Remove").size(12))
-                        .on_press(Message::RemoveCompleted(task.id.clone()))
-                        .padding([6, 12])
-                        .style(iced::theme::Button::Custom(Box::new(theme::IconButton))),
-                ],
-                
-                // ✅ FIX BUG-008: Handle "Cancelling..." state
-                "Cancelling..." => row![
-                    text("Cancelling...").size(12).style(iced::theme::Text::Color(theme::TEXT_SECONDARY)),
-                ],
-                
-                // Default for any unknown states
-                _ => row![
-                    button(text("Cancel").size(12))
-                        .on_press(Message::CancelDownload(task.id.clone()))
-                        .padding([6, 12])
-                        .style(iced::theme::Button::Custom(Box::new(theme::DestructiveButton))),
-                ],
-        };
+    let control_buttons = match task.status.as_str() {
+        "Downloading" => row![
+            button(text("Pause").size(12))
+                .on_press(Message::PauseDownload(task.id.clone()))
+                .padding([6, 12])
+                .style(iced::theme::Button::Custom(Box::new(
+                    theme::SecondaryButton
+                ))),
+            button(text("Cancel").size(12))
+                .on_press(Message::CancelDownload(task.id.clone()))
+                .padding([6, 12])
+                .style(iced::theme::Button::Custom(Box::new(
+                    theme::DestructiveButton
+                ))),
+        ],
+
+        // ✅ FIX BUG-008: Handle "Pausing...", "Paused", and "Resuming..." states
+        "Pausing..." | "Paused" | "Resuming..." => row![
+            button(text("Resume").size(12))
+                .on_press(Message::ResumeDownload(task.id.clone()))
+                .padding([6, 12])
+                .style(iced::theme::Button::Custom(Box::new(theme::PrimaryButton))),
+            button(text("Cancel").size(12))
+                .on_press(Message::CancelDownload(task.id.clone()))
+                .padding([6, 12])
+                .style(iced::theme::Button::Custom(Box::new(
+                    theme::DestructiveButton
+                ))),
+        ],
+
+        "Completed" => row![
+            button(text("Open File").size(12))
+                .on_press(Message::OpenFile(task.id.clone()))
+                .padding([6, 12])
+                .style(iced::theme::Button::Custom(Box::new(theme::PrimaryButton))),
+            button(text("Show in Folder").size(12))
+                .on_press(Message::OpenDownloadFolder(task.id.clone()))
+                .padding([6, 12])
+                .style(iced::theme::Button::Custom(Box::new(
+                    theme::SecondaryButton
+                ))),
+            button(text("Remove").size(12))
+                .on_press(Message::RemoveCompleted(task.id.clone()))
+                .padding([6, 12])
+                .style(iced::theme::Button::Custom(Box::new(theme::IconButton))),
+        ],
+
+        "Failed" => row![
+            button(text("Retry").size(12))
+                .on_press(Message::RetryDownload(task.id.clone()))
+                .padding([6, 12])
+                .style(iced::theme::Button::Custom(Box::new(theme::PrimaryButton))),
+            button(text("Remove").size(12))
+                .on_press(Message::RemoveCompleted(task.id.clone()))
+                .padding([6, 12])
+                .style(iced::theme::Button::Custom(Box::new(theme::IconButton))),
+        ],
+
+        // ✅ FIX BUG-008: Handle "Cancelling..." state
+        "Cancelling..." => row![text("Cancelling...")
+            .size(12)
+            .style(iced::theme::Text::Color(theme::TEXT_SECONDARY)),],
+
+        // Default for any unknown states
+        _ => row![button(text("Cancel").size(12))
+            .on_press(Message::CancelDownload(task.id.clone()))
+            .padding([6, 12])
+            .style(iced::theme::Button::Custom(Box::new(
+                theme::DestructiveButton
+            ))),],
+    };
 
     let speed_text = if task.status == "Completed" {
         "Complete".to_string()
@@ -102,17 +110,16 @@ pub fn download_item(task: &DownloadTaskUI) -> Element<'static, Message> {
     let content = column![
         // Title and status
         row![
-            text(&task.title).size(16).width(Length::Fill).style(theme::TEXT_PRIMARY),
-            text(&task.status)
-                .size(12)
-                .style(status_color),
+            text(&task.title)
+                .size(16)
+                .width(Length::Fill)
+                .style(theme::TEXT_PRIMARY),
+            text(&task.status).size(12).style(status_color),
         ]
         .spacing(10)
         .align_items(Alignment::Center),
-
         // Progress bar
         progress_bar(task.progress, task.eta_seconds),
-
         // Speed and size
         row![
             text(speed_text).size(12).style(theme::TEXT_SECONDARY),
@@ -121,12 +128,8 @@ pub fn download_item(task: &DownloadTaskUI) -> Element<'static, Message> {
         ]
         .spacing(10)
         .align_items(Alignment::Center),
-
         // Control buttons
-        row![
-            Space::with_width(Length::Fill),
-            control_buttons.spacing(8),
-        ]
+        row![Space::with_width(Length::Fill), control_buttons.spacing(8),]
     ]
     .spacing(12)
     .width(Length::Fill);
@@ -134,6 +137,8 @@ pub fn download_item(task: &DownloadTaskUI) -> Element<'static, Message> {
     container(content)
         .padding(16)
         .width(Length::Fill)
-        .style(iced::theme::Container::Custom(Box::new(theme::GlassContainer)))
+        .style(iced::theme::Container::Custom(Box::new(
+            theme::GlassContainer,
+        )))
         .into()
 }

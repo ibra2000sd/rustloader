@@ -1,7 +1,7 @@
 //! Settings view implementation
 
 use iced::widget::{button, column, container, pick_list, row, slider, text, text_input, Space};
-use iced::{Element, Length, Alignment};
+use iced::{Alignment, Element, Length};
 
 /// Create the settings view
 pub fn settings_view(
@@ -14,7 +14,9 @@ pub fn settings_view(
         button(text("← Back").size(16))
             .on_press(crate::gui::app::Message::SwitchToMain)
             .padding([8, 16])
-            .style(iced::theme::Button::Custom(Box::new(crate::gui::theme::SecondaryButton))),
+            .style(iced::theme::Button::Custom(Box::new(
+                crate::gui::theme::SecondaryButton
+            ))),
         Space::with_width(Length::Fill),
         text("Settings")
             .size(24)
@@ -35,11 +37,15 @@ pub fn settings_view(
                 .on_input(crate::gui::app::Message::DownloadLocationChanged)
                 .padding(12)
                 .width(Length::Fill)
-                .style(iced::theme::TextInput::Custom(Box::new(crate::gui::theme::InputStyle))),
+                .style(iced::theme::TextInput::Custom(Box::new(
+                    crate::gui::theme::InputStyle
+                ))),
             button(text("Browse...").size(14))
                 .on_press(crate::gui::app::Message::BrowseDownloadLocation)
                 .padding([10, 16])
-                .style(iced::theme::Button::Custom(Box::new(crate::gui::theme::SecondaryButton))),
+                .style(iced::theme::Button::Custom(Box::new(
+                    crate::gui::theme::SecondaryButton
+                ))),
         ]
         .spacing(10)
         .align_items(Alignment::Center),
@@ -51,28 +57,38 @@ pub fn settings_view(
         text("Performance")
             .size(16)
             .style(iced::theme::Text::Color(crate::gui::theme::TEXT_PRIMARY)),
-
         // Max concurrent downloads
         column![
             row![
-                text("Max concurrent downloads").size(14).style(iced::theme::Text::Color(crate::gui::theme::TEXT_SECONDARY)),
+                text("Max concurrent downloads")
+                    .size(14)
+                    .style(iced::theme::Text::Color(crate::gui::theme::TEXT_SECONDARY)),
                 Space::with_width(Length::Fill),
-                text(format!("{}", max_concurrent)).size(14).style(iced::theme::Text::Color(crate::gui::theme::TEXT_PRIMARY)),
+                text(format!("{}", max_concurrent))
+                    .size(14)
+                    .style(iced::theme::Text::Color(crate::gui::theme::TEXT_PRIMARY)),
             ],
-            slider(1..=10, max_concurrent as u8, |v| crate::gui::app::Message::MaxConcurrentChanged(v as usize))
-                .width(Length::Fill),
+            slider(1..=10, max_concurrent as u8, |v| {
+                crate::gui::app::Message::MaxConcurrentChanged(v as usize)
+            })
+            .width(Length::Fill),
         ]
         .spacing(8),
-
         // Segments per download
         column![
             row![
-                text("Segments per download").size(14).style(iced::theme::Text::Color(crate::gui::theme::TEXT_SECONDARY)),
+                text("Segments per download")
+                    .size(14)
+                    .style(iced::theme::Text::Color(crate::gui::theme::TEXT_SECONDARY)),
                 Space::with_width(Length::Fill),
-                text(format!("{}", segments)).size(14).style(iced::theme::Text::Color(crate::gui::theme::TEXT_PRIMARY)),
+                text(format!("{}", segments))
+                    .size(14)
+                    .style(iced::theme::Text::Color(crate::gui::theme::TEXT_PRIMARY)),
             ],
-            slider(4..=32, segments as u8, |v| crate::gui::app::Message::SegmentsChanged(v as usize))
-                .width(Length::Fill),
+            slider(4..=32, segments as u8, |v| {
+                crate::gui::app::Message::SegmentsChanged(v as usize)
+            })
+            .width(Length::Fill),
         ]
         .spacing(8),
     ]
@@ -99,7 +115,9 @@ pub fn settings_view(
         .on_press(crate::gui::app::Message::SaveSettings)
         .padding([12, 24])
         .width(Length::Fill)
-        .style(iced::theme::Button::Custom(Box::new(crate::gui::theme::PrimaryButton)));
+        .style(iced::theme::Button::Custom(Box::new(
+            crate::gui::theme::PrimaryButton,
+        )));
 
     // Main content
     let content = column![
@@ -113,7 +131,9 @@ pub fn settings_view(
             .spacing(24)
         )
         .padding(24)
-        .style(iced::theme::Container::Custom(Box::new(crate::gui::theme::GlassContainer))),
+        .style(iced::theme::Container::Custom(Box::new(
+            crate::gui::theme::GlassContainer
+        ))),
         Space::with_height(Length::Fill),
         save_button,
     ]
@@ -125,6 +145,8 @@ pub fn settings_view(
     container(content)
         .width(Length::Fill)
         .height(Length::Fill)
-        .style(iced::theme::Container::Custom(Box::new(crate::gui::theme::MainGradientContainer)))
+        .style(iced::theme::Container::Custom(Box::new(
+            crate::gui::theme::MainGradientContainer,
+        )))
         .into()
 }

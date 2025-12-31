@@ -1,16 +1,16 @@
 //! Rustloader library
 
 pub mod app;
-pub mod extractor;
-pub mod downloader;
-pub mod queue;
 pub mod database;
+pub mod downloader;
+pub mod extractor;
 pub mod gui;
+pub mod queue;
 pub mod utils;
 
 // Re-export main types for easier use
-pub use extractor::{VideoExtractor, VideoInfo, Format};
-pub use downloader::{DownloadEngine, DownloadConfig, DownloadProgress, DownloadStatus};
-pub use queue::{QueueManager, DownloadTask, TaskStatus};
-pub use gui::{RustloaderApp, Message, View};
-pub use utils::{RustloaderError, AppSettings};
+pub use downloader::{DownloadConfig, DownloadEngine, DownloadProgress, DownloadStatus};
+pub use extractor::{Format, VideoExtractor, VideoInfo};
+pub use gui::{Message, RustloaderApp, View};
+pub use queue::{DownloadTask, QueueManager, TaskStatus};
+pub use utils::{AppSettings, RustloaderError};
