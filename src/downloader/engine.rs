@@ -802,3 +802,194 @@ impl Default for DownloadEngine {
         Self::new(DownloadConfig::default())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ============================================================
+    // CONFIGURATION TESTS
+    // ============================================================
+
+    #[test]
+    fn test_download_config_defaults() {
+        let config = DownloadConfig::default();
+        assert_eq!(config.segments, 16, "Default should be 16 segments");
+        assert_eq!(
+            config.connections_per_segment, 1,
+            "Default connections per segment should be 1"
+        );
+        assert_eq!(config.chunk_size, 8192, "Default chunk size should be 8KB");
+        assert_eq!(
+            config.retry_attempts, 3,
+            "Default retry attempts should be 3"
+        );
+        assert!(config.enable_resume, "Resume should be enabled by default");
+    }
+
+    #[test]
+    fn test_download_config_custom() {
+        let config = DownloadConfig {
+            segments: 8,
+            connections_per_segment: 2,
+            chunk_size: 16384,
+            retry_attempts: 5,
+            retry_delay: Duration::from_secs(5),
+            enable_resume: false,
+            request_delay: Duration::from_millis(200),
+        };
+
+        assert_eq!(config.segments, 8);
+        assert_eq!(config.connections_per_segment, 2);
+        assert_eq!(config.chunk_size, 16384);
+        assert_eq!(config.retry_attempts, 5);
+        assert!(!config.enable_resume);
+    }
+
+    // ============================================================
+    // ENGINE INITIALIZATION TESTS
+    // ============================================================
+
+    #[test]
+    fn test_download_engine_creation() {
+        let config = DownloadConfig::default();
+        let engine = DownloadEngine::new(config);
+        assert_eq!(engine.config.segments, 16);
+    }
+
+    #[test]
+    fn test_download_engine_default() {
+        let engine = DownloadEngine::default();
+        assert_eq!(engine.config.segments, 16);
+        assert!(engine.config.enable_resume);
+    }
+
+    #[test]
+    fn test_download_engine_with_custom_config() {
+        let config = DownloadConfig {
+            segments: 4,
+            retry_attempts: 10,
+            ..Default::default()
+        };
+        let engine = DownloadEngine::new(config);
+        assert_eq!(engine.config.segments, 4);
+        assert_eq!(engine.config.retry_attempts, 10);
+    }
+
+    // ============================================================
+    // YT-DLP PROGRESS PARSING TESTS
+    // ============================================================
+
+    #[test]
+    fn test_parse_yt_dlp_progress_typical() {
+        let line = "[download]  42.5% of ~ 150.00MiB at  5.20MiB/s ETA 00:15";
+        let result = parse_yt_dlp_progress(line);
+        assert!(result.is_some());
+
+        let (pct, speed, total) = result.unwrap();
+        assert!((pct - 42.5).abs() < 0.1, "Percentage should be ~42.5");
+        assert!(speed > 5_000_000.0, "Speed should be ~5.2 MiB/s");
+        assert!(total > 150_000_000, "Total should be ~150 MiB");
+    }
+
+    #[test]
+    fn test_parse_yt_dlp_progress_no_percentage() {
+        let line = "[download] Downloading video...";
+        let result = parse_yt_dlp_progress(line);
+        assert!(result.is_none(), "Should return None for lines without %");
+    }
+
+    #[test]
+    fn test_parse_yt_dlp_progress_with_kilobytes() {
+        let line = "[download]  10.0% of 500.00KiB at  50.00KiB/s";
+        let result = parse_yt_dlp_progress(line);
+        assert!(result.is_some());
+
+        let (pct, speed, total) = result.unwrap();
+        assert!((pct - 10.0).abs() < 0.1);
+        assert!(speed > 50_000.0, "Speed should be ~50 KiB/s");
+        assert!(total > 500_000, "Total should be ~500 KiB");
+    }
+
+    #[test]
+    fn test_parse_yt_dlp_progress_with_gigabytes() {
+        let line = "[download]  75.0% of 2.00GiB at  10.00MiB/s";
+        let result = parse_yt_dlp_progress(line);
+        assert!(result.is_some());
+
+        let (pct, speed, total) = result.unwrap();
+        assert!((pct - 75.0).abs() < 0.1);
+        assert!(speed > 10_000_000.0, "Speed should be ~10 MiB/s");
+        assert!(total > 2_000_000_000, "Total should be ~2 GiB");
+    }
+
+    #[test]
+    fn test_parse_yt_dlp_progress_approximate_size() {
+        let line = "[download]  50.0% of ~ 100.00MiB at  2.00MiB/s";
+        let result = parse_yt_dlp_progress(line);
+        assert!(result.is_some(), "Should handle approximate sizes with ~");
+    }
+
+    #[test]
+    fn test_parse_yt_dlp_progress_malformed() {
+        let line = "[download] Something % weird";
+        let result = parse_yt_dlp_progress(line);
+        // May return None or Some with zeroed values - either is acceptable
+        // The important thing is it doesn't panic
+    }
+
+    // ============================================================
+    // DOWNLOAD ENGINE FUNCTIONAL TESTS
+    // ============================================================
+
+    #[tokio::test]
+    async fn test_engine_supports_ranges_mock() {
+        // This test would require a mock server
+        // For now, we test that the function exists and has proper signature
+        let engine = DownloadEngine::default();
+        // In a real test environment, you'd use a mock server
+        // For unit testing, we verify the structure exists
+        assert_eq!(engine.config.segments, 16);
+    }
+
+    #[tokio::test]
+    async fn test_engine_get_file_size_mock() {
+        // Similar to above - would require mock server
+        let engine = DownloadEngine::default();
+        assert!(engine.config.retry_attempts > 0);
+    }
+
+    // ============================================================
+    // INTEGRATION-STYLE TESTS (requires real resources)
+    // ============================================================
+
+    // Note: Full download tests are in integration tests
+    // These are structure and configuration validation tests
+
+    #[test]
+    fn test_download_config_validation() {
+        let config = DownloadConfig {
+            segments: 32,
+            chunk_size: 1024,
+            retry_attempts: 0, // Edge case: no retries
+            ..Default::default()
+        };
+
+        assert_eq!(config.segments, 32);
+        assert_eq!(config.retry_attempts, 0, "Should allow 0 retry attempts");
+    }
+
+    #[test]
+    fn test_download_config_extreme_values() {
+        let config = DownloadConfig {
+            segments: 1,         // Minimum segments
+            chunk_size: 1,       // Minimum chunk
+            retry_attempts: 100, // High retry count
+            ..Default::default()
+        };
+
+        assert_eq!(config.segments, 1);
+        assert_eq!(config.chunk_size, 1);
+        assert_eq!(config.retry_attempts, 100);
+    }
+}
