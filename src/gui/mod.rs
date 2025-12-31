@@ -4,6 +4,7 @@
 pub mod app;
 pub mod clipboard;
 pub mod components;
+pub mod icon;
 pub mod integration;
 pub mod theme;
 pub mod views;

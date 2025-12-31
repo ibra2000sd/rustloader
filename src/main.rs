@@ -48,6 +48,7 @@ fn main() -> Result<()> {
             min_size: Some(iced::Size::new(800.0, 500.0)),
             decorations: true, // Keep decorations for now as custom title bars are complex in Iced without winit direct access
             transparent: false, // Transparency can be tricky across platforms
+            icon: gui::icon::load_icon(), // Load application icon
             ..Default::default()
         },
         antialiasing: true,

@@ -4099,6 +4099,7 @@ dependencies = [
  "dirs",
  "futures",
  "iced",
+ "image 0.24.9",
  "open",
  "path-absolutize",
  "reqwest",
