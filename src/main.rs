@@ -105,8 +105,10 @@ async fn test_download_cli(url: String) {
     let config = downloader::DownloadConfig::default();
     let engine = downloader::DownloadEngine::new(config);
 
-    // Create output path
-    let output_path = std::path::PathBuf::from("./test_download.mp4");
+    // Create output path using bundle-aware utilities
+    // Use ~/Downloads/test_download.mp4 instead of relative path ./test_download.mp4
+    // to ensure the file is saved to the correct location even when launched from Finder/Dock
+    let output_path = utils::get_download_file_path("test_download.mp4");
 
     // Create progress channel
     let (progress_tx, mut progress_rx) =

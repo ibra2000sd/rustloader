@@ -129,17 +129,12 @@ impl Application for RustloaderApp {
         // Initialize settings
         let mut settings = AppSettings::default();
 
-        // Initialize database
-        let db_path = dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("rustloader")
-            .join("rustloader.db");
-
-        // Create directory if it doesn't exist
-        if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent).ok();
-        }
-
+        // Initialize database using bundle-aware paths
+        // This ensures the database is stored in ~/Library/Application Support/Rustloader/
+        // regardless of whether the app is launched from Terminal, Finder, Dock, or Spotlight.
+        // Working around macOS launch environment differences where cwd may be "/" when
+        // launched via LaunchServices (Finder, Dock, Spotlight).
+        let db_path = crate::utils::get_database_path();
         let db_path_str = db_path.to_string_lossy().to_string();
 
         // Create a single runtime and keep it alive for the app lifetime

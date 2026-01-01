@@ -31,8 +31,11 @@ pub struct AppSettings {
 
 impl Default for AppSettings {
     fn default() -> Self {
+        // Use bundle-aware path resolution to ensure downloads go to ~/Downloads
+        // even when the app is launched from Finder/Dock (where cwd is "/").
+        // Never use relative paths like "./downloads" as they fail in non-Terminal launches.
         Self {
-            download_location: dirs::download_dir().unwrap_or_else(|| PathBuf::from("./downloads")),
+            download_location: crate::utils::get_downloads_dir(),
             segments: 16,
             max_concurrent: 5,
             quality: VideoQuality::Best,
