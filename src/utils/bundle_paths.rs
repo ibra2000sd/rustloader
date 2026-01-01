@@ -43,7 +43,10 @@ pub fn get_app_support_dir() -> PathBuf {
         });
 
     // Ensure directory exists
-    let _ = std::fs::create_dir_all(&dir);
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("Warning: Failed to create app support directory {:?}: {}", dir, e);
+        eprintln!("Will attempt to use the directory anyway");
+    }
 
     debug!("App support directory: {:?}", dir);
     dir

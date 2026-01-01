@@ -6,8 +6,9 @@ use crate::utils::error::RustloaderError;
 use anyhow::Result;
 use serde_json;
 use std::path::PathBuf;
+use std::process::Command;
 use tokio::process::Command as AsyncCommand;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 use which::which;
 
 /// Main video extractor using yt-dlp
@@ -17,15 +18,15 @@ pub struct VideoExtractor {
 
 impl VideoExtractor {
     /// Initialize extractor and verify yt-dlp availability
+    /// Priority:
+    /// 1. Bundled yt-dlp (inside .app bundle)
+    /// 2. System PATH
+    /// 3. Common Homebrew/Python locations
     pub fn new() -> Result<Self> {
-        // Try to find yt-dlp in the system PATH
-        let ytdlp_path = match which("yt-dlp") {
-            Ok(path) => path,
-            Err(_) => {
-                error!("yt-dlp not found in PATH");
-                return Err(RustloaderError::YtDlpNotFound.into());
-            }
-        };
+        let ytdlp_path = find_ytdlp().ok_or_else(|| {
+            error!("yt-dlp not found in bundle, PATH, or common locations");
+            RustloaderError::YtDlpNotFound
+        })?;
 
         info!("Found yt-dlp at: {}", ytdlp_path.display());
 
@@ -201,6 +202,128 @@ impl Default for VideoExtractor {
     }
 }
 
+// ============================================================================
+// yt-dlp Detection Logic
+// ============================================================================
+
+/// Find the yt-dlp binary path
+/// Priority:
+/// 1. Bundled yt-dlp (inside .app bundle)
+/// 2. System PATH
+/// 3. Common Homebrew/Python locations
+pub fn find_ytdlp() -> Option<PathBuf> {
+    // First: Check bundled yt-dlp (for macOS .app bundle)
+    if let Some(bundled) = find_bundled_ytdlp() {
+        info!("✓ Using bundled yt-dlp: {:?}", bundled);
+        return Some(bundled);
+    }
+
+    // Second: Check PATH
+    if let Some(system) = find_in_path() {
+        info!("✓ Using system yt-dlp from PATH: {:?}", system);
+        return Some(system);
+    }
+
+    // Third: Check common locations
+    if let Some(common) = find_in_common_paths() {
+        info!("✓ Using yt-dlp from common location: {:?}", common);
+        return Some(common);
+    }
+
+    warn!("✗ yt-dlp not found anywhere!");
+    None
+}
+
+/// Find bundled yt-dlp inside macOS .app bundle
+fn find_bundled_ytdlp() -> Option<PathBuf> {
+    // Get current executable path
+    let exe_path = std::env::current_exe().ok()?;
+    debug!("Current executable: {:?}", exe_path);
+
+    // If running from .app/Contents/MacOS/binary
+    // then yt-dlp is at .app/Contents/Resources/bin/yt-dlp
+    let macos_dir = exe_path.parent()?;
+
+    // Check if we're in a MacOS directory (indicates .app bundle)
+    if macos_dir.ends_with("MacOS") {
+        let contents_dir = macos_dir.parent()?;
+        let ytdlp_path = contents_dir.join("Resources").join("bin").join("yt-dlp");
+
+        debug!("Checking bundled path: {:?}", ytdlp_path);
+
+        if ytdlp_path.exists() && ytdlp_path.is_file() {
+            // Verify it's executable
+            if is_executable(&ytdlp_path) {
+                return Some(ytdlp_path);
+            } else {
+                warn!("Bundled yt-dlp exists but is not executable: {:?}", ytdlp_path);
+            }
+        }
+    }
+
+    None
+}
+
+/// Find yt-dlp in system PATH using which
+fn find_in_path() -> Option<PathBuf> {
+    which("yt-dlp").ok()
+}
+
+/// Find yt-dlp in common installation paths
+fn find_in_common_paths() -> Option<PathBuf> {
+    let common_paths = [
+        "/opt/homebrew/bin/yt-dlp",                                            // Homebrew on Apple Silicon
+        "/usr/local/bin/yt-dlp",                                               // Homebrew on Intel
+        "/usr/bin/yt-dlp",                                                     // System
+        "/Library/Frameworks/Python.framework/Versions/3.12/bin/yt-dlp",      // Python 3.12
+        "/Library/Frameworks/Python.framework/Versions/3.11/bin/yt-dlp",      // Python 3.11
+        "/Library/Frameworks/Python.framework/Versions/3.10/bin/yt-dlp",      // Python 3.10
+        "/Library/Frameworks/Python.framework/Versions/Current/bin/yt-dlp",   // Current Python
+    ];
+
+    for path_str in common_paths {
+        let path = PathBuf::from(path_str);
+        if path.exists() && is_executable(&path) {
+            return Some(path);
+        }
+    }
+
+    None
+}
+
+/// Check if a file is executable
+fn is_executable(path: &PathBuf) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        if let Ok(metadata) = std::fs::metadata(path) {
+            let permissions = metadata.permissions();
+            // Check if executable bit is set
+            return permissions.mode() & 0o111 != 0;
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        // On non-Unix systems, just check if file exists
+        path.exists()
+    }
+
+    false
+}
+
+/// Create a Command for yt-dlp with the correct path
+/// This is useful for one-off commands without creating a VideoExtractor
+pub fn ytdlp_command() -> Option<Command> {
+    let ytdlp_path = find_ytdlp()?;
+    Some(Command::new(ytdlp_path))
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -310,5 +433,51 @@ mod tests {
         assert!(cmd.contains(&"yt-dlp".to_string()));
         assert!(cmd.contains(&"--dump-json".to_string()));
         assert!(cmd.contains(&url.to_string()));
+    }
+
+    #[test]
+    fn test_find_ytdlp() {
+        // This test verifies yt-dlp can be found
+        let result = find_ytdlp();
+        if let Some(path) = result {
+            println!("✓ yt-dlp found at: {:?}", path);
+            assert!(path.exists(), "yt-dlp path should exist");
+        } else {
+            println!("⚠ yt-dlp not found (may not be installed in test environment)");
+        }
+    }
+
+    #[test]
+    fn test_ytdlp_command() {
+        if let Some(mut cmd) = ytdlp_command() {
+            if let Ok(output) = cmd.arg("--version").output() {
+                let version = String::from_utf8_lossy(&output.stdout);
+                println!("✓ yt-dlp version: {}", version.trim());
+                assert!(output.status.success(), "yt-dlp should execute successfully");
+            }
+        } else {
+            println!("⚠ yt-dlp command not available");
+        }
+    }
+
+    #[test]
+    fn test_bundled_ytdlp_detection() {
+        // Test that bundled yt-dlp detection doesn't panic
+        let result = find_bundled_ytdlp();
+        println!("Bundled yt-dlp search result: {:?}", result);
+        // Don't assert - bundled yt-dlp only exists in .app bundle
+    }
+
+    #[test]
+    fn test_is_executable() {
+        // Test with a known executable
+        let sh_path = PathBuf::from("/bin/sh");
+        if sh_path.exists() {
+            assert!(is_executable(&sh_path), "/bin/sh should be executable");
+        }
+
+        // Test with a non-existent file
+        let fake_path = PathBuf::from("/tmp/nonexistent_file_12345");
+        assert!(!is_executable(&fake_path), "Non-existent file should not be executable");
     }
 }

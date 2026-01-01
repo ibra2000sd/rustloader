@@ -135,13 +135,14 @@ impl Application for RustloaderApp {
         // Working around macOS launch environment differences where cwd may be "/" when
         // launched via LaunchServices (Finder, Dock, Spotlight).
         let db_path = crate::utils::get_database_path();
-        let db_path_str = db_path.to_string_lossy().to_string();
+        // SQLite connection string needs the sqlite:// protocol prefix and ?mode=rwc to create the file
+        let db_url = format!("sqlite://{}?mode=rwc", db_path.to_string_lossy());
 
         // Create a single runtime and keep it alive for the app lifetime
         let rt = Runtime::new().expect("Failed to create tokio runtime");
 
         let db_pool = rt
-            .block_on(initialize_database(&db_path_str))
+            .block_on(initialize_database(&db_url))
             .expect("Failed to initialize database");
 
         let db_manager = Arc::new(DatabaseManager::new(db_pool));
