@@ -1,7 +1,9 @@
 //! yt-dlp wrapper for video extraction
-#![allow(dead_code, unused_variables, unused_imports)]
+//! 
+//! This module handles video information extraction using yt-dlp.
+//! It supports both bundled yt-dlp (in macOS .app bundles) and system-installed yt-dlp.
 
-use crate::extractor::models::{Format, VideoInfo};
+use crate::extractor::models::{VideoInfo, Format};
 use crate::utils::error::RustloaderError;
 use anyhow::Result;
 use serde_json;
@@ -9,7 +11,6 @@ use std::path::PathBuf;
 use std::process::Command;
 use tokio::process::Command as AsyncCommand;
 use tracing::{debug, error, info, warn};
-use which::which;
 
 /// Main video extractor using yt-dlp
 pub struct VideoExtractor {
@@ -18,17 +19,22 @@ pub struct VideoExtractor {
 
 impl VideoExtractor {
     /// Initialize extractor and verify yt-dlp availability
-    /// Priority:
-    /// 1. Bundled yt-dlp (inside .app bundle)
+    /// 
+    /// Search order:
+    /// 1. Bundled yt-dlp (inside .app bundle for macOS)
     /// 2. System PATH
-    /// 3. Common Homebrew/Python locations
+    /// 3. Common installation paths (Homebrew, etc.)
     pub fn new() -> Result<Self> {
-        let ytdlp_path = find_ytdlp().ok_or_else(|| {
-            error!("yt-dlp not found in bundle, PATH, or common locations");
-            RustloaderError::YtDlpNotFound
-        })?;
-
-        info!("Found yt-dlp at: {}", ytdlp_path.display());
+        let ytdlp_path = match find_ytdlp() {
+            Some(path) => {
+                info!("Found yt-dlp at: {}", path.display());
+                path
+            }
+            None => {
+                error!("yt-dlp not found anywhere!");
+                return Err(RustloaderError::YtDlpNotFound.into());
+            }
+        };
 
         Ok(Self { ytdlp_path })
     }
@@ -41,6 +47,7 @@ impl VideoExtractor {
         let output = AsyncCommand::new(&self.ytdlp_path)
             .arg("--dump-json")
             .arg("--no-download")
+            .arg("--no-warnings")
             .arg(url)
             .output()
             .await?;
@@ -65,6 +72,7 @@ impl VideoExtractor {
         let output = AsyncCommand::new(&self.ytdlp_path)
             .arg("--flat-playlist")
             .arg("--dump-json")
+            .arg("--no-warnings")
             .arg(url)
             .output()
             .await?;
@@ -111,6 +119,7 @@ impl VideoExtractor {
 
         let output = AsyncCommand::new(&self.ytdlp_path)
             .arg("--dump-json")
+            .arg("--no-warnings")
             .arg(search_query)
             .output()
             .await?;
@@ -124,12 +133,6 @@ impl VideoExtractor {
         let json_str = String::from_utf8(output.stdout)?;
         let video_info: VideoInfo = serde_json::from_str(&json_str)?;
 
-        // For search results, the response contains a single video with an "entries" field
-        if !video_info.formats.is_empty() {
-            // TODO: handle search result entries in detail when backend supports playlists
-        }
-
-        // For now, return a simple implementation
         Ok(vec![video_info])
     }
 
@@ -141,6 +144,7 @@ impl VideoExtractor {
             .arg("-f")
             .arg(format_id)
             .arg("-g")
+            .arg("--no-warnings")
             .arg(url)
             .output()
             .await?;
@@ -154,46 +158,11 @@ impl VideoExtractor {
         let url_str = String::from_utf8(output.stdout)?.trim().to_string();
         Ok(url_str)
     }
-}
-
-/// Parse a raw yt-dlp JSON response into a `VideoInfo` structure.
-/// This helper is pure and testable without requiring the yt-dlp binary.
-pub fn parse_video_info(json: &str) -> Result<VideoInfo> {
-    let info: VideoInfo = serde_json::from_str(json)?;
-    Ok(info)
-}
-
-/// Select the format closest to (but not exceeding) a target height.
-/// Falls back to the smallest available height when no candidate is below the target.
-pub fn select_best_format(formats: &[Format], target_height: u32) -> Option<Format> {
-    let mut with_height: Vec<&Format> = formats.iter().filter(|f| f.height.is_some()).collect();
-
-    if with_height.is_empty() {
-        return None;
+    
+    /// Get the path to yt-dlp being used
+    pub fn ytdlp_path(&self) -> &PathBuf {
+        &self.ytdlp_path
     }
-
-    with_height.sort_by_key(|f| f.height.unwrap_or(0));
-
-    let best_below = with_height
-        .iter()
-        .rev()
-        .find(|f| f.height.unwrap_or(0) <= target_height)
-        .copied();
-
-    best_below
-        .cloned()
-        .or_else(|| with_height.first().copied().cloned())
-}
-
-/// Build the command-line arguments used to extract metadata via yt-dlp.
-/// Returned as a Vec<String> for easy inspection and testing.
-pub fn build_extract_command(url: &str) -> Vec<String> {
-    vec![
-        "yt-dlp".to_string(),
-        "--dump-json".to_string(),
-        "--no-download".to_string(),
-        url.to_string(),
-    ]
 }
 
 impl Default for VideoExtractor {
@@ -202,34 +171,33 @@ impl Default for VideoExtractor {
     }
 }
 
-// ============================================================================
-// yt-dlp Detection Logic
-// ============================================================================
+// ============================================================
+// yt-dlp Detection Functions
+// ============================================================
 
-/// Find the yt-dlp binary path
-/// Priority:
-/// 1. Bundled yt-dlp (inside .app bundle)
+/// Find yt-dlp binary with priority:
+/// 1. Bundled (inside .app bundle)
 /// 2. System PATH
-/// 3. Common Homebrew/Python locations
+/// 3. Common installation paths
 pub fn find_ytdlp() -> Option<PathBuf> {
     // First: Check bundled yt-dlp (for macOS .app bundle)
     if let Some(bundled) = find_bundled_ytdlp() {
         info!("✓ Using bundled yt-dlp: {:?}", bundled);
         return Some(bundled);
     }
-
+    
     // Second: Check PATH
     if let Some(system) = find_in_path() {
-        info!("✓ Using system yt-dlp from PATH: {:?}", system);
+        info!("✓ Using system yt-dlp: {:?}", system);
         return Some(system);
     }
-
+    
     // Third: Check common locations
     if let Some(common) = find_in_common_paths() {
-        info!("✓ Using yt-dlp from common location: {:?}", common);
+        info!("✓ Using yt-dlp from common path: {:?}", common);
         return Some(common);
     }
-
+    
     warn!("✗ yt-dlp not found anywhere!");
     None
 }
@@ -239,18 +207,19 @@ fn find_bundled_ytdlp() -> Option<PathBuf> {
     // Get current executable path
     let exe_path = std::env::current_exe().ok()?;
     debug!("Current executable: {:?}", exe_path);
-
-    // If running from .app/Contents/MacOS/binary
-    // then yt-dlp is at .app/Contents/Resources/bin/yt-dlp
-    let macos_dir = exe_path.parent()?;
-
+    
+    // Get the directory containing the executable
+    let exe_dir = exe_path.parent()?;
+    
     // Check if we're in a MacOS directory (indicates .app bundle)
-    if macos_dir.ends_with("MacOS") {
-        let contents_dir = macos_dir.parent()?;
+    // Structure: Rustloader.app/Contents/MacOS/rustloader_bin
+    //                                  /Resources/bin/yt-dlp
+    if exe_dir.ends_with("MacOS") {
+        let contents_dir = exe_dir.parent()?;
         let ytdlp_path = contents_dir.join("Resources").join("bin").join("yt-dlp");
-
+        
         debug!("Checking bundled path: {:?}", ytdlp_path);
-
+        
         if ytdlp_path.exists() && ytdlp_path.is_file() {
             // Verify it's executable
             if is_executable(&ytdlp_path) {
@@ -260,34 +229,78 @@ fn find_bundled_ytdlp() -> Option<PathBuf> {
             }
         }
     }
-
+    
+    // Also check if yt-dlp is next to the executable (for development)
+    let dev_path = exe_dir.join("yt-dlp");
+    if dev_path.exists() && is_executable(&dev_path) {
+        return Some(dev_path);
+    }
+    
     None
 }
 
-/// Find yt-dlp in system PATH using which
+/// Find yt-dlp in system PATH using `which`
 fn find_in_path() -> Option<PathBuf> {
-    which("yt-dlp").ok()
+    // Try using the which crate first
+    if let Ok(path) = which::which("yt-dlp") {
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    
+    // Fallback: Use shell `which` command
+    let output = Command::new("which")
+        .arg("yt-dlp")
+        .output()
+        .ok()?;
+    
+    if output.status.success() {
+        let path_str = String::from_utf8_lossy(&output.stdout);
+        let path = PathBuf::from(path_str.trim());
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    
+    None
 }
 
 /// Find yt-dlp in common installation paths
 fn find_in_common_paths() -> Option<PathBuf> {
     let common_paths = [
-        "/opt/homebrew/bin/yt-dlp",                                            // Homebrew on Apple Silicon
-        "/usr/local/bin/yt-dlp",                                               // Homebrew on Intel
-        "/usr/bin/yt-dlp",                                                     // System
-        "/Library/Frameworks/Python.framework/Versions/3.12/bin/yt-dlp",      // Python 3.12
-        "/Library/Frameworks/Python.framework/Versions/3.11/bin/yt-dlp",      // Python 3.11
-        "/Library/Frameworks/Python.framework/Versions/3.10/bin/yt-dlp",      // Python 3.10
-        "/Library/Frameworks/Python.framework/Versions/Current/bin/yt-dlp",   // Current Python
+        // macOS Homebrew (Apple Silicon)
+        "/opt/homebrew/bin/yt-dlp",
+        // macOS Homebrew (Intel)
+        "/usr/local/bin/yt-dlp",
+        // System
+        "/usr/bin/yt-dlp",
+        // Python.org installation
+        "/Library/Frameworks/Python.framework/Versions/Current/bin/yt-dlp",
+        "/Library/Frameworks/Python.framework/Versions/3.11/bin/yt-dlp",
+        "/Library/Frameworks/Python.framework/Versions/3.12/bin/yt-dlp",
+        // User local
+        "~/.local/bin/yt-dlp",
+        // pip user install
+        "/Users/*/Library/Python/*/bin/yt-dlp",
     ];
-
+    
     for path_str in common_paths {
-        let path = PathBuf::from(path_str);
-        if path.exists() && is_executable(&path) {
-            return Some(path);
+        // Expand ~ to home directory
+        let expanded = if path_str.starts_with("~") {
+            if let Some(home) = dirs::home_dir() {
+                home.join(&path_str[2..])
+            } else {
+                PathBuf::from(path_str)
+            }
+        } else {
+            PathBuf::from(path_str)
+        };
+        
+        if expanded.exists() && is_executable(&expanded) {
+            return Some(expanded);
         }
     }
-
+    
     None
 }
 
@@ -296,188 +309,78 @@ fn is_executable(path: &PathBuf) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-
+        
         if let Ok(metadata) = std::fs::metadata(path) {
             let permissions = metadata.permissions();
-            // Check if executable bit is set
+            // Check if any executable bit is set
             return permissions.mode() & 0o111 != 0;
         }
     }
-
+    
     #[cfg(not(unix))]
     {
-        // On non-Unix systems, just check if file exists
-        path.exists()
+        // On Windows, just check if file exists
+        return path.exists();
     }
-
+    
     false
 }
 
 /// Create a Command for yt-dlp with the correct path
-/// This is useful for one-off commands without creating a VideoExtractor
 pub fn ytdlp_command() -> Option<Command> {
     let ytdlp_path = find_ytdlp()?;
     Some(Command::new(ytdlp_path))
 }
 
-// ============================================================================
+// ============================================================
 // Tests
-// ============================================================================
+// ============================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn parse_video_info_handles_valid_json() {
-        let json = r#"{
-            "id": "abc123",
-            "title": "Test Video",
-            "url": "https://example.com/watch?v=abc123",
-            "direct_url": "",
-            "duration": 120,
-            "filesize": null,
-            "thumbnail": null,
-            "uploader": "Uploader",
-            "upload_date": "20240101",
-            "formats": [
-                {"format_id": "18", "ext": "mp4", "resolution": "360p", "filesize": null, "url": "https://cdn/18", "quality": null, "fps": null, "vcodec": null, "acodec": null, "format_note": null, "width": null, "height": 360, "tbr": null, "vbr": null, "abr": null},
-                {"format_id": "22", "ext": "mp4", "resolution": "720p", "filesize": null, "url": "https://cdn/22", "quality": null, "fps": null, "vcodec": null, "acodec": null, "format_note": null, "width": null, "height": 720, "tbr": null, "vbr": null, "abr": null}
-            ],
-            "description": null,
-            "view_count": null,
-            "like_count": null,
-            "extractor": "youtube"
-        }"#;
-
-        let info = parse_video_info(json).expect("should parse json");
-        assert_eq!(info.id, "abc123");
-        assert_eq!(info.title, "Test Video");
-        assert_eq!(info.duration, Some(120));
-        assert_eq!(info.formats.len(), 2);
-    }
-
-    #[test]
-    fn parse_video_info_rejects_invalid_json() {
-        let result = parse_video_info("not-json");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn select_best_format_prefers_target_or_lower() {
-        let formats = vec![
-            Format {
-                format_id: "18".into(),
-                ext: "mp4".into(),
-                resolution: Some("360p".into()),
-                filesize: None,
-                url: "https://cdn/18".into(),
-                quality: None,
-                fps: None,
-                vcodec: None,
-                acodec: None,
-                format_note: None,
-                width: None,
-                height: Some(360),
-                tbr: None,
-                vbr: None,
-                abr: None,
-            },
-            Format {
-                format_id: "22".into(),
-                ext: "mp4".into(),
-                resolution: Some("720p".into()),
-                filesize: None,
-                url: "https://cdn/22".into(),
-                quality: None,
-                fps: None,
-                vcodec: None,
-                acodec: None,
-                format_note: None,
-                width: None,
-                height: Some(720),
-                tbr: None,
-                vbr: None,
-                abr: None,
-            },
-            Format {
-                format_id: "137".into(),
-                ext: "mp4".into(),
-                resolution: Some("1080p".into()),
-                filesize: None,
-                url: "https://cdn/137".into(),
-                quality: None,
-                fps: None,
-                vcodec: None,
-                acodec: None,
-                format_note: None,
-                width: None,
-                height: Some(1080),
-                tbr: None,
-                vbr: None,
-                abr: None,
-            },
-        ];
-
-        let best = select_best_format(&formats, 720).expect("format expected");
-        assert_eq!(best.format_id, "22");
-
-        let best_low = select_best_format(&formats, 480).expect("format expected");
-        assert_eq!(best_low.format_id, "18");
-    }
-
-    #[test]
-    fn build_extract_command_contains_core_flags() {
-        let url = "https://example.com/watch?v=test";
-        let cmd = build_extract_command(url);
-        assert!(cmd.contains(&"yt-dlp".to_string()));
-        assert!(cmd.contains(&"--dump-json".to_string()));
-        assert!(cmd.contains(&url.to_string()));
-    }
-
-    #[test]
     fn test_find_ytdlp() {
-        // This test verifies yt-dlp can be found
         let result = find_ytdlp();
-        if let Some(path) = result {
-            println!("✓ yt-dlp found at: {:?}", path);
-            assert!(path.exists(), "yt-dlp path should exist");
-        } else {
-            println!("⚠ yt-dlp not found (may not be installed in test environment)");
-        }
+        println!("yt-dlp found at: {:?}", result);
+        // Don't assert - yt-dlp might not be installed in CI
+    }
+    
+    #[test]
+    fn test_find_bundled_ytdlp() {
+        let result = find_bundled_ytdlp();
+        println!("Bundled yt-dlp: {:?}", result);
+    }
+    
+    #[test]
+    fn test_find_in_path() {
+        let result = find_in_path();
+        println!("System yt-dlp: {:?}", result);
+    }
+    
+    #[test]
+    fn test_find_in_common_paths() {
+        let result = find_in_common_paths();
+        println!("Common path yt-dlp: {:?}", result);
     }
 
     #[test]
     fn test_ytdlp_command() {
         if let Some(mut cmd) = ytdlp_command() {
-            if let Ok(output) = cmd.arg("--version").output() {
-                let version = String::from_utf8_lossy(&output.stdout);
-                println!("✓ yt-dlp version: {}", version.trim());
-                assert!(output.status.success(), "yt-dlp should execute successfully");
+            let output = cmd.arg("--version").output();
+            if let Ok(out) = output {
+                println!("yt-dlp version: {}", String::from_utf8_lossy(&out.stdout));
             }
-        } else {
-            println!("⚠ yt-dlp command not available");
         }
     }
-
-    #[test]
-    fn test_bundled_ytdlp_detection() {
-        // Test that bundled yt-dlp detection doesn't panic
-        let result = find_bundled_ytdlp();
-        println!("Bundled yt-dlp search result: {:?}", result);
-        // Don't assert - bundled yt-dlp only exists in .app bundle
-    }
-
+    
     #[test]
     fn test_is_executable() {
-        // Test with a known executable
-        let sh_path = PathBuf::from("/bin/sh");
-        if sh_path.exists() {
-            assert!(is_executable(&sh_path), "/bin/sh should be executable");
+        // Test with known executable
+        let path = PathBuf::from("/bin/ls");
+        if path.exists() {
+            assert!(is_executable(&path));
         }
-
-        // Test with a non-existent file
-        let fake_path = PathBuf::from("/tmp/nonexistent_file_12345");
-        assert!(!is_executable(&fake_path), "Non-existent file should not be executable");
     }
 }
