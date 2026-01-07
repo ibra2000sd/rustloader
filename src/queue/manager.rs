@@ -87,17 +87,17 @@ impl QueueManager {
     pub async fn add_task(&self, task: DownloadTask) -> Result<String> {
         let task_id = task.id.clone();
 
-        eprintln!("📥 [QUEUE] add_task called for: {}", task_id);
+        debug!("📥 [QUEUE] add_task called for: {}", task_id);
 
         // Add to queue
         {
             let mut queue = self.queue.lock().await;
             queue.push_back(task);
-            eprintln!("📋 [QUEUE] Task added, queue size: {}", queue.len());
+            debug!("📋 [QUEUE] Task added, queue size: {}", queue.len());
         }
 
         info!("Added task {} to queue", task_id);
-        eprintln!("📋 [QUEUE] Task added, waiting for persistent loop to pick it up...");
+        debug!("📋 [QUEUE] Task added, waiting for persistent loop to pick it up...");
 
         // DO NOT call process_queue() here.
         // If we call it here, it runs in the caller's runtime context.
@@ -105,7 +105,7 @@ impl QueueManager {
         // If we spawn the download task here, it dies with the temporary runtime.
         // We must let the persistent start() loop (running on the main app runtime) pick it up.
 
-        eprintln!("✅ [QUEUE] add_task completed for: {}", task_id);
+        debug!("✅ [QUEUE] add_task completed for: {}", task_id);
 
         Ok(task_id)
     }
@@ -165,7 +165,7 @@ impl QueueManager {
 
             if task.is_none() {
                 // Task not in queue, need to fetch it from database
-                eprintln!(
+                warn!(
                     "⚠️  [PAUSE] Task {} not found in queue, fetching from DB",
                     task_id
                 );
@@ -190,7 +190,7 @@ impl QueueManager {
 
     /// Resume specific task
     pub async fn resume_task(&self, task_id: &str) -> Result<()> {
-        eprintln!("🔄 [RESUME] Attempting to resume task: {}", task_id);
+        debug!("🔄 [RESUME] Attempting to resume task: {}", task_id);
 
         // Check if task is in queue and paused
         let mut queue = self.queue.lock().await;
@@ -201,11 +201,11 @@ impl QueueManager {
                 if task.status == TaskStatus::Paused {
                     task.status = TaskStatus::Queued;
                     found = true;
-                    eprintln!("✅ [RESUME] Changed task status from Paused to Queued");
+                                info!("✅ [RESUME] Changed task status from Paused to Queued");
                     info!("Resumed task {}", task_id);
                     break;
                 } else {
-                    eprintln!(
+                    warn!(
                         "⚠️  [RESUME] Task found but not paused, current status: {:?}",
                         task.status
                     );
@@ -222,12 +222,12 @@ impl QueueManager {
 
         if found {
             // Trigger queue processing to restart the download
-            eprintln!("🚀 [RESUME] Triggering queue processing to restart download");
+            debug!("🚀 [RESUME] Triggering queue processing to restart download");
             // The periodic process_queue will pick this up
             return Ok(());
         }
 
-        eprintln!("❌ [RESUME] Task {} not found in queue", task_id);
+        warn!("❌ [RESUME] Task {} not found in queue", task_id);
         // Task not found or not paused
         Err(RustloaderError::TaskNotFound(task_id.to_string()).into())
     }
@@ -324,25 +324,25 @@ impl QueueManager {
 
     /// Process the queue
     async fn process_queue(&self) {
-        eprintln!("⚙️  [QUEUE] process_queue started");
+        debug!("⚙️  [QUEUE] process_queue started");
 
         // Check if we can start more downloads
         let active_count = {
             let active = self.active_downloads.lock().await;
             active.len()
         };
-        eprintln!("   - Active downloads: {}", active_count);
-        eprintln!("   - Max concurrent: {}", self.max_concurrent);
+        debug!("   - Active downloads: {}", active_count);
+        debug!("   - Max concurrent: {}", self.max_concurrent);
 
         if active_count >= self.max_concurrent {
-            eprintln!("⚠️  [QUEUE] Max concurrent reached, skipping");
+            debug!("⚠️  [QUEUE] Max concurrent reached, skipping");
             return;
         }
 
         // Get tasks to process
         let tasks_to_process = {
             let mut queue = self.queue.lock().await;
-            eprintln!("   - Queue size: {}", queue.len());
+            debug!("   - Queue size: {}", queue.len());
             let mut tasks = Vec::new();
 
             while tasks.len() < self.max_concurrent - active_count {
@@ -353,7 +353,7 @@ impl QueueManager {
                             Some(t) => tasks.push(t),
                             None => {
                                 // This shouldn't happen, but handle gracefully
-                                eprintln!("⚠️  [QUEUE] Queue became empty unexpectedly");
+                                warn!("⚠️  [QUEUE] Queue became empty unexpectedly");
                                 break;
                             }
                         }
@@ -370,41 +370,41 @@ impl QueueManager {
         };
 
         if tasks_to_process.is_empty() {
-            eprintln!("⚠️  [QUEUE] No queued tasks to start");
+            debug!("⚠️  [QUEUE] No queued tasks to start");
         }
 
         // Process each task
         for task in tasks_to_process {
-            eprintln!("🎯 [QUEUE] Got task from queue: {}", task.id);
-            eprintln!("🚀 [QUEUE] Starting download for: {}", task.id);
+            info!("🎯 [QUEUE] Got task from queue: {}", task.id);
+            info!("🚀 [QUEUE] Starting download for: {}", task.id);
             self.start_download(task).await;
-            eprintln!("✅ [QUEUE] start_download completed");
+            debug!("✅ [QUEUE] start_download completed");
         }
     }
 
     /// Start downloading a task
     async fn start_download(&self, mut task: DownloadTask) {
-        eprintln!("\n🎬 [QUEUE] ========== start_download CALLED ==========");
-        eprintln!("   - Task ID: {}", task.id);
-        eprintln!("   - Title: {}", task.video_info.title);
-        eprintln!("   - Output: {:?}", task.output_path);
-        eprintln!("   - Format: {}", task.format.format_id);
-        eprintln!("   - Format URL: {}", task.format.url);
+        debug!("\n🎬 [QUEUE] ========== start_download CALLED ==========");
+        debug!("   - Task ID: {}", task.id);
+        debug!("   - Title: {}", task.video_info.title);
+        debug!("   - Output: {:?}", task.output_path);
+        debug!("   - Format: {}", task.format.format_id);
+        debug!("   - Format URL: {}", task.format.url);
 
         let task_id = task.id.clone();
         let output_path = task.output_path.clone();
         let url = task.format.url.clone();
 
-        eprintln!("💾 [DOWNLOAD] start_download called for: {}", task_id);
-        eprintln!("   - URL: {}", url);
-        eprintln!("   - Output: {:?}", output_path);
+        info!("💾 [DOWNLOAD] start_download called for: {}", task_id);
+        debug!("   - URL: {}", url);
+        debug!("   - Output: {:?}", output_path);
 
         // Create channels for progress updates and cancellation
         let (progress_tx, mut progress_rx) = mpsc::channel::<DownloadProgress>(100);
         let (cancel_tx, mut cancel_rx) = mpsc::channel::<()>(1);
 
-        eprintln!("   - Created progress channel");
-        eprintln!("   - Starting download engine...");
+        debug!("   - Created progress channel");
+        debug!("   - Starting download engine...");
 
         // Update task status
         task.status = TaskStatus::Downloading;
@@ -433,19 +433,19 @@ impl QueueManager {
         // Clone the active_downloads Arc into the progress handler so it can update
         // the active snapshot when progress arrives.
         let active_downloads_clone_for_progress = Arc::clone(&active_downloads_clone);
-        eprintln!(
+        debug!(
             "📡 [PROGRESS] Spawning progress receiver for: {}",
             task_id_for_progress
         );
         let progress_handler = tokio::spawn(async move {
-            eprintln!(
+            debug!(
                 "📡 [PROGRESS] Progress receiver started for: {}",
                 task_id_for_progress
             );
             loop {
                 match progress_rx.recv().await {
                     Some(progress) => {
-                        eprintln!(
+                        debug!(
                             "🔁 [PROGRESS] Received for {}: {:.2}%",
                             task_id_for_progress,
                             progress.percentage() as f32
@@ -466,7 +466,7 @@ impl QueueManager {
                         let mut active = active_downloads_clone_for_progress.lock().await;
                         if let Some(handle) = active.get_mut(&task_id_for_progress) {
                             handle.task.progress = Some(progress.clone());
-                            eprintln!(
+                            debug!(
                                 "✅ [PROGRESS] Updated active_downloads for: {}",
                                 task_id_for_progress
                             );
@@ -489,7 +489,7 @@ impl QueueManager {
                             if let Some(h) = active.get_mut(&task_id_for_progress) {
                                 h.task.progress = Some(progress.clone());
                             }
-                            eprintln!(
+                            debug!(
                                 "✅ [PROGRESS] Inserted placeholder active_downloads for: {}",
                                 task_id_for_progress
                             );
@@ -497,7 +497,7 @@ impl QueueManager {
                         // active lock dropped at end of scope
                     }
                     None => {
-                        eprintln!(
+                        debug!(
                             "📡 [PROGRESS] progress_rx closed (None) for: {}",
                             task_id_for_progress
                         );
@@ -505,18 +505,18 @@ impl QueueManager {
                     }
                 }
             }
-            eprintln!(
+            debug!(
                 "📡 [PROGRESS] Progress receiver ended for: {}",
                 task_id_for_progress
             );
         });
 
-        eprintln!("   - Progress receiver spawned and waiting");
+        debug!("   - Progress receiver spawned and waiting");
 
         // Start download task (task moved into the spawned future)
         let task_id_for_spawn = task_id.clone();
 
-        eprintln!(
+        debug!(
             "🔧 [SPAWN] About to spawn download engine for: {}",
             task_id_for_spawn
         );
@@ -526,8 +526,8 @@ impl QueueManager {
             let task_id_wd = task_id.clone();
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_secs(2)).await;
-                eprintln!("⏰ [WATCHDOG] 2 seconds passed for task: {}", task_id_wd);
-                eprintln!(
+                warn!("⏰ [WATCHDOG] 2 seconds passed for task: {}", task_id_wd);
+                warn!(
                     "   - If no engine logs above, the engine task is blocked or not being polled"
                 );
             });
@@ -538,11 +538,11 @@ impl QueueManager {
         let task_id_for_closure = task_id_for_spawn.clone();
 
         let join_handle = tokio::spawn(async move {
-            eprintln!(
+            debug!(
                 "👋 [SPAWN] Inside spawned task! Task: {}",
                 task_id_for_closure
             );
-            eprintln!("👋 [SPAWN] About to call engine.download()");
+            debug!("👋 [SPAWN] About to call engine.download()");
 
             let mut cancelled = false;
 
@@ -554,19 +554,19 @@ impl QueueManager {
                 result = download_task => {
                     match result {
                         Ok(()) => {
-                            eprintln!("✅ [ENGINE] Task {} download completed successfully", task_id_for_closure);
+                            info!("✅ [ENGINE] Task {} download completed successfully", task_id_for_closure);
 
                             // Organize the downloaded file
-                            eprintln!("🎯 [ORGANIZE] Starting file organization for task {}", task_id_for_closure);
+                            info!("🎯 [ORGANIZE] Starting file organization for task {}", task_id_for_closure);
 
                             // ✅ DEBUG BUG-007: Log pre-organization state
-                            eprintln!("🔍 [ORGANIZE DEBUG] Pre-organization checks:");
-                            eprintln!("   - File exists: {}", output_path.exists());
-                            eprintln!("   - File path: {:?}", output_path);
-                            eprintln!("   - File size: {} bytes",
+                            debug!("🔍 [ORGANIZE DEBUG] Pre-organization checks:");
+                            debug!("   - File exists: {}", output_path.exists());
+                            debug!("   - File path: {:?}", output_path);
+                            debug!("   - File size: {} bytes",
                                      std::fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0));
-                            eprintln!("   - Video title: {}", task.video_info.title);
-                            eprintln!("   - Base dir: {:?}", file_organizer.base_dir);
+                            debug!("   - Video title: {}", task.video_info.title);
+                            debug!("   - Base dir: {:?}", file_organizer.base_dir);
 
                             match Self::organize_completed_file_static(
                                 file_organizer.clone(),
@@ -575,17 +575,17 @@ impl QueueManager {
                                 &output_path,
                             ).await {
                                 Ok(final_path) => {
-                                    eprintln!("✅ [ORGANIZE] File organized at: {:?}", final_path);
+                                    info!("✅ [ORGANIZE] File organized at: {:?}", final_path);
                                     task.output_path = final_path;
                                     task.status = TaskStatus::Completed;
                                     info!("Task {} completed and organized successfully", task_id_for_closure);
                                 }
                                 Err(e) => {
                                     // ✅ DEBUG BUG-007: Enhanced error logging
-                                    eprintln!("❌ [ORGANIZE] Organization failed: {}", e);
-                                    eprintln!("❌ [ORGANIZE] Error details: {:?}", e);
-                                    eprintln!("❌ [ORGANIZE] File remains at: {:?}", output_path);
-                                    eprintln!("❌ [ORGANIZE] File size: {} bytes",
+                                    error!("❌ [ORGANIZE] Organization failed: {}", e);
+                                    error!("❌ [ORGANIZE] Error details: {:?}", e);
+                                    error!("❌ [ORGANIZE] File remains at: {:?}", output_path);
+                                    error!("❌ [ORGANIZE] File size: {} bytes",
                                              std::fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0));
 
                                     // Don't fail the task, file is still downloaded
@@ -600,7 +600,7 @@ impl QueueManager {
                         Err(e) => {
                             // Update task status to failed
                             task.status = TaskStatus::Failed(e.to_string());
-                            eprintln!("❌ [ENGINE] Task {} failed: {}", task_id_for_closure, e);
+                            error!("❌ [ENGINE] Task {} failed: {}", task_id_for_closure, e);
                             error!("Task {} failed: {}", task_id_for_closure, e);
                         }
                     }
@@ -609,7 +609,7 @@ impl QueueManager {
                     // Task was cancelled
                     cancelled = true;
                     task.status = TaskStatus::Cancelled;
-                    eprintln!("🛑 [ENGINE] Task {} was cancelled", task_id_for_closure);
+                    warn!("🛑 [ENGINE] Task {} was cancelled", task_id_for_closure);
                     info!("Task {} was cancelled", task_id_for_closure);
                 }
             }
@@ -648,7 +648,7 @@ impl QueueManager {
             }
         });
 
-        eprintln!(
+        debug!(
             "✅ [SPAWN] Spawned download engine task, join_handle created for: {}",
             task_id_for_spawn
         );
@@ -680,7 +680,7 @@ impl QueueManager {
             );
         }
 
-        eprintln!(
+        debug!(
             "✅ [DOWNLOAD] Task spawned and added to active_downloads: {}",
             task_id
         );
@@ -744,14 +744,14 @@ impl QueueManager {
         task: &DownloadTask,
         downloaded_file_path: &std::path::Path,
     ) -> Result<PathBuf> {
-        eprintln!("🎯 [ORGANIZE] Starting file organization...");
-        eprintln!("   - Downloaded file: {:?}", downloaded_file_path);
-        eprintln!("   - Video: {}", task.video_info.title);
-        eprintln!("   - Format: {}", task.format.format_id);
+        debug!("🎯 [ORGANIZE] Starting file organization...");
+        debug!("   - Downloaded file: {:?}", downloaded_file_path);
+        debug!("   - Video: {}", task.video_info.title);
+        debug!("   - Format: {}", task.format.format_id);
 
         // Check if file exists
         if !downloaded_file_path.exists() {
-            eprintln!("❌ [ORGANIZE] Downloaded file not found!");
+            error!("❌ [ORGANIZE] Downloaded file not found!");
             return Err(anyhow::anyhow!(
                 "Downloaded file not found: {:?}",
                 downloaded_file_path
@@ -760,7 +760,7 @@ impl QueueManager {
 
         // Determine quality string from format
         let quality = Self::determine_quality_string_static(&task.format);
-        eprintln!("   - Detected quality: {}", quality);
+        debug!("   - Detected quality: {}", quality);
 
         // Determine content type (default to Video for now)
         let content_type = ContentType::Video;
@@ -775,11 +775,11 @@ impl QueueManager {
             )
             .await
             .map_err(|e| {
-                eprintln!("❌ [ORGANIZE] Failed to organize file: {}", e);
+                error!("❌ [ORGANIZE] Failed to organize file: {}", e);
                 anyhow::anyhow!("Failed to organize file: {}", e)
             })?;
 
-        eprintln!("✅ [ORGANIZE] File organized at: {:?}", final_path);
+        info!("✅ [ORGANIZE] File organized at: {:?}", final_path);
 
         // Get file size
         let file_size = tokio::fs::metadata(&final_path)

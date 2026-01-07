@@ -24,7 +24,7 @@ use tokio::process::Command as AsyncCommand;
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::sleep;
 use tokio::time::{timeout, Duration as TokioDuration};
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 fn parse_yt_dlp_progress(line: &str) -> Option<(f64, f64, u64)> {
     // Expected format: [download]  42.5% of ~ 150.00MiB at  5.20MiB/s ETA 00:15
@@ -175,76 +175,76 @@ impl DownloadEngine {
         output_path: &Path,
         progress_tx: mpsc::Sender<DownloadProgress>,
     ) -> Result<()> {
-        eprintln!("🚀🚀🚀 [ENGINE-ENTRY] download() ENTERED - First line executed!");
-        eprintln!("    URL: {}", url);
-        eprintln!("    Output: {:?}", output_path);
+        debug!("🚀🚀🚀 [ENGINE-ENTRY] download() ENTERED - First line executed!");
+        debug!("    URL: {}", url);
+        debug!("    Output: {:?}", output_path);
 
         // Send a conservative initial progress so GUI can show a task entry immediately
-        eprintln!("📤 [ENGINE] Sending initial progress (Initializing)...");
+        debug!("📤 [ENGINE] Sending initial progress (Initializing)...");
         let mut initial = DownloadProgress::new(0, 1);
         initial.status = DownloadStatus::Initializing;
         if let Err(e) = progress_tx.send(initial.clone()).await {
-            eprintln!("⚠️ [ENGINE] Failed to send initial progress: {}", e);
+            error!("⚠️ [ENGINE] Failed to send initial progress: {}", e);
             warn!("Failed to send initial progress: {}", e);
         } else {
-            eprintln!("✅ [ENGINE] Initial progress sent");
+            debug!("✅ [ENGINE] Initial progress sent");
         }
 
         // CRITICAL FIX: If URL is a YouTube page, bypass HTTP probing entirely.
         // YouTube URLs redirect to HLS manifests when probed via HTTP HEAD/GET,
         // causing the engine to incorrectly report 50-byte manifest as file size.
         if url.contains("youtube.com/watch") || url.contains("youtu.be/") {
-            eprintln!("🔀 [ENGINE] YouTube URL detected - bypassing probe, using yt-dlp directly");
-            eprintln!("   - Reason: YouTube URLs redirect to HLS manifests during HTTP probing");
-            eprintln!("   - Solution: yt-dlp handles YouTube streams natively");
+            info!("🔀 [ENGINE] YouTube URL detected - bypassing probe, using yt-dlp directly");
+            debug!("   - Reason: YouTube URLs redirect to HLS manifests during HTTP probing");
+            debug!("   - Solution: yt-dlp handles YouTube streams natively");
             return self.download_via_ytdlp(url, output_path, progress_tx).await;
         }
 
         // Quick HLS detection: if URL looks like a playlist, fallback to yt-dlp
         if url.contains(".m3u8") || url.contains("/manifest") || url.contains("playlist") {
-            eprintln!("🔀 [ENGINE] Taking path: yt-dlp fallback (HLS/playlist detected)");
+            info!("🔀 [ENGINE] Taking path: yt-dlp fallback (HLS/playlist detected)");
             debug!("Detected HLS/playlist URL, using yt-dlp fallback: {}", url);
             return self.download_via_ytdlp(url, output_path, progress_tx).await;
         }
         // Check if server supports range requests and get file size.
         // If probing fails (some servers return unexpected responses or redirect to manifests),
         // fall back to yt-dlp to handle complex cases (HLS, DASH, etc.).
-        eprintln!("🔍 [ENGINE] Probing server for range support and file size...");
+        debug!("🔍 [ENGINE] Probing server for range support and file size...");
         let supports_ranges_res = self.supports_ranges(url).await;
-        eprintln!(
+        debug!(
             "✅ [ENGINE] supports_ranges() await returned: {:?}",
             &supports_ranges_res
         );
         let file_size_res = self.get_file_size(url).await;
-        eprintln!(
+        debug!(
             "✅ [ENGINE] get_file_size() await returned: {:?}",
             &file_size_res
         );
 
         let (supports_ranges, file_size) = match (supports_ranges_res, file_size_res) {
             (Ok(r), Ok(s)) => {
-                eprintln!("   - supports_ranges={}, file_size={}", r, s);
+                debug!("   - supports_ranges={}, file_size={}", r, s);
                 (r, s)
             }
             (err1, err2) => {
-                eprintln!("🔀 [ENGINE] Taking path: yt-dlp fallback (probing failed)");
-                eprintln!("⚠️ [ENGINE] Probing ranges/size failed, falling back to yt-dlp. range_err={:?} size_err={:?}", err1.as_ref().err(), err2.as_ref().err());
+                info!("🔀 [ENGINE] Taking path: yt-dlp fallback (probing failed)");
+                warn!("⚠️ [ENGINE] Probing ranges/size failed, falling back to yt-dlp. range_err={:?} size_err={:?}", err1.as_ref().err(), err2.as_ref().err());
                 debug!("Probing ranges/size failed, falling back to yt-dlp. range_err={:?} size_err={:?}", err1.as_ref().err(), err2.as_ref().err());
                 return self.download_via_ytdlp(url, output_path, progress_tx).await;
             }
         };
 
         // Initialize progress
-        eprintln!(
+        info!(
             "📊 [ENGINE] Initializing progress with file_size={} and segments={}",
             file_size, self.config.segments
         );
         let mut progress = DownloadProgress::new(file_size, self.config.segments);
 
         // Send initial progress
-        eprintln!("📤 [ENGINE] Sending initial progress (based on probed file size)...");
+        debug!("📤 [ENGINE] Sending initial progress (based on probed file size)...");
         if let Err(e) = progress_tx.send(progress.clone()).await {
-            eprintln!(
+            warn!(
                 "⚠️ [ENGINE] Failed to send initial progress (probed): {}",
                 e
             );
@@ -254,12 +254,12 @@ impl DownloadEngine {
         // Determine download strategy
         if !supports_ranges || file_size < 1024 * 1024 {
             // < 1MB or no range support
-            eprintln!("🔀 [ENGINE] Taking path: simple download (no ranges or small file). supports_ranges={}, file_size={}", supports_ranges, file_size);
-            eprintln!("📥 [ENGINE] Using simple download (no ranges or small file). supports_ranges={}, file_size={}", supports_ranges, file_size);
+            info!("🔀 [ENGINE] Taking path: simple download (no ranges or small file). supports_ranges={}, file_size={}", supports_ranges, file_size);
+            info!("📥 [ENGINE] Using simple download (no ranges or small file). supports_ranges={}, file_size={}", supports_ranges, file_size);
             return self.download_simple(url, output_path, progress_tx).await;
         }
 
-        eprintln!(
+        info!(
             "📦 [ENGINE] Using segmented download path (ranges supported and file large enough)"
         );
 
@@ -292,7 +292,7 @@ impl DownloadEngine {
                     // Add delay between segment requests to avoid server throttling
                     if i > 0 {
                         sleep(request_delay).await;
-                        eprintln!("✅ [ENGINE] Sleep before starting segment {} completed", i);
+                        debug!("✅ [ENGINE] Sleep before starting segment {} completed", i);
                     }
 
                     // Download segment
@@ -306,7 +306,7 @@ impl DownloadEngine {
                     )
                     .await;
 
-                    eprintln!(
+                    debug!(
                         "✅ [ENGINE] download_segment completed for segment {}: success={}",
                         i,
                         result.is_ok()
@@ -360,11 +360,11 @@ impl DownloadEngine {
                     progress.status = DownloadStatus::Downloading;
 
                     if let Err(e) = progress_tx_clone.send(progress).await {
-                        eprintln!("⚠️ [ENGINE] Failed to send aggregated progress: {}", e);
+                        warn!("⚠️ [ENGINE] Failed to send aggregated progress: {}", e);
                         warn!("Failed to send progress update: {}", e);
                         break;
                     } else {
-                        eprintln!("✅ [ENGINE] Sent aggregated progress to progress_tx_clone");
+                        debug!("✅ [ENGINE] Sent aggregated progress to progress_tx_clone");
                     }
 
                     last_update_time = now;
@@ -481,7 +481,7 @@ impl DownloadEngine {
         // use a best-effort initial send so a dropped receiver doesn't fail us.
         let progress_tx_for_spawn = progress_tx.clone();
 
-        eprintln!("📤 [YT-DLP] Sending initial 0% progress (best-effort)");
+        debug!("📤 [YT-DLP] Sending initial 0% progress (best-effort)");
         let mut initial = DownloadProgress::new(0, 1);
         initial.status = DownloadStatus::Downloading;
         initial.downloaded_bytes = 0;
@@ -490,7 +490,7 @@ impl DownloadEngine {
         let _ = progress_tx_for_spawn.send(initial.clone()).await;
 
         // Prepare command: yt-dlp with explicit progress flags
-        eprintln!("🔧 [YT-DLP] Spawning yt-dlp process...");
+        debug!("🔧 [YT-DLP] Spawning yt-dlp process...");
         let out = output_path.to_string_lossy().to_string();
         let mut cmd = AsyncCommand::new("yt-dlp");
         cmd.arg("-f")
@@ -505,33 +505,33 @@ impl DownloadEngine {
         cmd.stderr(Stdio::piped());
         cmd.stdout(Stdio::piped());
 
-        eprintln!("🚀 [YT-DLP] About to spawn yt-dlp command...");
+        debug!("🚀 [YT-DLP] About to spawn yt-dlp command...");
         let mut child = cmd.spawn()?;
-        eprintln!("✅ [YT-DLP] Command spawned successfully, checking stderr pipe...");
+        debug!("✅ [YT-DLP] Command spawned successfully, checking stderr pipe...");
 
         // Read stderr for progress lines — spawn a task that holds a clone of the sender
         // Use a handle to track the reader task so we can detect if it completes
         let reader_handle = if let Some(stderr) = child.stderr.take() {
-            eprintln!("✅ [YT-DLP] Stderr pipe available, spawning reader task...");
+            debug!("✅ [YT-DLP] Stderr pipe available, spawning reader task...");
             let progress_for_reader = progress_tx_for_spawn.clone();
 
-            eprintln!("🎬 [YT-DLP] About to call tokio::spawn for stderr reader...");
+            debug!("🎬 [YT-DLP] About to call tokio::spawn for stderr reader...");
             let handle = tokio::spawn(async move {
-                eprintln!("📖 [YT-DLP] INSIDE SPAWNED TASK - stderr reader starting!");
+                debug!("📖 [YT-DLP] INSIDE SPAWNED TASK - stderr reader starting!");
                 use tokio::io::AsyncBufReadExt;
                 let reader = tokio::io::BufReader::new(stderr);
                 let mut lines = reader.lines();
 
-                eprintln!("📖 [YT-DLP] Starting stderr reader...");
+                debug!("📖 [YT-DLP] Starting stderr reader...");
                 let mut line_count = 0;
 
                 while let Ok(Some(line)) = lines.next_line().await {
                     line_count += 1;
-                    eprintln!("📄 [YT-DLP] stderr #{}: {}", line_count, line);
+                    debug!("📄 [YT-DLP] stderr #{}: {}", line_count, line);
 
                     // Detect errors from yt-dlp
                     if line.contains("ERROR:") || line.contains("error:") {
-                        eprintln!("❌ [YT-DLP] Error detected: {}", line);
+                        error!("❌ [YT-DLP] Error detected: {}", line);
                         let mut p = DownloadProgress::new(100, 1);
                         p.status = DownloadStatus::Failed(line.clone());
                         let _ = progress_for_reader.send(p).await;
@@ -541,7 +541,7 @@ impl DownloadEngine {
                     // Try to parse percentage and speed from lines like:
                     // [download]  12.5% of ~10.50MiB at 1.23MiB/s ETA 00:07
                     if let Some((pct, speed_bps, total_bytes)) = parse_yt_dlp_progress(&line) {
-                        eprintln!(
+                        debug!(
                             "🔁 [YT-DLP] Parsed progress: {}% speed={} B/s total={} B",
                             pct, speed_bps, total_bytes
                         );
@@ -559,24 +559,24 @@ impl DownloadEngine {
 
                         // Best-effort send: don't treat a closed receiver as fatal here
                         if let Err(e) = progress_for_reader.send(p).await {
-                            eprintln!("⚠️ [YT-DLP] Failed to send parsed progress: {}", e);
+                            warn!("⚠️ [YT-DLP] Failed to send parsed progress: {}", e);
                             break;
                         }
                     }
                 }
 
-                eprintln!(
+                debug!(
                     "📖 [YT-DLP] Stderr reader finished. Read {} lines total",
                     line_count
                 );
             });
-            eprintln!("✅ [YT-DLP] tokio::spawn returned, reader task is now running");
+            debug!("✅ [YT-DLP] tokio::spawn returned, reader task is now running");
             Some(handle)
         } else {
-            eprintln!(
+            error!(
                 "❌ [YT-DLP] ERROR: No stderr pipe available - child.stderr.take() returned None!"
             );
-            eprintln!("   This means stderr was not properly set up or was already taken");
+            error!("   This means stderr was not properly set up or was already taken");
             None
         };
 
@@ -625,12 +625,12 @@ impl DownloadEngine {
 
         // Give the reader task a moment to finish reading any buffered output
         if let Some(handle) = reader_handle {
-            eprintln!("⏳ [YT-DLP] Waiting for stderr reader to finish...");
+            debug!("⏳ [YT-DLP] Waiting for stderr reader to finish...");
             let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
         }
-        eprintln!("🔚 [YT-DLP] Process exited with: {:?}", status.code());
+        debug!("🔚 [YT-DLP] Process exited with: {:?}", status.code());
         if status.success() {
-            eprintln!("✅ [YT-DLP] Download successful");
+            info!("✅ [YT-DLP] Download successful");
             let mut done = DownloadProgress::new(0, 1);
             done.status = DownloadStatus::Completed;
             done.downloaded_bytes = 0;
@@ -639,7 +639,7 @@ impl DownloadEngine {
             let _ = progress_tx.send(done).await;
             Ok(())
         } else {
-            eprintln!("❌ [YT-DLP] Download failed");
+            error!("❌ [YT-DLP] Download failed");
             let mut failed = DownloadProgress::new(0, 1);
             failed.failed("yt-dlp failed".to_string());
             let _ = progress_tx.send(failed).await;
@@ -759,11 +759,11 @@ impl DownloadEngine {
                 Ok(accepts_ranges)
             }
             Ok(Err(e)) => {
-                eprintln!("⚠️ [ENGINE] HEAD request failed: {}", e);
+                warn!("⚠️ [ENGINE] HEAD request failed: {}", e);
                 Err(e.into())
             }
             Err(_) => {
-                eprintln!("⏰ [ENGINE] HEAD request timeout (10s)");
+                warn!("⏰ [ENGINE] HEAD request timeout (10s)");
                 Err(anyhow::anyhow!("HEAD timeout"))
             }
         }
@@ -786,11 +786,11 @@ impl DownloadEngine {
                 Ok(size)
             }
             Ok(Err(e)) => {
-                eprintln!("⚠️ [ENGINE] HEAD request failed: {}", e);
+                warn!("⚠️ [ENGINE] HEAD request failed: {}", e);
                 Err(e.into())
             }
             Err(_) => {
-                eprintln!("⏰ [ENGINE] HEAD request timeout (10s)");
+                warn!("⏰ [ENGINE] HEAD request timeout (10s)");
                 Err(anyhow::anyhow!("HEAD timeout"))
             }
         }

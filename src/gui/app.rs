@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
+use tracing::error;
 use uuid::Uuid;
 
 /// Main application state
@@ -151,7 +152,7 @@ impl Application for RustloaderApp {
         rt.spawn(async move {
             match BackendActor::new(settings_clone, cmd_rx, event_tx).await {
                 Ok(actor) => actor.run().await,
-                Err(e) => eprintln!("Failed to start backend actor: {}", e),
+                Err(e) => error!("Failed to start backend actor: {}", e),
             }
         });
 
