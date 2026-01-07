@@ -1,9 +1,9 @@
 //! yt-dlp wrapper for video extraction
-//! 
+//!
 //! This module handles video information extraction using yt-dlp.
 //! It supports both bundled yt-dlp (in macOS .app bundles) and system-installed yt-dlp.
 
-use crate::extractor::models::{VideoInfo, Format};
+use crate::extractor::models::{Format, VideoInfo};
 use crate::extractor::traits::Extractor;
 use crate::utils::error::RustloaderError;
 use anyhow::Result;
@@ -12,7 +12,7 @@ use serde_json;
 use std::path::PathBuf;
 use std::process::Command;
 use tokio::process::Command as AsyncCommand;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 /// Main video extractor using yt-dlp
 pub struct YtDlpExtractor {
@@ -21,7 +21,7 @@ pub struct YtDlpExtractor {
 
 impl YtDlpExtractor {
     /// Initialize extractor and verify yt-dlp availability
-    /// 
+    ///
     /// Search order:
     /// 1. Bundled yt-dlp (inside .app bundle for macOS)
     /// 2. System PATH
@@ -160,7 +160,7 @@ impl YtDlpExtractor {
         let url_str = String::from_utf8(output.stdout)?.trim().to_string();
         Ok(url_str)
     }
-    
+
     pub fn ytdlp_path(&self) -> &PathBuf {
         &self.ytdlp_path
     }
@@ -205,115 +205,45 @@ impl Default for YtDlpExtractor {
 // yt-dlp Detection Functions
 // ============================================================
 
-/// Find yt-dlp binary with priority:
-/// 1. Bundled (inside .app bundle)
-/// 2. System PATH
-/// 3. Common installation paths
+// ============================================================
+// yt-dlp Detection Functions
+// ============================================================
+
+/// Find yt-dlp binary using platform abstraction
 pub fn find_ytdlp() -> Option<PathBuf> {
-    // First: Check bundled yt-dlp (for macOS .app bundle)
-    if let Some(bundled) = find_bundled_ytdlp() {
-        info!("✓ Using bundled yt-dlp: {:?}", bundled);
-        return Some(bundled);
+    if let Some(path) = crate::utils::platform::ytdlp_path() {
+        return Some(path);
     }
-    
-    // Second: Check PATH
-    if let Some(system) = find_in_path() {
-        info!("✓ Using system yt-dlp: {:?}", system);
-        return Some(system);
-    }
-    
-    // Third: Check common locations
-    if let Some(common) = find_in_common_paths() {
-        info!("✓ Using yt-dlp from common path: {:?}", common);
-        return Some(common);
-    }
-    
-    warn!("✗ yt-dlp not found anywhere!");
-    None
+
+    // Fallback: Check common paths (legacy/development support)
+    // Only keeping platform-agnostic or strictly necessary fallbacks if "which" fails
+    // but typically platform::ytdlp_path covering 'which' is sufficient.
+    // We can keep a minimal fallback if desired, or just return None.
+
+    // Attempt manual common paths check if system PATH lookup failed via 'which'
+    find_in_common_paths()
 }
 
-/// Find bundled yt-dlp inside macOS .app bundle
-fn find_bundled_ytdlp() -> Option<PathBuf> {
-    // Get current executable path
-    let exe_path = std::env::current_exe().ok()?;
-    debug!("Current executable: {:?}", exe_path);
-    
-    // Get the directory containing the executable
-    let exe_dir = exe_path.parent()?;
-    
-    // Check if we're in a MacOS directory (indicates .app bundle)
-    // Structure: Rustloader.app/Contents/MacOS/rustloader_bin
-    //                                  /Resources/bin/yt-dlp
-    if exe_dir.ends_with("MacOS") {
-        let contents_dir = exe_dir.parent()?;
-        let ytdlp_path = contents_dir.join("Resources").join("bin").join("yt-dlp");
-        
-        debug!("Checking bundled path: {:?}", ytdlp_path);
-        
-        if ytdlp_path.exists() && ytdlp_path.is_file() {
-            // Verify it's executable
-            if is_executable(&ytdlp_path) {
-                return Some(ytdlp_path);
-            } else {
-                warn!("Bundled yt-dlp exists but is not executable: {:?}", ytdlp_path);
-            }
-        }
-    }
-    
-    // Also check if yt-dlp is next to the executable (for development)
-    let dev_path = exe_dir.join("yt-dlp");
-    if dev_path.exists() && is_executable(&dev_path) {
-        return Some(dev_path);
-    }
-    
-    None
-}
-
-/// Find yt-dlp in system PATH using `which`
-fn find_in_path() -> Option<PathBuf> {
-    // Try using the which crate first
-    if let Ok(path) = which::which("yt-dlp") {
-        if path.exists() {
-            return Some(path);
-        }
-    }
-    
-    // Fallback: Use shell `which` command
-    let output = Command::new("which")
-        .arg("yt-dlp")
-        .output()
-        .ok()?;
-    
-    if output.status.success() {
-        let path_str = String::from_utf8_lossy(&output.stdout);
-        let path = PathBuf::from(path_str.trim());
-        if path.exists() {
-            return Some(path);
-        }
-    }
-    
-    None
-}
-
-/// Find yt-dlp in common installation paths
+/// Find yt-dlp in common installation paths as a last resort
 fn find_in_common_paths() -> Option<PathBuf> {
-    let common_paths = [
-        // macOS Homebrew (Apple Silicon)
-        "/opt/homebrew/bin/yt-dlp",
-        // macOS Homebrew (Intel)
-        "/usr/local/bin/yt-dlp",
-        // System
-        "/usr/bin/yt-dlp",
-        // Python.org installation
-        "/Library/Frameworks/Python.framework/Versions/Current/bin/yt-dlp",
-        "/Library/Frameworks/Python.framework/Versions/3.11/bin/yt-dlp",
-        "/Library/Frameworks/Python.framework/Versions/3.12/bin/yt-dlp",
-        // User local
-        "~/.local/bin/yt-dlp",
-        // pip user install
-        "/Users/*/Library/Python/*/bin/yt-dlp",
-    ];
-    
+    let common_paths = if cfg!(target_os = "macos") {
+        vec![
+            "/opt/homebrew/bin/yt-dlp",
+            "/usr/local/bin/yt-dlp",
+            "/usr/bin/yt-dlp",
+            "~/.local/bin/yt-dlp",
+        ]
+    } else if cfg!(target_os = "linux") {
+        vec![
+            "/usr/bin/yt-dlp",
+            "/usr/local/bin/yt-dlp",
+            "~/.local/bin/yt-dlp",
+            "/snap/bin/yt-dlp",
+        ]
+    } else {
+        vec![]
+    };
+
     for path_str in common_paths {
         // Expand ~ to home directory
         let expanded = if path_str.starts_with("~") {
@@ -325,35 +255,13 @@ fn find_in_common_paths() -> Option<PathBuf> {
         } else {
             PathBuf::from(path_str)
         };
-        
-        if expanded.exists() && is_executable(&expanded) {
+
+        if expanded.exists() {
             return Some(expanded);
         }
     }
-    
-    None
-}
 
-/// Check if a file is executable
-fn is_executable(path: &PathBuf) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        
-        if let Ok(metadata) = std::fs::metadata(path) {
-            let permissions = metadata.permissions();
-            // Check if any executable bit is set
-            return permissions.mode() & 0o111 != 0;
-        }
-    }
-    
-    #[cfg(not(unix))]
-    {
-        // On Windows, just check if file exists
-        return path.exists();
-    }
-    
-    false
+    None
 }
 
 /// Create a Command for yt-dlp with the correct path
@@ -376,19 +284,7 @@ mod tests {
         println!("yt-dlp found at: {:?}", result);
         // Don't assert - yt-dlp might not be installed in CI
     }
-    
-    #[test]
-    fn test_find_bundled_ytdlp() {
-        let result = find_bundled_ytdlp();
-        println!("Bundled yt-dlp: {:?}", result);
-    }
-    
-    #[test]
-    fn test_find_in_path() {
-        let result = find_in_path();
-        println!("System yt-dlp: {:?}", result);
-    }
-    
+
     #[test]
     fn test_find_in_common_paths() {
         let result = find_in_common_paths();
@@ -402,15 +298,6 @@ mod tests {
             if let Ok(out) = output {
                 println!("yt-dlp version: {}", String::from_utf8_lossy(&out.stdout));
             }
-        }
-    }
-    
-    #[test]
-    fn test_is_executable() {
-        // Test with known executable
-        let path = PathBuf::from("/bin/ls");
-        if path.exists() {
-            assert!(is_executable(&path));
         }
     }
 }

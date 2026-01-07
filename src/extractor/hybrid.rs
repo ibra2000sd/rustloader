@@ -1,5 +1,5 @@
-use crate::extractor::traits::Extractor;
 use crate::extractor::models::{Format, VideoInfo};
+use crate::extractor::traits::Extractor;
 use anyhow::Result;
 use std::sync::Arc;
 use tracing::{debug, info};
@@ -41,7 +41,11 @@ impl HybridExtractor {
             Ok(info) => Ok(info),
             Err(e) => {
                 // If a specialized extractor fails, try the fallback!
-                info!("Primary extractor {} failed: {}. Retrying with fallback...", extractor.id(), e);
+                info!(
+                    "Primary extractor {} failed: {}. Retrying with fallback...",
+                    extractor.id(),
+                    e
+                );
                 if extractor.id() != self.fallback.id() {
                     self.fallback.extract_info(url).await
                 } else {

@@ -27,7 +27,9 @@ pub fn get_app_support_dir() -> PathBuf {
         .and_then(|parent| {
             // dirs::preference_dir() returns ~/Library/Preferences on macOS
             // We want ~/Library/Application Support instead
-            parent.parent().map(|lib| lib.join("Application Support").join("Rustloader"))
+            parent
+                .parent()
+                .map(|lib| lib.join("Application Support").join("Rustloader"))
         })
         .or_else(|| {
             // Fallback: explicitly construct from home directory
@@ -44,7 +46,10 @@ pub fn get_app_support_dir() -> PathBuf {
 
     // Ensure directory exists
     if let Err(e) = std::fs::create_dir_all(&dir) {
-        eprintln!("Warning: Failed to create app support directory {:?}: {}", dir, e);
+        eprintln!(
+            "Warning: Failed to create app support directory {:?}: {}",
+            dir, e
+        );
         eprintln!("Will attempt to use the directory anyway");
     }
 
@@ -93,7 +98,8 @@ mod tests {
         let path = get_app_support_dir();
         assert!(path.is_absolute(), "App support dir must be absolute path");
         assert!(
-            path.to_string_lossy().contains("Library/Application Support"),
+            path.to_string_lossy()
+                .contains("Library/Application Support"),
             "Path must follow macOS convention"
         );
     }

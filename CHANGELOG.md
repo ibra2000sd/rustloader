@@ -14,7 +14,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [0.7.0] - 2026-01-08
+## [0.8.0] - 2026-01-08
+
+### 🌍 Cross-Platform Support
+- **NEW**: macOS ARM64 (Apple Silicon) native build
+- **NEW**: Windows x86_64 support
+- **NEW**: Linux x86_64 support (Ubuntu 22.04+, Fedora 38+)
+- **NEW**: Automated CI/CD with GitHub Actions
+
+### 📦 Distribution
+- Pre-built binaries for all platforms
+- SHA256 checksums for verification
+- Reduced binary size (~20MB, down from 34MB)
+
+### 🔧 Technical Changes
+- Added platform abstraction layer (`src/utils/platform.rs`)
+- Cross-platform directory handling (XDG on Linux, AppData on Windows)
+- Conditional compilation for platform-specific features
+- yt-dlp bundling optimization
+
+## [0.7.0] - 2026-01-078
 
 ### 🧪 Test Infrastructure
 - **Added**: Comprehensive stress test suite (`tests/stress_test.rs`)

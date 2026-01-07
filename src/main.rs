@@ -3,15 +3,14 @@
 //! A cross-platform video downloader that combines yt-dlp extraction capabilities
 //! with a fast Rust-based download engine and a simple, practical GUI.
 
-
 use anyhow::Result;
 use clap::Parser;
 use iced::Application;
-use std::process::Command;
 use rustloader::downloader;
 use rustloader::extractor::{self, Extractor};
 use rustloader::gui;
 use rustloader::utils;
+use std::process::Command;
 
 #[derive(Parser)]
 struct Args {

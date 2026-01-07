@@ -22,7 +22,10 @@ pub trait Extractor: Send + Sync {
     /// Extracts playlist information (optional, default implementation returns an error)
     async fn extract_playlist(&self, url: &str) -> Result<Vec<VideoInfo>> {
         // Default implementation for extractors that don't support playlists
-        Err(anyhow::anyhow!("Playlist extraction not supported by {}", self.id()))
+        Err(anyhow::anyhow!(
+            "Playlist extraction not supported by {}",
+            self.id()
+        ))
     }
 
     /// Gets available formats (usually calls extract_info internally)

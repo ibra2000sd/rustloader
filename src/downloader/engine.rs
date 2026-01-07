@@ -259,9 +259,7 @@ impl DownloadEngine {
             return self.download_simple(url, output_path, progress_tx).await;
         }
 
-        info!(
-            "📦 [ENGINE] Using segmented download path (ranges supported and file large enough)"
-        );
+        info!("📦 [ENGINE] Using segmented download path (ranges supported and file large enough)");
 
         // Calculate segments
         let segments = calculate_segments(file_size, self.config.segments);

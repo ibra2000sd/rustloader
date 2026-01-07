@@ -5,11 +5,9 @@ use crate::extractor::{
     YtDlpExtractor,
 };
 use crate::gui::DownloadProgressData;
-use crate::queue::{DownloadTask, QueueManager, TaskStatus, EventLog};
+use crate::queue::{DownloadTask, EventLog, QueueManager, TaskStatus};
 use crate::utils::config::AppSettings;
-use crate::utils::{
-    FileOrganizer, MetadataManager, OrganizationSettings, get_app_support_dir,
-};
+use crate::utils::{get_app_support_dir, FileOrganizer, MetadataManager, OrganizationSettings};
 use anyhow::Result;
 use chrono::Utc;
 use std::path::PathBuf;
@@ -21,7 +19,7 @@ use uuid::Uuid;
 pub struct BackendActor {
     receiver: mpsc::Receiver<BackendCommand>,
     sender: mpsc::Sender<BackendEvent>,
-    
+
     // Components
     extractor: Arc<HybridExtractor>,
     queue_manager: Arc<QueueManager>,
@@ -67,8 +65,11 @@ impl BackendActor {
 
         // 3. Initialize Event Log
         let app_support_dir = get_app_support_dir();
-        let event_log = Arc::new(EventLog::new(&app_support_dir).await
-            .map_err(|e| anyhow::anyhow!("Failed to initialize event log: {}", e))?);
+        let event_log = Arc::new(
+            EventLog::new(&app_support_dir)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to initialize event log: {}", e))?,
+        );
 
         let queue_manager = Arc::new(QueueManager::new(
             settings.max_concurrent,
@@ -114,8 +115,13 @@ impl BackendActor {
                 BackendCommand::ExtractInfo { url } => {
                     self.handle_extract_info(url).await;
                 }
-                BackendCommand::StartDownload { video_info, output_path, format_id } => {
-                     self.handle_start_download(video_info, output_path, format_id).await;
+                BackendCommand::StartDownload {
+                    video_info,
+                    output_path,
+                    format_id,
+                } => {
+                    self.handle_start_download(video_info, output_path, format_id)
+                        .await;
                 }
                 BackendCommand::PauseDownload(id) => {
                     let _ = self.queue_manager.pause_task(&id).await;
@@ -130,7 +136,7 @@ impl BackendActor {
                 BackendCommand::RemoveTask(id) => {
                     let _ = self.queue_manager.remove_task(&id).await;
                 }
-                 BackendCommand::ClearCompleted => {
+                BackendCommand::ClearCompleted => {
                     let _ = self.queue_manager.clear_completed().await;
                 }
                 BackendCommand::ResumeAll => {
@@ -146,25 +152,31 @@ impl BackendActor {
 
     async fn handle_extract_info(&self, url: String) {
         let _ = self.sender.send(BackendEvent::ExtractionStarted).await;
-        
+
         match self.extractor.extract_info(&url).await {
             Ok(info) => {
-                let _ = self.sender.send(BackendEvent::ExtractionCompleted(Ok(info))).await;
+                let _ = self
+                    .sender
+                    .send(BackendEvent::ExtractionCompleted(Ok(info)))
+                    .await;
             }
             Err(e) => {
-                let _ = self.sender.send(BackendEvent::ExtractionCompleted(Err(e.to_string()))).await;
+                let _ = self
+                    .sender
+                    .send(BackendEvent::ExtractionCompleted(Err(e.to_string())))
+                    .await;
             }
         }
     }
 
     async fn handle_start_download(
-        &self, 
-        video_info: VideoInfo, 
-        output_path: PathBuf, 
-        format_id: Option<String>
+        &self,
+        video_info: VideoInfo,
+        output_path: PathBuf,
+        format_id: Option<String>,
     ) {
         // Validation and setup logic ported from BackendBridge
-        
+
         // 1. Format Selection
         let format = match self.select_format(&video_info, format_id) {
             Ok(f) => f,
@@ -177,7 +189,7 @@ impl BackendActor {
         // 2. Get Direct URL
         let download_url = match self.get_download_url(&video_info, &format).await {
             Ok(url) => url,
-             Err(e) => {
+            Err(e) => {
                 let _ = self.sender.send(BackendEvent::Error(e)).await;
                 return;
             }
@@ -201,65 +213,96 @@ impl BackendActor {
 
         // 4. Add to Queue
         if let Err(e) = self.queue_manager.add_task(task).await {
-             let _ = self.sender.send(BackendEvent::DownloadFailed { task_id, error: e.to_string() }).await;
-             return;
+            let _ = self
+                .sender
+                .send(BackendEvent::DownloadFailed {
+                    task_id,
+                    error: e.to_string(),
+                })
+                .await;
+            return;
         }
 
-        let _ = self.sender.send(BackendEvent::DownloadStarted { 
-            task_id, 
-            video_info 
-        }).await;
+        let _ = self
+            .sender
+            .send(BackendEvent::DownloadStarted {
+                task_id,
+                video_info,
+            })
+            .await;
     }
 
-    fn select_format(&self, video_info: &VideoInfo, format_id: Option<String>) -> Result<Format, String> {
-         // Logic from BackendBridge::start_download
-         if let Some(id) = format_id {
-            video_info.formats.iter().find(|f| f.format_id == id)
+    fn select_format(
+        &self,
+        video_info: &VideoInfo,
+        format_id: Option<String>,
+    ) -> Result<Format, String> {
+        // Logic from BackendBridge::start_download
+        if let Some(id) = format_id {
+            video_info
+                .formats
+                .iter()
+                .find(|f| f.format_id == id)
                 .cloned()
                 .ok_or_else(|| "Format not found".to_string())
         } else {
-             // combined format logic
-             let combined_formats: Vec<_> = video_info.formats.iter().filter(|f| {
-                 let has_video = f.vcodec.as_deref().unwrap_or("none") != "none";
-                 let has_audio = f.acodec.as_deref().unwrap_or("none") != "none";
-                 let not_sb = !f.format_id.starts_with("sb");
-                 has_video && has_audio && not_sb
-             }).collect();
+            // combined format logic
+            let combined_formats: Vec<_> = video_info
+                .formats
+                .iter()
+                .filter(|f| {
+                    let has_video = f.vcodec.as_deref().unwrap_or("none") != "none";
+                    let has_audio = f.acodec.as_deref().unwrap_or("none") != "none";
+                    let not_sb = !f.format_id.starts_with("sb");
+                    has_video && has_audio && not_sb
+                })
+                .collect();
 
-             if let Some(best) = combined_formats.iter().max_by_key(|f| {
-                 f.width.unwrap_or(0) * f.height.unwrap_or(0)
-             }) {
-                 Ok((*best).clone())
-             } else {
-                 Err("No combined format found".to_string())
-             }
+            if let Some(best) = combined_formats
+                .iter()
+                .max_by_key(|f| f.width.unwrap_or(0) * f.height.unwrap_or(0))
+            {
+                Ok((*best).clone())
+            } else {
+                Err("No combined format found".to_string())
+            }
         }
     }
 
-    async fn get_download_url(&self, video_info: &VideoInfo, format: &Format) -> Result<String, String> {
-        let direct_url = self.extractor.get_direct_url(&video_info.url, &format.format_id).await
+    async fn get_download_url(
+        &self,
+        video_info: &VideoInfo,
+        format: &Format,
+    ) -> Result<String, String> {
+        let direct_url = self
+            .extractor
+            .get_direct_url(&video_info.url, &format.format_id)
+            .await
             .map_err(|e| e.to_string())?;
 
         // HLS Check
         if direct_url.contains(".m3u8") || direct_url.contains("/manifest") {
-             Ok(video_info.url.clone())
+            Ok(video_info.url.clone())
         } else {
-             Ok(direct_url)
+            Ok(direct_url)
         }
     }
 
     async fn monitor_loop(qm: Arc<QueueManager>, sender: mpsc::Sender<BackendEvent>) {
         let mut last_statuses = std::collections::HashMap::new();
-        
+
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await; // Faster updates?
-            
+
             let tasks = qm.get_all_tasks().await;
-            
+
             for task in tasks {
                 // Check status change
-                let last_status = last_statuses.get(&task.id).cloned().unwrap_or(TaskStatus::Queued);
-                
+                let last_status = last_statuses
+                    .get(&task.id)
+                    .cloned()
+                    .unwrap_or(TaskStatus::Queued);
+
                 if task.status != last_status {
                     let status_str = match task.status {
                         TaskStatus::Queued => "Queued",
@@ -268,18 +311,30 @@ impl BackendActor {
                         TaskStatus::Completed => "Completed",
                         TaskStatus::Failed(_) => "Failed",
                         TaskStatus::Cancelled => "Cancelled",
-                    }.to_string();
+                    }
+                    .to_string();
 
-                    let _ = sender.send(BackendEvent::TaskStatusUpdated { 
-                        task_id: task.id.clone(), 
-                        status: status_str.clone() 
-                    }).await;
-                    
+                    let _ = sender
+                        .send(BackendEvent::TaskStatusUpdated {
+                            task_id: task.id.clone(),
+                            status: status_str.clone(),
+                        })
+                        .await;
+
                     if matches!(task.status, TaskStatus::Completed) {
-                         let _ = sender.send(BackendEvent::DownloadCompleted { task_id: task.id.clone() }).await;
-                    } 
+                        let _ = sender
+                            .send(BackendEvent::DownloadCompleted {
+                                task_id: task.id.clone(),
+                            })
+                            .await;
+                    }
                     if let TaskStatus::Failed(e) = &task.status {
-                         let _ = sender.send(BackendEvent::DownloadFailed { task_id: task.id.clone(), error: e.clone() }).await;
+                        let _ = sender
+                            .send(BackendEvent::DownloadFailed {
+                                task_id: task.id.clone(),
+                                error: e.clone(),
+                            })
+                            .await;
                     }
 
                     last_statuses.insert(task.id.clone(), task.status.clone());
@@ -294,13 +349,15 @@ impl BackendActor {
                         total: progress.total_bytes,
                         eta: progress.eta.map(|d| d.as_secs()),
                     };
-                    
-                    // Only send if downloading or recently changed? 
+
+                    // Only send if downloading or recently changed?
                     // To save bandwidth, maybe check if changed? For now send all.
-                    let _ = sender.send(BackendEvent::DownloadProgress { 
-                        task_id: task.id.clone(), 
-                        data 
-                    }).await;
+                    let _ = sender
+                        .send(BackendEvent::DownloadProgress {
+                            task_id: task.id.clone(),
+                            data,
+                        })
+                        .await;
                 }
             }
         }

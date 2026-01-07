@@ -1,5 +1,5 @@
-pub mod manager;
 pub mod events;
+pub mod manager;
 
-pub use manager::{QueueManager, TaskStatus, DownloadTask};
-pub use events::{QueueEvent, EventLog};
+pub use events::{EventLog, QueueEvent};
+pub use manager::{DownloadTask, QueueManager, TaskStatus};

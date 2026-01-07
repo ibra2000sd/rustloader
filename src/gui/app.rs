@@ -68,20 +68,34 @@ impl FailureCategory {
     /// Classify error string into category (pure UI logic)
     pub fn from_error(error: &str) -> Self {
         let lower = error.to_lowercase();
-        if lower.contains("timeout") || lower.contains("connection") 
-           || lower.contains("dns") || lower.contains("503") 
-           || lower.contains("network") || lower.contains("reset") {
+        if lower.contains("timeout")
+            || lower.contains("connection")
+            || lower.contains("dns")
+            || lower.contains("503")
+            || lower.contains("network")
+            || lower.contains("reset")
+        {
             FailureCategory::NetworkError
-        } else if lower.contains("401") || lower.contains("403") 
-                  || lower.contains("cookie") || lower.contains("auth")
-                  || lower.contains("forbidden") || lower.contains("unauthorized") {
+        } else if lower.contains("401")
+            || lower.contains("403")
+            || lower.contains("cookie")
+            || lower.contains("auth")
+            || lower.contains("forbidden")
+            || lower.contains("unauthorized")
+        {
             FailureCategory::AuthError
-        } else if lower.contains("disk") || lower.contains("permission") 
-                  || lower.contains("space") || lower.contains("full") {
+        } else if lower.contains("disk")
+            || lower.contains("permission")
+            || lower.contains("space")
+            || lower.contains("full")
+        {
             FailureCategory::DiskError
-        } else if lower.contains("extractor") || lower.contains("format") 
-                  || lower.contains("parse") || lower.contains("unsupported")
-                  || lower.contains("yt-dlp") {
+        } else if lower.contains("extractor")
+            || lower.contains("format")
+            || lower.contains("parse")
+            || lower.contains("unsupported")
+            || lower.contains("yt-dlp")
+        {
             FailureCategory::ParseError
         } else {
             FailureCategory::UnknownError
@@ -92,7 +106,9 @@ impl FailureCategory {
     pub fn recovery_hint(&self) -> &'static str {
         match self {
             FailureCategory::NetworkError => "Check your internet connection or VPN, then retry.",
-            FailureCategory::AuthError => "This may require refreshing cookies or login credentials.",
+            FailureCategory::AuthError => {
+                "This may require refreshing cookies or login credentials."
+            }
             FailureCategory::DiskError => "Free up disk space or change the download directory.",
             FailureCategory::ParseError => "Try a different format or re-add the URL.",
             FailureCategory::UnknownError => "Try again or remove and re-add this download.",
@@ -151,11 +167,11 @@ pub enum Message {
     RetryDownload(String),
     OpenFile(String),
     OpenDownloadFolder(String),
-    
+
     // v0.7.0: Recovery actions
-    ResetTask(String),       // Cancel + Delete + Re-add as new task
-    DismissError(String),    // Hide error display, keep Failed
-    RestartStalled(String),  // Pause + Resume for stalled tasks
+    ResetTask(String),      // Cancel + Delete + Re-add as new task
+    DismissError(String),   // Hide error display, keep Failed
+    RestartStalled(String), // Pause + Resume for stalled tasks
 
     // View navigation
     SwitchToMain,
@@ -253,7 +269,9 @@ impl Application for RustloaderApp {
 
                     // Send extract command to backend
                     let url = self.url_input.clone();
-                    let _ = self.backend_sender.try_send(BackendCommand::ExtractInfo { url });
+                    let _ = self
+                        .backend_sender
+                        .try_send(BackendCommand::ExtractInfo { url });
                 }
                 Command::none()
             }
@@ -275,119 +293,140 @@ impl Application for RustloaderApp {
                 self.url_input.clear();
                 Command::none()
             }
-            
+
             // Backend Events Handling
             Message::BackendEventReceived(event) => {
-                 match event {
-                     BackendEvent::ExtractionStarted => {
-                         self.is_extracting = true;
-                         self.status_message = "Extracting video information...".to_string();
-                     }
-                     BackendEvent::ExtractionCompleted(result) => {
-                         self.is_extracting = false;
-                         match result {
-                             Ok(video_info) => {
-                                 // Auto-start download logic
-                                 let output_path = PathBuf::from(&self.download_location)
+                match event {
+                    BackendEvent::ExtractionStarted => {
+                        self.is_extracting = true;
+                        self.status_message = "Extracting video information...".to_string();
+                    }
+                    BackendEvent::ExtractionCompleted(result) => {
+                        self.is_extracting = false;
+                        match result {
+                            Ok(video_info) => {
+                                // Auto-start download logic
+                                let output_path = PathBuf::from(&self.download_location)
                                     .join(format!("{}.mp4", sanitize_filename(&video_info.title)));
-                                 
-                                 self.url_input.clear();
-                                 self.url_error = None;
-                                 self.status_message = format!("Starting download: {}", video_info.title);
 
-                                 // Send start command
-                                 let _ = self.backend_sender.try_send(BackendCommand::StartDownload {
-                                     video_info,
-                                     output_path,
-                                     format_id: None // Auto format
-                                 });
-                             }
-                             Err(e) => {
-                                 self.url_error = Some(make_error_user_friendly(&e));
-                                 self.status_message = "Extraction failed".to_string();
-                             }
-                         }
-                     }
-                     BackendEvent::DownloadStarted { task_id, video_info } => {
-                         let task_ui = DownloadTaskUI {
-                             id: task_id.clone(),
-                             title: video_info.title.clone(),
-                             url: video_info.url.clone(),
-                             progress: 0.0,
-                             speed: 0.0,
-                             status: "Queued".to_string(),
-                             downloaded_mb: 0.0,
-                             total_mb: video_info.filesize.unwrap_or(0) as f64 / (1024.0 * 1024.0),
-                             eta_seconds: None,
-                             file_path: None,
-                             error_message: None,
-                             last_progress_at: Instant::now(),
-                             was_resumed_after_failure: false,
-                             error_dismissed: false,
-                         };
-                         self.active_downloads.push(task_ui);
-                         self.status_message = format!("Added to queue: {}", video_info.title);
-                     }
-                     BackendEvent::DownloadProgress { task_id, data } => {
-                         if let Some(task) = self.active_downloads.iter_mut().find(|t| t.id == task_id) {
-                             task.progress = data.progress;
-                             task.speed = data.speed;
-                             task.downloaded_mb = data.downloaded as f64 / (1024.0 * 1024.0);
-                             task.total_mb = data.total as f64 / (1024.0 * 1024.0);
-                             task.eta_seconds = data.eta;
-                             task.last_progress_at = Instant::now(); // v0.6.0: Track for stall detection
-                             task.status = "Downloading".to_string(); // Ensure status reflects active download
-                         }
-                     }
-                     BackendEvent::DownloadCompleted { task_id } => {
-                         if let Some(task) = self.active_downloads.iter_mut().find(|t| t.id == task_id) {
-                             task.status = "Completed".to_string();
-                             task.progress = 1.0;
-                         }
-                         self.status_message = "Download completed".to_string();
-                     }
-                     BackendEvent::DownloadFailed { task_id, error } => {
-                         if let Some(task) = self.active_downloads.iter_mut().find(|t| t.id == task_id) {
-                             task.status = "Failed".to_string();
-                             task.error_message = Some(error.clone());
-                         }
-                         self.status_message = format!("Failed: {}", error);
-                     }
-                     BackendEvent::TaskStatusUpdated { task_id, status } => {
-                         if let Some(task) = self.active_downloads.iter_mut().find(|t| t.id == task_id) {
-                             task.status = status;
-                         }
-                     }
-                     BackendEvent::Error(e) => {
-                         self.status_message = format!("Error: {}", e);
-                     }
+                                self.url_input.clear();
+                                self.url_error = None;
+                                self.status_message =
+                                    format!("Starting download: {}", video_info.title);
+
+                                // Send start command
+                                let _ =
+                                    self.backend_sender.try_send(BackendCommand::StartDownload {
+                                        video_info,
+                                        output_path,
+                                        format_id: None, // Auto format
+                                    });
+                            }
+                            Err(e) => {
+                                self.url_error = Some(make_error_user_friendly(&e));
+                                self.status_message = "Extraction failed".to_string();
+                            }
+                        }
+                    }
+                    BackendEvent::DownloadStarted {
+                        task_id,
+                        video_info,
+                    } => {
+                        let task_ui = DownloadTaskUI {
+                            id: task_id.clone(),
+                            title: video_info.title.clone(),
+                            url: video_info.url.clone(),
+                            progress: 0.0,
+                            speed: 0.0,
+                            status: "Queued".to_string(),
+                            downloaded_mb: 0.0,
+                            total_mb: video_info.filesize.unwrap_or(0) as f64 / (1024.0 * 1024.0),
+                            eta_seconds: None,
+                            file_path: None,
+                            error_message: None,
+                            last_progress_at: Instant::now(),
+                            was_resumed_after_failure: false,
+                            error_dismissed: false,
+                        };
+                        self.active_downloads.push(task_ui);
+                        self.status_message = format!("Added to queue: {}", video_info.title);
+                    }
+                    BackendEvent::DownloadProgress { task_id, data } => {
+                        if let Some(task) =
+                            self.active_downloads.iter_mut().find(|t| t.id == task_id)
+                        {
+                            task.progress = data.progress;
+                            task.speed = data.speed;
+                            task.downloaded_mb = data.downloaded as f64 / (1024.0 * 1024.0);
+                            task.total_mb = data.total as f64 / (1024.0 * 1024.0);
+                            task.eta_seconds = data.eta;
+                            task.last_progress_at = Instant::now(); // v0.6.0: Track for stall detection
+                            task.status = "Downloading".to_string(); // Ensure status reflects active download
+                        }
+                    }
+                    BackendEvent::DownloadCompleted { task_id } => {
+                        if let Some(task) =
+                            self.active_downloads.iter_mut().find(|t| t.id == task_id)
+                        {
+                            task.status = "Completed".to_string();
+                            task.progress = 1.0;
+                        }
+                        self.status_message = "Download completed".to_string();
+                    }
+                    BackendEvent::DownloadFailed { task_id, error } => {
+                        if let Some(task) =
+                            self.active_downloads.iter_mut().find(|t| t.id == task_id)
+                        {
+                            task.status = "Failed".to_string();
+                            task.error_message = Some(error.clone());
+                        }
+                        self.status_message = format!("Failed: {}", error);
+                    }
+                    BackendEvent::TaskStatusUpdated { task_id, status } => {
+                        if let Some(task) =
+                            self.active_downloads.iter_mut().find(|t| t.id == task_id)
+                        {
+                            task.status = status;
+                        }
+                    }
+                    BackendEvent::Error(e) => {
+                        self.status_message = format!("Error: {}", e);
+                    }
                     _ => {}
-                 }
-                 Command::none()
+                }
+                Command::none()
             }
 
             // Queue control
             Message::PauseDownload(task_id) => {
-                let _ = self.backend_sender.try_send(BackendCommand::PauseDownload(task_id));
+                let _ = self
+                    .backend_sender
+                    .try_send(BackendCommand::PauseDownload(task_id));
                 Command::none()
             }
 
             Message::ResumeDownload(task_id) => {
-                let _ = self.backend_sender.try_send(BackendCommand::ResumeDownload(task_id));
+                let _ = self
+                    .backend_sender
+                    .try_send(BackendCommand::ResumeDownload(task_id));
                 Command::none()
             }
 
             Message::CancelDownload(task_id) => {
                 // Optimistic UI update
                 self.active_downloads.retain(|t| t.id != task_id);
-                let _ = self.backend_sender.try_send(BackendCommand::CancelDownload(task_id));
+                let _ = self
+                    .backend_sender
+                    .try_send(BackendCommand::CancelDownload(task_id));
                 Command::none()
             }
 
             Message::RemoveCompleted(task_id) => {
-                 self.active_downloads.retain(|t| t.id != task_id);
-                 let _ = self.backend_sender.try_send(BackendCommand::RemoveTask(task_id));
-                 Command::none()
+                self.active_downloads.retain(|t| t.id != task_id);
+                let _ = self
+                    .backend_sender
+                    .try_send(BackendCommand::RemoveTask(task_id));
+                Command::none()
             }
 
             Message::ClearAllCompleted => {
@@ -409,7 +448,9 @@ impl Application for RustloaderApp {
                         task.error_dismissed = false; // Reset dismissed state on retry
                     }
                 }
-                let _ = self.backend_sender.try_send(BackendCommand::ResumeDownload(task_id));
+                let _ = self
+                    .backend_sender
+                    .try_send(BackendCommand::ResumeDownload(task_id));
                 Command::none()
             }
 
@@ -418,20 +459,26 @@ impl Application for RustloaderApp {
                 // Find the task and capture URL before removal
                 if let Some(task) = self.active_downloads.iter().find(|t| t.id == task_id) {
                     let url = task.url.clone();
-                    
+
                     // Cancel and remove from backend
-                    let _ = self.backend_sender.try_send(BackendCommand::CancelDownload(task_id.clone()));
-                    let _ = self.backend_sender.try_send(BackendCommand::RemoveTask(task_id.clone()));
-                    
+                    let _ = self
+                        .backend_sender
+                        .try_send(BackendCommand::CancelDownload(task_id.clone()));
+                    let _ = self
+                        .backend_sender
+                        .try_send(BackendCommand::RemoveTask(task_id.clone()));
+
                     // Remove from UI
                     self.active_downloads.retain(|t| t.id != task_id);
-                    
+
                     // Re-add the URL (will trigger extraction and new task creation)
                     self.url_input = url;
                     self.status_message = "Task reset - re-adding...".to_string();
-                    
+
                     // Trigger extraction for the URL
-                    let _ = self.backend_sender.try_send(BackendCommand::ExtractInfo { url: self.url_input.clone() });
+                    let _ = self.backend_sender.try_send(BackendCommand::ExtractInfo {
+                        url: self.url_input.clone(),
+                    });
                 }
                 Command::none()
             }
@@ -447,29 +494,33 @@ impl Application for RustloaderApp {
             // v0.7.0: Restart Stalled - Pause + Resume to restart engine
             Message::RestartStalled(task_id) => {
                 // First pause, then resume to restart the engine
-                let _ = self.backend_sender.try_send(BackendCommand::PauseDownload(task_id.clone()));
-                let _ = self.backend_sender.try_send(BackendCommand::ResumeDownload(task_id));
+                let _ = self
+                    .backend_sender
+                    .try_send(BackendCommand::PauseDownload(task_id.clone()));
+                let _ = self
+                    .backend_sender
+                    .try_send(BackendCommand::ResumeDownload(task_id));
                 self.status_message = "Restarting stalled download...".to_string();
                 Command::none()
             }
 
             Message::OpenFile(task_id) => {
                 if let Some(task) = self.active_downloads.iter().find(|t| t.id == task_id) {
-                    // Logic to find file... 
+                    // Logic to find file...
                     // Previously we set file_path in DownloadCompleted.
                     // We might need BackendEvent to include path in DownloadCompleted?
                     // Or keep track of it.
                     // For now, construct from download location + title?
-                     if let Some(file_path) = &task.file_path {
+                    if let Some(file_path) = &task.file_path {
                         let path = std::path::PathBuf::from(file_path);
                         let _ = open::that(&path);
                     } else {
-                         // Fallback guess
-                         let path = PathBuf::from(&self.download_location)
-                                    .join(format!("{}.mp4", sanitize_filename(&task.title)));
-                         if path.exists() {
-                             let _ = open::that(&path);
-                         }
+                        // Fallback guess
+                        let path = PathBuf::from(&self.download_location)
+                            .join(format!("{}.mp4", sanitize_filename(&task.title)));
+                        if path.exists() {
+                            let _ = open::that(&path);
+                        }
                     }
                 }
                 Command::none()
@@ -547,12 +598,10 @@ impl Application for RustloaderApp {
                             .map_err(|e| e.to_string())?;
                         Ok::<(), String>(())
                     },
-                    |result: Result<(), String>| {
-                        Message::SwitchToMain
-                    },
+                    |result: Result<(), String>| Message::SwitchToMain,
                 )
             }
-            
+
             Message::Tick => Command::none(), // No polling needed
         }
     }
@@ -561,7 +610,7 @@ impl Application for RustloaderApp {
         // Create a backend subscription using the receiver in self.
         // We use a wrapper struct to handle the Hash identity for unfold.
         struct BackendListener(Arc<Mutex<Option<mpsc::Receiver<BackendEvent>>>>);
-        
+
         impl std::hash::Hash for BackendListener {
             fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
                 // Hash the pointer address of the Arc to ensure identity stability
@@ -586,33 +635,31 @@ impl Application for RustloaderApp {
                     State::Starting(wrapper) => {
                         let rx_opt = wrapper.0.lock().unwrap().take();
                         if let Some(rx) = rx_opt {
-                             let mut rx = rx;
-                             match rx.recv().await {
-                                 Some(event) => (Message::BackendEventReceived(event), State::Ready(rx)),
-                                 None => std::future::pending().await
-                             }
+                            let mut rx = rx;
+                            match rx.recv().await {
+                                Some(event) => {
+                                    (Message::BackendEventReceived(event), State::Ready(rx))
+                                }
+                                None => std::future::pending().await,
+                            }
                         } else {
                             std::future::pending().await
                         }
-                    },
-                    State::Ready(mut rx) => {
-                        match rx.recv().await {
-                            Some(event) => (Message::BackendEventReceived(event), State::Ready(rx)),
-                            None => std::future::pending().await
-                        }
-                    },
-                    State::Empty => {
-                         std::future::pending().await
                     }
+                    State::Ready(mut rx) => match rx.recv().await {
+                        Some(event) => (Message::BackendEventReceived(event), State::Ready(rx)),
+                        None => std::future::pending().await,
+                    },
+                    State::Empty => std::future::pending().await,
                 }
-            }
+            },
         )
     }
 
     fn theme(&self) -> Self::Theme {
         Theme::Dark
     }
-    
+
     fn view(&self) -> Element<'_, Message> {
         use crate::gui::theme;
         use iced::widget::{button, column, container, row, text, Space};

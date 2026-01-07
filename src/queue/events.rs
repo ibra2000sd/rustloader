@@ -1,11 +1,11 @@
-use serde::{Deserialize, Serialize};
+use crate::extractor::{Format, VideoInfo};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use tokio::fs::{OpenOptions, File};
+use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncWriteExt, BufWriter};
-use crate::extractor::{VideoInfo, Format};
 // use crate::queue::TaskStatus;
-use anyhow::{Result, Context};
+use anyhow::{Context, Result};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -64,16 +64,16 @@ pub struct EventLog {
 impl EventLog {
     pub async fn new(base_dir: &Path) -> Result<Self> {
         let file_path = base_dir.join("events.jsonl");
-        
+
         // Ensure directory exists
         if let Some(parent) = file_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
 
-        // We open the file in append mode. 
-        // We defer opening the writer until the first write to avoid locking issues during rehydration? 
+        // We open the file in append mode.
+        // We defer opening the writer until the first write to avoid locking issues during rehydration?
         // No, rehydration is read-only. We can just open it.
-        
+
         let file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -109,7 +109,9 @@ impl EventLog {
         let mut events = Vec::new();
 
         for line in content.lines() {
-            if line.trim().is_empty() { continue; }
+            if line.trim().is_empty() {
+                continue;
+            }
             match serde_json::from_str::<QueueEvent>(line) {
                 Ok(event) => events.push(event),
                 Err(e) => {

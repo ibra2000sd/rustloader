@@ -2,10 +2,10 @@
 
 use rustloader::downloader::{DownloadConfig, DownloadEngine};
 use rustloader::extractor::{Format, VideoInfo};
-use rustloader::queue::{DownloadTask, QueueManager, TaskStatus, EventLog};
+use rustloader::queue::{DownloadTask, EventLog, QueueManager, TaskStatus};
 use rustloader::utils::{ContentType, FileOrganizer, MetadataManager, OrganizationSettings};
-use tempfile::TempDir;
 use std::sync::Arc;
+use tempfile::TempDir;
 
 fn sample_format() -> Format {
     Format {
@@ -90,7 +90,10 @@ async fn queue_add_pause_resume_cancel_flow() {
         .unwrap()
         .status;
     assert!(
-        matches!(status_after_resume, TaskStatus::Queued | TaskStatus::Downloading),
+        matches!(
+            status_after_resume,
+            TaskStatus::Queued | TaskStatus::Downloading
+        ),
         "Expected Queued or Downloading, got {:?}",
         status_after_resume
     );

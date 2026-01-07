@@ -149,9 +149,7 @@ pub fn main_view(
             button(text("Resume All").size(14))
                 .on_press(Message::ResumeAll)
                 .padding([10, 16])
-                .style(iced::theme::Button::Custom(Box::new(
-                    theme::PrimaryButton
-                ))),
+                .style(iced::theme::Button::Custom(Box::new(theme::PrimaryButton))),
             button(text("Clear Completed").size(14))
                 .on_press(Message::ClearAllCompleted)
                 .padding([10, 16])

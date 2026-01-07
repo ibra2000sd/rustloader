@@ -46,13 +46,13 @@ pub enum BackendEvent {
         task_id: String,
         error: String,
     },
-    
+
     // Task Status Updates (for Pause/Resume/Cancel confirmation)
     TaskStatusUpdated {
         task_id: String,
         status: String, // "Paused", "Cancelled", "Queued"
     },
-    
+
     // System
     Error(String),
 }

@@ -15,7 +15,7 @@ pub fn download_item(task: &DownloadTaskUI) -> Element<'static, Message> {
     use iced::Theme;
 
     // v0.6.0: Stall detection - Downloading with no progress for STALL_THRESHOLD_SECS
-    let is_stalled = task.status == "Downloading" 
+    let is_stalled = task.status == "Downloading"
         && task.last_progress_at.elapsed() > Duration::from_secs(STALL_THRESHOLD_SECS);
 
     // Determine display status (may differ from backend status)
@@ -106,7 +106,9 @@ pub fn download_item(task: &DownloadTaskUI) -> Element<'static, Message> {
                 button(text("Reset").size(12))
                     .on_press(Message::ResetTask(task.id.clone()))
                     .padding([6, 12])
-                    .style(iced::theme::Button::Custom(Box::new(theme::SecondaryButton))),
+                    .style(iced::theme::Button::Custom(Box::new(
+                        theme::SecondaryButton
+                    ))),
                 button(text("Remove").size(12))
                     .on_press(Message::RemoveCompleted(task.id.clone()))
                     .padding([6, 12])
@@ -155,9 +157,7 @@ pub fn download_item(task: &DownloadTaskUI) -> Element<'static, Message> {
     .spacing(10)
     .align_items(Alignment::Center);
 
-    let mut content = column![
-        title_row,
-    ];
+    let mut content = column![title_row,];
 
     // v0.7.0: Stall warning with guidance
     if is_stalled {
@@ -173,20 +173,20 @@ pub fn download_item(task: &DownloadTaskUI) -> Element<'static, Message> {
         let error_msg = task.error_message.as_deref().unwrap_or("Unknown error");
         let category = FailureCategory::from_error(error_msg);
         let recovery_hint = category.recovery_hint();
-        
+
         let retry_note = if task.was_resumed_after_failure {
             " (Previously retried)"
         } else {
             ""
         };
-        
+
         // Error message
         content = content.push(
             text(format!("✕ Error: {}{}", error_msg, retry_note))
                 .size(12)
                 .style(iced::theme::Text::Color(theme::DANGER)),
         );
-        
+
         // Recovery hint
         content = content.push(
             row![
@@ -203,11 +203,16 @@ pub fn download_item(task: &DownloadTaskUI) -> Element<'static, Message> {
             .align_items(Alignment::Center),
         );
     }
-    
+
     let is_active = task.status == "Downloading" && !is_stalled;
-    
+
     content = content
-        .push(progress_bar(task.progress, task.eta_seconds, is_active, is_stalled))
+        .push(progress_bar(
+            task.progress,
+            task.eta_seconds,
+            is_active,
+            is_stalled,
+        ))
         .push(
             row![
                 text(speed_text).size(12).style(theme::TEXT_SECONDARY),
@@ -217,7 +222,10 @@ pub fn download_item(task: &DownloadTaskUI) -> Element<'static, Message> {
             .spacing(10)
             .align_items(Alignment::Center),
         )
-        .push(row![Space::with_width(Length::Fill), control_buttons.spacing(8),])
+        .push(row![
+            Space::with_width(Length::Fill),
+            control_buttons.spacing(8),
+        ])
         .spacing(12)
         .width(Length::Fill);
 
