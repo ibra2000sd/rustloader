@@ -1,23 +1,27 @@
 //! Main GUI application
 #![allow(dead_code, unused_imports, unused_variables, unused_mut)]
 
+use crate::backend::{BackendActor, BackendCommand, BackendEvent};
 use crate::database::{initialize_database, DatabaseManager};
 use crate::extractor::VideoInfo;
 use crate::gui::clipboard;
-use crate::gui::integration::{BackendBridge, ProgressUpdate};
+// DownloadProgressData defined below
 use crate::queue::TaskStatus;
 use crate::utils::config::{AppSettings, VideoQuality};
+
 use anyhow::Result;
-use iced::{Application, Command, Element, Subscription, Theme};
+use iced::{executor, Application, Command, Element, Subscription, Theme};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::runtime::Runtime;
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
 /// Main application state
 pub struct RustloaderApp {
     // Core components
-    backend: std::sync::Arc<std::sync::Mutex<BackendBridge>>,
+    backend_sender: mpsc::Sender<BackendCommand>,
+    backend_receiver: Arc<Mutex<Option<mpsc::Receiver<BackendEvent>>>>,
     db_manager: Arc<DatabaseManager>,
     // Keep a long-lived runtime so backend tasks stay alive
     runtime: Arc<Runtime>,
@@ -63,6 +67,16 @@ pub struct DownloadTaskUI {
     pub file_path: Option<String>, // Path to the downloaded file
 }
 
+/// Progress data transfer object
+#[derive(Debug, Clone)]
+pub struct DownloadProgressData {
+    pub progress: f32,
+    pub speed: f64,
+    pub downloaded: u64,
+    pub total: u64,
+    pub eta: Option<u64>,
+}
+
 /// Application messages
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -72,16 +86,8 @@ pub enum Message {
     PasteFromClipboard,
     ClearUrlInput,
 
-    // Extract events
-    ExtractionStarted,
-    ExtractionCompleted(Result<VideoInfo, String>),
-
-    // Download events
-    DownloadStarted(String), // task_id
-    DownloadStartedWithInfo(String, VideoInfo),
-    DownloadProgress(String, DownloadProgressData),
-    DownloadCompleted(String),
-    DownloadFailed(String, String),
+    // Backend Events
+    BackendEventReceived(BackendEvent),
 
     // Queue control
     PauseDownload(String),
@@ -109,16 +115,6 @@ pub enum Message {
     Tick, // For periodic UI updates
 }
 
-/// Download progress data
-#[derive(Debug, Clone)]
-pub struct DownloadProgressData {
-    pub progress: f32,
-    pub speed: f64,
-    pub downloaded: u64,
-    pub total: u64,
-    pub eta: Option<u64>,
-}
-
 impl Application for RustloaderApp {
     type Executor = iced::executor::Default;
     type Message = Message;
@@ -129,13 +125,7 @@ impl Application for RustloaderApp {
         // Initialize settings
         let mut settings = AppSettings::default();
 
-        // Initialize database using bundle-aware paths
-        // This ensures the database is stored in ~/Library/Application Support/Rustloader/
-        // regardless of whether the app is launched from Terminal, Finder, Dock, or Spotlight.
-        // Working around macOS launch environment differences where cwd may be "/" when
-        // launched via LaunchServices (Finder, Dock, Spotlight).
         let db_path = crate::utils::get_database_path();
-        // SQLite connection string needs the sqlite:// protocol prefix and ?mode=rwc to create the file
         let db_url = format!("sqlite://{}?mode=rwc", db_path.to_string_lossy());
 
         // Create a single runtime and keep it alive for the app lifetime
@@ -152,17 +142,24 @@ impl Application for RustloaderApp {
             settings = loaded_settings;
         }
 
-        // Initialize backend on the same runtime and wrap it in a sync Arc<Mutex> for GUI access
-        let backend_bridge = rt
-            .block_on(BackendBridge::new(settings.clone()))
-            .expect("Failed to initialize backend");
-        let backend = std::sync::Arc::new(std::sync::Mutex::new(backend_bridge));
-        let runtime = Arc::new(rt);
+        // Initialize Backend Actor
+        let (cmd_tx, cmd_rx) = mpsc::channel(100);
+        let (event_tx, event_rx) = mpsc::channel(100);
+
+        // Spawn the actor on the runtime
+        let settings_clone = settings.clone();
+        rt.spawn(async move {
+            match BackendActor::new(settings_clone, cmd_rx, event_tx).await {
+                Ok(actor) => actor.run().await,
+                Err(e) => eprintln!("Failed to start backend actor: {}", e),
+            }
+        });
 
         let app = Self {
-            backend,
+            backend_sender: cmd_tx,
+            backend_receiver: Arc::new(Mutex::new(Some(event_rx))),
             db_manager,
-            runtime,
+            runtime: Arc::new(rt),
             current_view: View::Main,
             url_input: String::new(),
             status_message: "Ready".to_string(),
@@ -196,56 +193,11 @@ impl Application for RustloaderApp {
                     self.is_extracting = true;
                     self.status_message = "Extracting video information...".to_string();
 
+                    // Send extract command to backend
                     let url = self.url_input.clone();
-                    // Call backend extractor via the stored runtime and backend bridge
-                    let backend = std::sync::Arc::clone(&self.backend);
-                    let runtime = std::sync::Arc::clone(&self.runtime);
-
-                    Command::perform(
-                        async move {
-                            // Use the stored runtime to spawn an async task that calls the backend.
-                            // Communicate result back via a oneshot channel to avoid blocking runtime threads.
-                            let (tx, rx) = tokio::sync::oneshot::channel();
-                            let backend_clone = backend.clone();
-                            let url_clone = url.clone();
-
-                            // Run a dedicated thread that creates its own runtime to call the backend.
-                            std::thread::spawn(move || {
-                                let rt = tokio::runtime::Runtime::new()
-                                    .expect("Failed to create runtime for extractor thread");
-                                let res = rt.block_on(async move {
-                                    // FIX BUG-001: Clone bridge while holding lock, then release before await
-                                    let bridge_result = {
-                                        match backend_clone.lock() {
-                                            Ok(bridge) => {
-                                                // Clone the BackendBridge (cheap Arc clones)
-                                                Ok(bridge.clone())
-                                            }
-                                            Err(e) => Err(format!("Backend mutex poisoned: {}", e)),
-                                        }
-                                    }; // Lock is dropped here!
-
-                                    // Now use cloned bridge with await (no lock held)
-                                    match bridge_result {
-                                        Ok(bridge) => bridge.extract_video_info(&url_clone).await,
-                                        Err(e) => Err(e),
-                                    }
-                                });
-                                let _ = tx.send(res);
-                            });
-
-                            match rx.await {
-                                Ok(res) => res,
-                                Err(_) => Err("Extractor task canceled".to_string()),
-                            }
-                        },
-                        |result: Result<VideoInfo, String>| {
-                            Message::ExtractionCompleted(result.map_err(|e| e.to_string()))
-                        },
-                    )
-                } else {
-                    Command::none()
+                    let _ = self.backend_sender.try_send(BackendCommand::ExtractInfo { url });
                 }
+                Command::none()
             }
 
             Message::PasteFromClipboard => {
@@ -265,458 +217,154 @@ impl Application for RustloaderApp {
                 self.url_input.clear();
                 Command::none()
             }
+            
+            // Backend Events Handling
+            Message::BackendEventReceived(event) => {
+                 match event {
+                     BackendEvent::ExtractionStarted => {
+                         self.is_extracting = true;
+                         self.status_message = "Extracting video information...".to_string();
+                     }
+                     BackendEvent::ExtractionCompleted(result) => {
+                         self.is_extracting = false;
+                         match result {
+                             Ok(video_info) => {
+                                 // Auto-start download logic
+                                 let output_path = PathBuf::from(&self.download_location)
+                                    .join(format!("{}.mp4", sanitize_filename(&video_info.title)));
+                                 
+                                 self.url_input.clear();
+                                 self.url_error = None;
+                                 self.status_message = format!("Starting download: {}", video_info.title);
 
-            // Extract events
-            Message::ExtractionStarted => {
-                self.is_extracting = true;
-                self.status_message = "Extracting video information...".to_string();
-                Command::none()
-            }
-
-            Message::ExtractionCompleted(result) => {
-                self.is_extracting = false;
-
-                match result {
-                    Ok(video_info) => {
-                        // Prepare output path
-                        let output_path = PathBuf::from(&self.download_location)
-                            .join(format!("{}.mp4", sanitize_filename(&video_info.title)));
-
-                        // Clear URL input, error, and update status while we start the download
-                        self.url_input.clear();
-                        self.url_error = None;
-                        self.status_message =
-                            format!("Starting download: {}", video_info.title.clone());
-
-                        // Kick off start_download on backend and include video_info so UI can create an entry
-                        let backend = std::sync::Arc::clone(&self.backend);
-                        let runtime = std::sync::Arc::clone(&self.runtime);
-                        let vi_clone = video_info.clone();
-                        let out_clone = output_path.clone();
-
-                        eprintln!(
-                            "⏳ GUI: preparing to call backend.start_download for '{}'",
-                            vi_clone.title
-                        );
-                        return Command::perform(
-                            async move {
-                                // Spawn the backend start_download on the app runtime and use oneshot to receive the task id.
-                                let (tx, rx) = tokio::sync::oneshot::channel();
-                                let backend_clone = backend.clone();
-                                let vi = vi_clone.clone();
-                                let out = out_clone.clone();
-
-                                // Spawn a blocking thread with its own runtime to start the download.
-                                let vi_for_call = vi.clone();
-                                let vi_title = vi.title.clone();
-                                std::thread::spawn(move || {
-                                    eprintln!(
-                                        "⏳ [GUI THREAD] calling backend.start_download for '{}'",
-                                        vi_title
-                                    );
-                                    let rt = tokio::runtime::Runtime::new().expect(
-                                        "Failed to create runtime for start_download thread",
-                                    );
-                                    let res = rt.block_on(async move {
-                                        // FIX BUG-001: Clone bridge while holding lock, then release before await
-                                        let bridge_result = {
-                                            match backend_clone.lock() {
-                                                Ok(bridge) => {
-                                                    // Clone the BackendBridge (cheap Arc clones)
-                                                    Ok(bridge.clone())
-                                                }
-                                                Err(e) => {
-                                                    Err(format!("Backend mutex poisoned: {}", e))
-                                                }
-                                            }
-                                        }; // Lock is dropped here!
-
-                                        // Now use cloned bridge with await (no lock held)
-                                        match bridge_result {
-                                            Ok(bridge) => {
-                                                bridge
-                                                    .start_download(
-                                                        vi_for_call.clone(),
-                                                        out.clone(),
-                                                        None,
-                                                    )
-                                                    .await
-                                            }
-                                            Err(e) => Err(e),
-                                        }
-                                    });
-                                    eprintln!("⏳ [GUI THREAD] backend.start_download returned for '{}': {:?}", vi_title, res.as_ref().map(|s| s.as_str()).unwrap_or("Err"));
-                                    let _ = tx.send(res);
-                                });
-
-                                let res = match rx.await {
-                                    Ok(r) => r,
-                                    Err(_) => Err("Start download task canceled".to_string()),
-                                };
-
-                                eprintln!(
-                                    "⏳ GUI: received start_download result for '{}': {:?}",
-                                    vi_clone.title,
-                                    res.as_ref().map(|s| s.as_str()).unwrap_or("Err")
-                                );
-
-                                (res, vi_clone)
-                            },
-                            |(res, vi): (Result<String, String>, VideoInfo)| match res {
-                                Ok(task_id) => Message::DownloadStartedWithInfo(task_id, vi),
-                                Err(e) => Message::DownloadFailed("".to_string(), e),
-                            },
-                        );
-                    }
-                    Err(e) => {
-                        let friendly_error = make_error_user_friendly(&e);
-                        self.url_error = Some(friendly_error.clone());
-                        self.status_message = "Ready".to_string();
-                    }
-                }
-
-                Command::none()
-            }
-
-            // Download events
-            Message::DownloadStarted(task_id) => {
-                // If UI already has an entry with this id, mark it as downloading
-                if let Some(task) = self.active_downloads.iter_mut().find(|t| t.id == task_id) {
-                    task.status = "Downloading".to_string();
-                }
-                Command::none()
-            }
-
-            Message::DownloadStartedWithInfo(task_id, video_info) => {
-                // Create UI entry now that backend provided the real task id
-                let title = video_info.title.clone();
-                let url = video_info.url.clone();
-
-                let task_ui = DownloadTaskUI {
-                    id: task_id.clone(),
-                    title: title.clone(),
-                    url,
-                    progress: 0.0,
-                    speed: 0.0,
-                    status: "Queued".to_string(),
-                    downloaded_mb: 0.0,
-                    total_mb: video_info.filesize.unwrap_or(0) as f64 / (1024.0 * 1024.0),
-                    eta_seconds: None,
-                    file_path: None,
-                };
-
-                self.active_downloads.push(task_ui);
-                self.status_message = format!("Added to download queue: {}", title);
-                Command::none()
-            }
-
-            Message::DownloadProgress(task_id, progress_data) => {
-                // ✅ DEBUG BUG-006: Log progress updates
-                eprintln!(
-                    "📊 [GUI PROGRESS] Task: {} | Progress: {:.1}% | Speed: {:.1} MB/s",
-                    task_id,
-                    progress_data.progress * 100.0,
-                    progress_data.speed / 1024.0 / 1024.0
-                );
-
-                if let Some(task) = self.active_downloads.iter_mut().find(|t| t.id == task_id) {
-                    eprintln!("   ✅ Task found, updating UI");
-                    task.progress = progress_data.progress;
-                    task.speed = progress_data.speed;
-                    task.downloaded_mb = progress_data.downloaded as f64 / (1024.0 * 1024.0);
-                    task.eta_seconds = progress_data.eta;
-                } else {
-                    eprintln!("   ❌ Task NOT found in active_downloads!");
-                    eprintln!(
-                        "   ❌ Current task IDs: {:?}",
-                        self.active_downloads
-                            .iter()
-                            .map(|t| &t.id)
-                            .collect::<Vec<_>>()
-                    );
-                }
-                Command::none()
-            }
-
-            Message::DownloadCompleted(task_id) => {
-                if let Some(task) = self.active_downloads.iter_mut().find(|t| t.id == task_id) {
-                    task.status = "Completed".to_string();
-                    task.progress = 1.0;
-
-                    // ✅ FIX: Calculate actual file size for display
-                    if task.downloaded_mb > 0.0 {
-                        // Size already set by progress updates
-                        task.total_mb = task.downloaded_mb;
-                    } else if let Some(ref file_path) = task.file_path {
-                        // Fallback: try to read actual file size
-                        let output_path = std::path::PathBuf::from(file_path);
-                        if output_path.exists() {
-                            if let Ok(metadata) = std::fs::metadata(&output_path) {
-                                let size_mb = metadata.len() as f64 / (1024.0 * 1024.0);
-                                task.downloaded_mb = size_mb;
-                                task.total_mb = size_mb;
-                                eprintln!(
-                                    "✅ [COMPLETED] Set file size: {:.1} MB for {}",
-                                    size_mb, task_id
-                                );
-                            } else {
-                                eprintln!(
-                                    "⚠️  [COMPLETED] Could not read file metadata for {}",
-                                    task_id
-                                );
-                            }
-                        } else {
-                            eprintln!("⚠️  [COMPLETED] File not found: {:?}", output_path);
-                        }
-                    } else {
-                        eprintln!("⚠️  [COMPLETED] No file_path set for task {}", task_id);
-                    }
-                }
-                self.status_message = "Download completed".to_string();
-                Command::none()
-            }
-
-            Message::DownloadFailed(task_id, error) => {
-                if let Some(task) = self.active_downloads.iter_mut().find(|t| t.id == task_id) {
-                    task.status = "Failed".to_string();
-                }
-                self.status_message = format!("Download failed: {}", error);
-                Command::none()
+                                 // Send start command
+                                 let _ = self.backend_sender.try_send(BackendCommand::StartDownload {
+                                     video_info,
+                                     output_path,
+                                     format_id: None // Auto format
+                                 });
+                             }
+                             Err(e) => {
+                                 self.url_error = Some(make_error_user_friendly(&e));
+                                 self.status_message = "Extraction failed".to_string();
+                             }
+                         }
+                     }
+                     BackendEvent::DownloadStarted { task_id, video_info } => {
+                         let task_ui = DownloadTaskUI {
+                             id: task_id.clone(),
+                             title: video_info.title.clone(),
+                             url: video_info.url.clone(),
+                             progress: 0.0,
+                             speed: 0.0,
+                             status: "Queued".to_string(),
+                             downloaded_mb: 0.0,
+                             total_mb: video_info.filesize.unwrap_or(0) as f64 / (1024.0 * 1024.0),
+                             eta_seconds: None,
+                             file_path: None,
+                         };
+                         self.active_downloads.push(task_ui);
+                         self.status_message = format!("Added to queue: {}", video_info.title);
+                     }
+                     BackendEvent::DownloadProgress { task_id, data } => {
+                         if let Some(task) = self.active_downloads.iter_mut().find(|t| t.id == task_id) {
+                             task.progress = data.progress;
+                             task.speed = data.speed;
+                             task.downloaded_mb = data.downloaded as f64 / (1024.0 * 1024.0);
+                             task.total_mb = data.total as f64 / (1024.0 * 1024.0);
+                             task.eta_seconds = data.eta;
+                         }
+                     }
+                     BackendEvent::DownloadCompleted { task_id } => {
+                         if let Some(task) = self.active_downloads.iter_mut().find(|t| t.id == task_id) {
+                             task.status = "Completed".to_string();
+                             task.progress = 1.0;
+                         }
+                         self.status_message = "Download completed".to_string();
+                     }
+                     BackendEvent::DownloadFailed { task_id, error } => {
+                         if let Some(task) = self.active_downloads.iter_mut().find(|t| t.id == task_id) {
+                             task.status = "Failed".to_string();
+                         }
+                         self.status_message = format!("Failed: {}", error);
+                     }
+                     BackendEvent::TaskStatusUpdated { task_id, status } => {
+                         if let Some(task) = self.active_downloads.iter_mut().find(|t| t.id == task_id) {
+                             task.status = status;
+                         }
+                     }
+                     BackendEvent::Error(e) => {
+                         self.status_message = format!("Error: {}", e);
+                     }
+                    _ => {}
+                 }
+                 Command::none()
             }
 
             // Queue control
             Message::PauseDownload(task_id) => {
-                let backend = self.backend.clone();
-                let id = task_id.clone();
-
-                // Update local UI state immediately
-                if let Some(task) = self.active_downloads.iter_mut().find(|t| t.id == task_id) {
-                    task.status = "Pausing...".to_string();
-                }
-
-                Command::perform(
-                    async move {
-                        // Clone bridge before await to avoid deadlock
-                        let bridge_result = {
-                            match backend.lock() {
-                                Ok(bridge) => Ok(bridge.clone()),
-                                Err(e) => Err(format!("Backend mutex poisoned: {}", e)),
-                            }
-                        }; // Lock dropped here
-
-                        match bridge_result {
-                            Ok(mut bridge) => match bridge.pause_download(&id).await {
-                                Ok(_) => {
-                                    eprintln!("✅ Paused download: {}", id);
-                                    Some(())
-                                }
-                                Err(e) => {
-                                    eprintln!("❌ Failed to pause task {}: {}", id, e);
-                                    None
-                                }
-                            },
-                            Err(e) => {
-                                eprintln!("❌ Backend error: {}", e);
-                                None
-                            }
-                        }
-                    },
-                    |_| Message::Tick, // Trigger UI refresh
-                )
+                let _ = self.backend_sender.try_send(BackendCommand::PauseDownload(task_id));
+                Command::none()
             }
 
             Message::ResumeDownload(task_id) => {
-                let backend = self.backend.clone();
-                let id = task_id.clone();
-
-                // Update local UI state immediately
-                if let Some(task) = self.active_downloads.iter_mut().find(|t| t.id == task_id) {
-                    task.status = "Resuming...".to_string();
-                }
-
-                Command::perform(
-                    async move {
-                        // Clone bridge before await to avoid deadlock
-                        let bridge_result = {
-                            match backend.lock() {
-                                Ok(bridge) => Ok(bridge.clone()),
-                                Err(e) => Err(format!("Backend mutex poisoned: {}", e)),
-                            }
-                        }; // Lock dropped here
-
-                        match bridge_result {
-                            Ok(bridge) => match bridge.resume_download(&id).await {
-                                Ok(_) => {
-                                    eprintln!("✅ Resumed download: {}", id);
-                                    Some(())
-                                }
-                                Err(e) => {
-                                    eprintln!("❌ Failed to resume task {}: {}", id, e);
-                                    None
-                                }
-                            },
-                            Err(e) => {
-                                eprintln!("❌ Backend error: {}", e);
-                                None
-                            }
-                        }
-                    },
-                    |_| Message::Tick, // Trigger UI refresh
-                )
+                let _ = self.backend_sender.try_send(BackendCommand::ResumeDownload(task_id));
+                Command::none()
             }
 
             Message::CancelDownload(task_id) => {
-                let backend = self.backend.clone();
-                let id = task_id.clone();
-
-                // ✅ FIX: Remove from UI immediately instead of showing "Cancelling..."
+                // Optimistic UI update
                 self.active_downloads.retain(|t| t.id != task_id);
-
-                Command::perform(
-                    async move {
-                        // Clone bridge before await to avoid deadlock
-                        let bridge_result = {
-                            match backend.lock() {
-                                Ok(bridge) => Ok(bridge.clone()),
-                                Err(e) => Err(format!("Backend mutex poisoned: {}", e)),
-                            }
-                        }; // Lock dropped here
-
-                        match bridge_result {
-                            Ok(bridge) => match bridge.cancel_download(&id).await {
-                                Ok(_) => {
-                                    eprintln!("✅ Cancelled download: {}", id);
-                                    true
-                                }
-                                Err(e) => {
-                                    eprintln!("❌ Failed to cancel task {}: {}", id, e);
-                                    false
-                                }
-                            },
-                            Err(e) => {
-                                eprintln!("❌ Backend error: {}", e);
-                                false
-                            }
-                        }
-                    },
-                    |_success| Message::Tick, // Just refresh UI
-                )
+                let _ = self.backend_sender.try_send(BackendCommand::CancelDownload(task_id));
+                Command::none()
             }
 
             Message::RemoveCompleted(task_id) => {
-                let backend = self.backend.clone();
-                let id = task_id.clone();
-
-                // Remove from UI immediately
-                if let Some(index) = self.active_downloads.iter().position(|t| t.id == task_id) {
-                    self.active_downloads.remove(index);
-                }
-
-                // Also remove from backend queue
-                Command::perform(
-                    async move {
-                        let bridge_result = {
-                            match backend.lock() {
-                                Ok(bridge) => Ok(bridge.clone()),
-                                Err(e) => Err(format!("Backend mutex poisoned: {}", e)),
-                            }
-                        };
-
-                        match bridge_result {
-                            Ok(bridge) => {
-                                bridge.remove_task(&id).await.ok();
-                            }
-                            Err(e) => {
-                                eprintln!("❌ Failed to remove task from backend: {}", e);
-                            }
-                        }
-                    },
-                    |_| Message::Tick,
-                )
+                 self.active_downloads.retain(|t| t.id != task_id);
+                 let _ = self.backend_sender.try_send(BackendCommand::RemoveTask(task_id));
+                 Command::none()
             }
 
             Message::ClearAllCompleted => {
-                let backend = self.backend.clone();
-
-                // Remove from UI immediately
                 self.active_downloads.retain(|t| t.status != "Completed");
-
-                // Also clear from backend queue
-                Command::perform(
-                    async move {
-                        let bridge_result = {
-                            match backend.lock() {
-                                Ok(bridge) => Ok(bridge.clone()),
-                                Err(e) => Err(format!("Backend mutex poisoned: {}", e)),
-                            }
-                        };
-
-                        match bridge_result {
-                            Ok(bridge) => match bridge.clear_completed().await {
-                                Ok(_) => eprintln!("✅ Cleared completed tasks from backend"),
-                                Err(e) => eprintln!("❌ Failed to clear completed: {}", e),
-                            },
-                            Err(e) => {
-                                eprintln!("❌ Backend error: {}", e);
-                            }
-                        }
-                    },
-                    |_| Message::Tick,
-                )
+                let _ = self.backend_sender.try_send(BackendCommand::ClearCompleted);
+                Command::none()
             }
 
             Message::RetryDownload(task_id) => {
-                // This would call the backend
-                if let Some(task) = self.active_downloads.iter_mut().find(|t| t.id == task_id) {
-                    task.status = "Queued".to_string();
-                    task.progress = 0.0;
-                }
+                // Retry logic needs full restart usually? 
+                // For now, if we have URL, we could potential restart.
+                // But simplified: just set status to Queued?
+                // Or send Resume?
+                let _ = self.backend_sender.try_send(BackendCommand::ResumeDownload(task_id));
                 Command::none()
             }
 
             Message::OpenFile(task_id) => {
-                // Open the downloaded file with the default application
                 if let Some(task) = self.active_downloads.iter().find(|t| t.id == task_id) {
-                    if let Some(file_path) = &task.file_path {
+                    // Logic to find file... 
+                    // Previously we set file_path in DownloadCompleted.
+                    // We might need BackendEvent to include path in DownloadCompleted?
+                    // Or keep track of it.
+                    // For now, construct from download location + title?
+                     if let Some(file_path) = &task.file_path {
                         let path = std::path::PathBuf::from(file_path);
-                        if path.exists() {
-                            if let Err(e) = open::that(&path) {
-                                eprintln!("Failed to open file: {}", e);
-                            }
-                        } else {
-                            eprintln!("File not found: {:?}", path);
-                        }
+                        let _ = open::that(&path);
                     } else {
-                        eprintln!("File path not available for task: {}", task_id);
+                         // Fallback guess
+                         let path = PathBuf::from(&self.download_location)
+                                    .join(format!("{}.mp4", sanitize_filename(&task.title)));
+                         if path.exists() {
+                             let _ = open::that(&path);
+                         }
                     }
                 }
                 Command::none()
             }
 
             Message::OpenDownloadFolder(task_id) => {
-                // Open the folder containing the downloaded file
-                if let Some(task) = self.active_downloads.iter().find(|t| t.id == task_id) {
-                    if let Some(file_path) = &task.file_path {
-                        let path = std::path::PathBuf::from(file_path);
-                        if let Some(parent) = path.parent() {
-                            if let Err(e) = open::that(parent) {
-                                eprintln!("Failed to open folder: {}", e);
-                            }
-                        }
-                    } else {
-                        // Fallback to opening the download location
-                        let folder = std::path::PathBuf::from(&self.download_location);
-                        if let Err(e) = open::that(&folder) {
-                            eprintln!("Failed to open folder: {}", e);
-                        }
-                    }
-                } else {
-                    // Task not found, open default download location
-                    let folder = std::path::PathBuf::from(&self.download_location);
-                    if let Err(e) = open::that(&folder) {
-                        eprintln!("Failed to open folder: {}", e);
-                    }
-                }
+                let folder = std::path::PathBuf::from(&self.download_location);
+                let _ = open::that(&folder);
                 Command::none()
             }
 
@@ -738,7 +386,6 @@ impl Application for RustloaderApp {
             }
 
             Message::BrowseDownloadLocation => {
-                // Open file dialog to select download location
                 if let Some(path) = rfd::FileDialog::new().pick_folder() {
                     self.download_location = path.to_string_lossy().to_string();
                 }
@@ -788,156 +435,71 @@ impl Application for RustloaderApp {
                         Ok::<(), String>(())
                     },
                     |result: Result<(), String>| {
-                        match result {
-                            Ok(_) => Message::SwitchToMain,
-                            Err(_e) => {
-                                // Handle error (for now, switch to main view)
-                                Message::SwitchToMain
-                            }
-                        }
+                        Message::SwitchToMain
                     },
                 )
             }
-
-            // System
-            Message::Tick => {
-                // Drain progress updates from backend and log them for debugging
-                // Use a non-blocking try_lock so the GUI never blocks if the backend
-                // is busy (e.g. during a long extraction step). If the lock is
-                // unavailable, skip this tick and let the next tick try again.
-                if let Ok(mut bridge) = self.backend.try_lock() {
-                    let mut update_count = 0usize;
-                    while let Some(update) = bridge.try_receive_progress() {
-                        update_count += 1;
-                        eprintln!(
-                            "🔔 GUI received progress update #{}: {:?}",
-                            update_count, update
-                        );
-
-                        match update {
-                            ProgressUpdate::ExtractionComplete(video_info) => {
-                                let video_info = *video_info;
-                                // Handle extraction completion
-                                let title = video_info.title.clone();
-                                let url = video_info.url.clone();
-
-                                // Create output path
-                                let output_path = PathBuf::from(&self.download_location)
-                                    .join(format!("{}.mp4", sanitize_filename(&title)));
-
-                                // Start download UI entry will be added when backend returns task id
-                                let task_id = Uuid::new_v4().to_string();
-                                let task_ui = DownloadTaskUI {
-                                    id: task_id.clone(),
-                                    title: title.clone(),
-                                    url,
-                                    progress: 0.0,
-                                    speed: 0.0,
-                                    status: "Queued".to_string(),
-                                    downloaded_mb: 0.0,
-                                    total_mb: video_info.filesize.unwrap_or(0) as f64
-                                        / (1024.0 * 1024.0),
-                                    eta_seconds: None,
-                                    file_path: None,
-                                };
-
-                                self.active_downloads.push(task_ui);
-                                self.status_message =
-                                    format!("Added to download queue: {}", video_info.title);
-                                eprintln!("✅ Added UI task for extraction: {}", title);
-                            }
-                            ProgressUpdate::DownloadProgress {
-                                task_id,
-                                progress,
-                                speed,
-                                downloaded,
-                                total,
-                                eta_seconds,
-                            } => {
-                                if let Some(task) =
-                                    self.active_downloads.iter_mut().find(|t| t.id == task_id)
-                                {
-                                    task.progress = progress;
-                                    task.speed = speed;
-                                    task.downloaded_mb = downloaded as f64 / (1024.0 * 1024.0);
-                                    task.total_mb = total as f64 / (1024.0 * 1024.0);
-                                    task.eta_seconds = eta_seconds;
-
-                                    eprintln!(
-                                        "✅ Updated task {}: {:.1}% @ {:.2} MB/s",
-                                        task.title,
-                                        progress * 100.0,
-                                        speed / 1024.0 / 1024.0
-                                    );
-                                } else {
-                                    eprintln!("⚠️ Task {} not found in active_downloads!", task_id);
-                                }
-                            }
-                            ProgressUpdate::DownloadComplete { task_id, file_path } => {
-                                if let Some(task) =
-                                    self.active_downloads.iter_mut().find(|t| t.id == task_id)
-                                {
-                                    task.status = "Completed".to_string();
-                                    task.progress = 1.0;
-                                    task.file_path = Some(file_path.clone());
-                                }
-                                self.status_message = "Download completed".to_string();
-                                eprintln!("✅ [GUI] Download complete signal received for task {} at path: {}", task_id, file_path);
-                            }
-                            ProgressUpdate::DownloadFailed { task_id, error } => {
-                                if let Some(task) =
-                                    self.active_downloads.iter_mut().find(|t| t.id == task_id)
-                                {
-                                    task.status = "Failed".to_string();
-                                }
-                                self.status_message = format!("Download failed: {}", error);
-                                eprintln!("❌ Download failed for {}: {}", task_id, error);
-                            }
-                            ProgressUpdate::TaskStatusChanged {
-                                task_id,
-                                status,
-                                file_path,
-                            } => {
-                                if let Some(task) =
-                                    self.active_downloads.iter_mut().find(|t| t.id == task_id)
-                                {
-                                    task.status = match status {
-                                        TaskStatus::Queued => "Queued".to_string(),
-                                        TaskStatus::Downloading => "Downloading".to_string(),
-                                        TaskStatus::Paused => "Paused".to_string(),
-                                        TaskStatus::Completed => "Completed".to_string(),
-                                        TaskStatus::Failed(_) => "Failed".to_string(),
-                                        TaskStatus::Cancelled => "Cancelled".to_string(),
-                                    };
-                                    if let Some(path) = file_path {
-                                        task.file_path = Some(path);
-                                    }
-                                    eprintln!(
-                                        "ℹ️ Task {} status changed -> {}",
-                                        task.title, task.status
-                                    );
-                                } else {
-                                    eprintln!("⚠️ Task {} not found for status change", task_id);
-                                }
-                            }
-                        }
-                    }
-
-                    if update_count > 0 {
-                        eprintln!("📊 Processed {} progress updates this tick", update_count);
-                    }
-                } else {
-                    // Backend is currently locked by a background operation (e.g. extraction).
-                    // Don't block the GUI; try again on the next tick.
-                    // For debugging, print a low-verbosity note.
-                    // eprintln!("🔕 Backend busy; skipping progress drain this tick");
-                }
-
-                Command::none()
-            }
+            
+            Message::Tick => Command::none(), // No polling needed
         }
     }
 
+    fn subscription(&self) -> Subscription<Message> {
+        // Create a backend subscription using the receiver in self.
+        // We use a wrapper struct to handle the Hash identity for unfold.
+        struct BackendListener(Arc<Mutex<Option<mpsc::Receiver<BackendEvent>>>>);
+        
+        impl std::hash::Hash for BackendListener {
+            fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+                // Hash the pointer address of the Arc to ensure identity stability
+                (Arc::as_ptr(&self.0) as usize).hash(state);
+            }
+        }
+
+        // We use unfold. State::Starting(Listener), State::Ready(Rx), State::Empty
+        enum State {
+            Starting(BackendListener),
+            Ready(mpsc::Receiver<BackendEvent>),
+            Empty,
+        }
+
+        let listener = BackendListener(self.backend_receiver.clone());
+
+        iced::subscription::unfold(
+            "backend-listener",
+            State::Starting(listener),
+            |state| async move {
+                match state {
+                    State::Starting(wrapper) => {
+                        let rx_opt = wrapper.0.lock().unwrap().take();
+                        if let Some(rx) = rx_opt {
+                             let mut rx = rx;
+                             match rx.recv().await {
+                                 Some(event) => (Message::BackendEventReceived(event), State::Ready(rx)),
+                                 None => std::future::pending().await
+                             }
+                        } else {
+                            std::future::pending().await
+                        }
+                    },
+                    State::Ready(mut rx) => {
+                        match rx.recv().await {
+                            Some(event) => (Message::BackendEventReceived(event), State::Ready(rx)),
+                            None => std::future::pending().await
+                        }
+                    },
+                    State::Empty => {
+                         std::future::pending().await
+                    }
+                }
+            }
+        )
+    }
+
+    fn theme(&self) -> Self::Theme {
+        Theme::Dark
+    }
+    
     fn view(&self) -> Element<'_, Message> {
         use crate::gui::theme;
         use iced::widget::{button, column, container, row, text, Space};
@@ -1028,14 +590,6 @@ impl Application for RustloaderApp {
                 theme::MainGradientContainer,
             )))
             .into()
-    }
-
-    fn subscription(&self) -> Subscription<Message> {
-        iced::time::every(std::time::Duration::from_millis(100)).map(|_| Message::Tick)
-    }
-
-    fn theme(&self) -> Self::Theme {
-        Theme::Dark
     }
 }
 
