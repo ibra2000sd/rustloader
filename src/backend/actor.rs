@@ -1,11 +1,14 @@
 use super::messages::{BackendCommand, BackendEvent};
 use crate::downloader::{DownloadConfig, DownloadEngine};
-use crate::extractor::{VideoExtractor, VideoInfo, Format};
+use crate::extractor::{
+    native::youtube::NativeYoutubeExtractor, Extractor, Format, HybridExtractor, VideoInfo,
+    YtDlpExtractor,
+};
 use crate::gui::DownloadProgressData;
-use crate::queue::{DownloadTask, QueueManager, TaskStatus};
+use crate::queue::{DownloadTask, QueueManager, TaskStatus, EventLog};
 use crate::utils::config::AppSettings;
 use crate::utils::{
-    FileOrganizer, MetadataManager, OrganizationSettings,
+    FileOrganizer, MetadataManager, OrganizationSettings, get_app_support_dir,
 };
 use anyhow::Result;
 use chrono::Utc;
@@ -20,10 +23,8 @@ pub struct BackendActor {
     sender: mpsc::Sender<BackendEvent>,
     
     // Components
-    extractor: Arc<VideoExtractor>,
+    extractor: Arc<HybridExtractor>,
     queue_manager: Arc<QueueManager>,
-    file_organizer: Arc<FileOrganizer>,
-    metadata_manager: Arc<MetadataManager>,
 }
 
 impl BackendActor {
@@ -32,8 +33,16 @@ impl BackendActor {
         receiver: mpsc::Receiver<BackendCommand>,
         sender: mpsc::Sender<BackendEvent>,
     ) -> Result<Self> {
-        // Initialize components (similar to BackendBridge::new)
-        let extractor = Arc::new(VideoExtractor::new()?);
+        // Initialize components
+        // 1. Initialize Extractors
+        let ytdlp = Arc::new(YtDlpExtractor::new()?);
+        let native_youtube = Arc::new(NativeYoutubeExtractor::new());
+
+        // 2. Build Hybrid Registry
+        let extractors: Vec<Arc<dyn Extractor>> = vec![native_youtube];
+        let fallback = ytdlp;
+        let hybrid_extractor = Arc::new(HybridExtractor::new(extractors, fallback));
+        let extractor = hybrid_extractor;
 
         let download_config = DownloadConfig {
             segments: settings.segments,
@@ -56,11 +65,17 @@ impl BackendActor {
         let file_organizer = Arc::new(file_organizer);
         let metadata_manager = Arc::new(metadata_manager);
 
+        // 3. Initialize Event Log
+        let app_support_dir = get_app_support_dir();
+        let event_log = Arc::new(EventLog::new(&app_support_dir).await
+            .map_err(|e| anyhow::anyhow!("Failed to initialize event log: {}", e))?);
+
         let queue_manager = Arc::new(QueueManager::new(
             settings.max_concurrent,
             engine,
             (*file_organizer).clone(),
             (*metadata_manager).clone(),
+            event_log,
         ));
 
         Ok(Self {
@@ -68,13 +83,16 @@ impl BackendActor {
             sender,
             extractor,
             queue_manager,
-            file_organizer,
-            metadata_manager,
         })
     }
 
     pub async fn run(mut self) {
         info!("BackendActor started");
+
+        // Rehydrate persistence state
+        if let Err(e) = self.queue_manager.rehydrate().await {
+            tracing::error!("Failed to rehydrate queue state: {}", e);
+        }
 
         // Spawn Queue Processor (independent loop)
         let qm_clone = self.queue_manager.clone();
@@ -114,6 +132,9 @@ impl BackendActor {
                 }
                  BackendCommand::ClearCompleted => {
                     let _ = self.queue_manager.clear_completed().await;
+                }
+                BackendCommand::ResumeAll => {
+                    let _ = self.queue_manager.resume_all().await;
                 }
                 BackendCommand::Shutdown => {
                     info!("BackendActor shutting down");

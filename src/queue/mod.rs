@@ -1,6 +1,5 @@
-//! Queue management module
-
 pub mod manager;
+pub mod events;
 
-// Re-export for convenience
-pub use manager::{DownloadTask, QueueManager, TaskStatus};
+pub use manager::{QueueManager, TaskStatus, DownloadTask};
+pub use events::{QueueEvent, EventLog};

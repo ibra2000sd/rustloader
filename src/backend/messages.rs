@@ -18,6 +18,7 @@ pub enum BackendCommand {
     CancelDownload(String),
     RemoveTask(String),
     ClearCompleted,
+    ResumeAll,
     // System
     Shutdown,
 }

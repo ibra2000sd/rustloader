@@ -9,7 +9,7 @@ use clap::Parser;
 use iced::Application;
 use std::process::Command;
 use rustloader::downloader;
-use rustloader::extractor;
+use rustloader::extractor::{self, Extractor};
 use rustloader::gui;
 use rustloader::utils;
 
@@ -90,7 +90,7 @@ async fn test_download_cli(url: String) {
     println!("Testing download: {}", url);
 
     // Initialize extractor
-    let extractor = match extractor::VideoExtractor::new() {
+    let extractor = match extractor::YtDlpExtractor::new() {
         Ok(e) => e,
         Err(e) => {
             eprintln!("Failed to initialize extractor: {}", e);

@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Video information structure
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct VideoInfo {
     pub id: String,
     pub title: String,
@@ -27,7 +27,7 @@ pub struct VideoInfo {
 }
 
 /// Video format information
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Format {
     pub format_id: String,
     pub ext: String,

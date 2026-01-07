@@ -146,6 +146,12 @@ pub fn main_view(
                 .size(24)
                 .style(iced::theme::Text::Color(theme::GRAY_800)),
             Space::with_width(Length::Fill),
+            button(text("Resume All").size(14))
+                .on_press(Message::ResumeAll)
+                .padding([10, 16])
+                .style(iced::theme::Button::Custom(Box::new(
+                    theme::PrimaryButton
+                ))),
             button(text("Clear Completed").size(14))
                 .on_press(Message::ClearAllCompleted)
                 .padding([10, 16])
@@ -153,6 +159,7 @@ pub fn main_view(
                     theme::SecondaryButton
                 ))),
         ]
+        .spacing(12)
         .align_items(Alignment::Center)]
         .spacing(24);
 

@@ -503,3 +503,32 @@ impl iced::widget::progress_bar::StyleSheet for ProgressBarCompleted {
         }
     }
 }
+
+pub struct ProgressBarDimmed;
+
+impl iced::widget::progress_bar::StyleSheet for ProgressBarDimmed {
+    type Style = Theme;
+
+    fn appearance(&self, _style: &Self::Style) -> iced::widget::progress_bar::Appearance {
+        iced::widget::progress_bar::Appearance {
+            background: Background::Color(GRAY_200),
+            bar: Background::Color(GRAY_400),
+            border_radius: 4.0.into(),
+        }
+    }
+}
+
+/// v0.6.0: Style for stalled downloads (yellow/warning)
+pub struct ProgressBarStalled;
+
+impl iced::widget::progress_bar::StyleSheet for ProgressBarStalled {
+    type Style = Theme;
+
+    fn appearance(&self, _style: &Self::Style) -> iced::widget::progress_bar::Appearance {
+        iced::widget::progress_bar::Appearance {
+            background: Background::Color(GRAY_200),
+            bar: Background::Color(WARNING), // Yellow/orange for stalled
+            border_radius: 4.0.into(),
+        }
+    }
+}

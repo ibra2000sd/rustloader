@@ -5,20 +5,30 @@ use iced::{Color, Element, Length};
 use std::time::Duration;
 
 /// Create a progress bar with percentage and ETA
+/// v0.6.0: Added is_stalled parameter for stall detection
 pub fn progress_bar(
     progress: f32,
     eta_seconds: Option<u64>,
+    is_active: bool,
+    is_stalled: bool,
 ) -> Element<'static, crate::gui::app::Message> {
     let style = if progress >= 1.0 {
         iced::theme::ProgressBar::Custom(Box::new(crate::gui::theme::ProgressBarCompleted))
-    } else {
+    } else if is_stalled {
+        // v0.6.0: Stalled downloads get warning color
+        iced::theme::ProgressBar::Custom(Box::new(crate::gui::theme::ProgressBarStalled))
+    } else if is_active {
         iced::theme::ProgressBar::Custom(Box::new(crate::gui::theme::ProgressBarStyle))
+    } else {
+        iced::theme::ProgressBar::Custom(Box::new(crate::gui::theme::ProgressBarDimmed))
     };
 
     let bar = iced_progress_bar(0.0..=1.0, progress).style(style);
 
     let eta_text = if progress >= 1.0 {
         "Completed".to_string()
+    } else if is_stalled {
+        "⚠ Stalled - No progress".to_string()
     } else if let Some(seconds) = eta_seconds {
         if seconds == 0 {
             "Almost done...".to_string()
@@ -26,8 +36,10 @@ pub fn progress_bar(
             let duration = Duration::from_secs(seconds);
             format!("{} remaining", format_duration(duration))
         }
-    } else {
+    } else if is_active {
         "Calculating...".to_string()
+    } else {
+        "Paused".to_string()
     };
 
     column![

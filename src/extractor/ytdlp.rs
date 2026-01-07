@@ -4,8 +4,10 @@
 //! It supports both bundled yt-dlp (in macOS .app bundles) and system-installed yt-dlp.
 
 use crate::extractor::models::{VideoInfo, Format};
+use crate::extractor::traits::Extractor;
 use crate::utils::error::RustloaderError;
 use anyhow::Result;
+use async_trait::async_trait;
 use serde_json;
 use std::path::PathBuf;
 use std::process::Command;
@@ -13,11 +15,11 @@ use tokio::process::Command as AsyncCommand;
 use tracing::{debug, error, info, warn};
 
 /// Main video extractor using yt-dlp
-pub struct VideoExtractor {
+pub struct YtDlpExtractor {
     ytdlp_path: PathBuf,
 }
 
-impl VideoExtractor {
+impl YtDlpExtractor {
     /// Initialize extractor and verify yt-dlp availability
     /// 
     /// Search order:
@@ -41,7 +43,7 @@ impl VideoExtractor {
 
     /// Extract video information without downloading
     /// Uses: yt-dlp --dump-json --no-download
-    pub async fn extract_info(&self, url: &str) -> Result<VideoInfo> {
+    pub async fn extract_info_impl(&self, url: &str) -> Result<VideoInfo> {
         debug!("Extracting video info for URL: {}", url);
 
         let output = AsyncCommand::new(&self.ytdlp_path)
@@ -66,7 +68,7 @@ impl VideoExtractor {
 
     /// Extract playlist information
     /// Uses: yt-dlp --flat-playlist --dump-json
-    pub async fn extract_playlist(&self, url: &str) -> Result<Vec<VideoInfo>> {
+    pub async fn extract_playlist_impl(&self, url: &str) -> Result<Vec<VideoInfo>> {
         debug!("Extracting playlist info for URL: {}", url);
 
         let output = AsyncCommand::new(&self.ytdlp_path)
@@ -105,8 +107,8 @@ impl VideoExtractor {
     }
 
     /// Get available formats for a video
-    pub async fn get_formats(&self, url: &str) -> Result<Vec<Format>> {
-        let video_info = self.extract_info(url).await?;
+    pub async fn get_formats_impl(&self, url: &str) -> Result<Vec<Format>> {
+        let video_info = self.extract_info_impl(url).await?;
         Ok(video_info.formats)
     }
 
@@ -137,7 +139,7 @@ impl VideoExtractor {
     }
 
     /// Get direct download URL for a video with specific format
-    pub async fn get_direct_url(&self, url: &str, format_id: &str) -> Result<String> {
+    pub async fn get_direct_url_impl(&self, url: &str, format_id: &str) -> Result<String> {
         debug!("Getting direct URL for format {} from {}", format_id, url);
 
         let output = AsyncCommand::new(&self.ytdlp_path)
@@ -159,15 +161,43 @@ impl VideoExtractor {
         Ok(url_str)
     }
     
-    /// Get the path to yt-dlp being used
     pub fn ytdlp_path(&self) -> &PathBuf {
         &self.ytdlp_path
     }
 }
 
-impl Default for VideoExtractor {
+#[async_trait]
+impl Extractor for YtDlpExtractor {
+    fn id(&self) -> &'static str {
+        "yt-dlp"
+    }
+
+    fn supports(&self, _url: &str) -> bool {
+        // yt-dlp supports almost everything, so we return true as a fallback
+        // The HybridExtractor will prioritize other extractors first
+        true
+    }
+
+    async fn extract_info(&self, url: &str) -> Result<VideoInfo> {
+        self.extract_info_impl(url).await
+    }
+
+    async fn extract_playlist(&self, url: &str) -> Result<Vec<VideoInfo>> {
+        self.extract_playlist_impl(url).await
+    }
+
+    async fn get_formats(&self, url: &str) -> Result<Vec<Format>> {
+        self.get_formats_impl(url).await
+    }
+
+    async fn get_direct_url(&self, url: &str, format_id: &str) -> Result<String> {
+        self.get_direct_url_impl(url, format_id).await
+    }
+}
+
+impl Default for YtDlpExtractor {
     fn default() -> Self {
-        Self::new().expect("Failed to initialize VideoExtractor")
+        Self::new().expect("Failed to initialize YtDlpExtractor")
     }
 }
 

@@ -1,24 +1,44 @@
 # 🚀 Rustloader - High-Performance Video Downloader
 
-[![Version](https://img.shields.io/badge/version-0.1.1--beta-blue.svg)](https://github.com/ibra2000sd/rustloader/releases)
+[![Version](https://img.shields.io/badge/version-0.6.x--dev-blue.svg)](https://github.com/ibra2000sd/rustloader/releases)
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
 [![Platform](https://img.shields.io/badge/platform-macOS-lightgrey.svg)](https://github.com/ibra2000sd/rustloader)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Tests](https://img.shields.io/badge/tests-passing-success.svg)](tests/)
 
 Rustloader is a cross-platform video downloader that combines the extraction capabilities of **yt-dlp** with a blazing-fast **Rust-based download engine** and a simple, practical GUI built with the **Iced framework**.
 
 ---
 
-## ✨ What's New in v0.1.1
+## 📊 Project Status
 
-This release focuses on stability and security improvements:
+| Milestone | Status | Description |
+|-----------|--------|-------------|
+| **v0.1.x** | ✅ Complete | Core download engine, GUI, yt-dlp integration |
+| **v0.2.x** | ✅ Complete | Actor model architecture with message passing |
+| **v0.3.x** | ✅ Complete | Event sourcing and session persistence |
+| **v0.4.x** | ✅ Complete | Queue manager with formal state machine |
+| **v0.5.x** | ✅ Complete | Concurrency hardening (atomic pre-registration, zombie defense) |
+| **v0.6.x** | ✅ Complete | UX reliability (stall detection, error classification, recovery hints) |
+| **v0.7.x** | 🟡 Partial | Enhanced error surfacing (core features done) |
+| **v0.8.x** | 🔴 Planned | Resume semantics and partial file recovery |
+| **v0.9.x** | 🔴 Planned | Windows & Linux support |
+| **v1.0.0** | 🔴 Planned | Production release with full test coverage |
 
-- 🔒 **Security**: Fixed path traversal vulnerability in filename sanitization
-- 🐛 **Bug Fixes**: Resolved 5 critical bugs including UI freezes and progress tracking issues
-- ⚡ **Stability**: Improved error handling with graceful fallbacks
-- 📚 **Documentation**: Added comprehensive release documentation
+See [ROADMAP.md](ROADMAP.md) for detailed feature breakdown and implementation status.
 
-See [CHANGELOG.md](CHANGELOG.md) for full details.
+---
+
+## ✨ What's New
+
+### Recent Improvements (v0.5.x - v0.6.x)
+
+- 🛡️ **Concurrency Hardening**: Atomic pre-registration eliminates race conditions when scheduling downloads
+- 🧟 **Zombie Defense**: Automatic detection and recovery of orphaned download tasks  
+- ⏱️ **Stall Detection**: Downloads stuck for 30+ seconds are flagged with recovery options
+- 💡 **Smart Error Recovery**: Errors are classified with user-friendly guidance
+- 🔄 **Task Reset**: One-click to cancel, remove, and re-add failed downloads
+- ✅ **Stress Testing**: 470+ lines of invariant verification tests
 
 ---
 
@@ -32,7 +52,9 @@ See [CHANGELOG.md](CHANGELOG.md) for full details.
 | **Queue Management** | Handle multiple downloads concurrently (up to 5) |
 | **Quality Organization** | Auto-organize files into High/Standard/Low quality folders |
 | **Simple GUI** | Clean, dark-themed interface focused on functionality |
-| **Download History** | SQLite-based persistence for tracking downloads |
+| **Download History** | Event-sourced persistence for tracking downloads |
+| **Stall Detection** | Automatic detection of stuck downloads |
+| **Error Classification** | Smart error categorization with recovery hints |
 
 ---
 
@@ -45,7 +67,7 @@ See [CHANGELOG.md](CHANGELOG.md) for full details.
 | **Disk Space** | ~100 MB for application |
 | **Dependencies** | yt-dlp (required) |
 
-> ⚠️ **Note**: Windows and Linux support is planned for v0.2.0
+> ⚠️ **Note**: Windows and Linux support is planned for v0.9.0
 
 ---
 
@@ -165,17 +187,22 @@ Downloads are automatically organized:
 │                     RUSTLOADER                          │
 │                                                         │
 │  ┌──────────────┐    ┌─────────────────────────┐       │
-│  │     GUI      │◄──►│     Core Logic          │       │
-│  │    (Iced)    │    │       Layer             │       │
+│  │   Iced GUI   │◄──►│    BackendActor         │       │
+│  │              │    │    (Message Loop)        │       │
 │  └──────────────┘    └─────────────────────────┘       │
 │                              │                          │
 │  ┌───────────────────────────┼──────────────────────┐  │
 │  ▼                           ▼                      ▼  │
 │  ┌─────────────┐    ┌────────────────┐    ┌───────┐   │
-│  │   yt-dlp    │    │    Download    │    │  DB   │   │
-│  │  Extractor  │    │     Engine     │    │SQLite │   │
-│  │  (Wrapper)  │    │  (Multi-thread)│    └───────┘   │
-│  └─────────────┘    └────────────────┘                 │
+│  │   yt-dlp    │    │    Download    │    │ Event │   │
+│  │  Extractor  │    │     Engine     │    │  Log  │   │
+│  │  (Wrapper)  │    │  (Multi-thread)│    │(JSONL)│   │
+│  └─────────────┘    └────────────────┘    └───────┘   │
+│                              │                          │
+│                     ┌────────────────┐                  │
+│                     │ QueueManager   │                  │
+│                     │ (FSM+Scheduler)│                  │
+│                     └────────────────┘                  │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -196,10 +223,34 @@ Rustloader achieves **5-10x faster download speeds** compared to vanilla yt-dlp:
 
 ---
 
+## 🧪 Testing
+
+Run the test suite:
+
+```bash
+# All tests
+cargo test
+
+# Stress tests only
+cargo test stress_test
+
+# With output
+cargo test -- --nocapture
+```
+
+Test coverage includes:
+- **Stress tests**: Random pause/resume operations, concurrency limits
+- **Invariant tests**: Zombie detection, idempotent resume
+- **Property tests**: 200+ random operation sequences
+- **Persistence tests**: Rehydration, corruption resilience
+
+---
+
 ## 📚 Documentation
 
 | Document | Description |
 |----------|-------------|
+| [ROADMAP.md](ROADMAP.md) | Detailed feature roadmap with status |
 | [CHANGELOG.md](CHANGELOG.md) | Version history and changes |
 | [RELEASE_NOTES.md](RELEASE_NOTES.md) | Current release information |
 | [KNOWN_ISSUES.md](KNOWN_ISSUES.md) | Known limitations and workarounds |
@@ -210,21 +261,10 @@ Rustloader achieves **5-10x faster download speeds** compared to vanilla yt-dlp:
 
 See [KNOWN_ISSUES.md](KNOWN_ISSUES.md) for current limitations.
 
-**Quick summary for v0.1.1:**
-- macOS only (Windows/Linux planned for v0.2.0)
+**Quick summary:**
+- macOS only (Windows/Linux planned for v0.9.0)
 - Some compiler warnings remain (no user impact)
 - Large binary size (~90 MB) due to GUI framework
-
----
-
-## 🛣️ Roadmap
-
-| Version | Features |
-|---------|----------|
-| **v0.1.2** | Automated tests, reduced warnings, performance benchmarks |
-| **v0.2.0** | Windows & Linux support |
-| **v0.3.0** | Browser extension integration |
-| **v1.0.0** | Full release with all features stable |
 
 ---
 

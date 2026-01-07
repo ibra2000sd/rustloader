@@ -8,6 +8,7 @@
 )]
 
 use crate::downloader::{DownloadEngine, DownloadProgress};
+use super::{QueueEvent, EventLog};
 use crate::extractor::{Format, VideoInfo};
 use crate::utils::error::RustloaderError;
 use crate::utils::{ContentType, FileOrganizer, MetadataManager, VideoMetadata};
@@ -29,6 +30,7 @@ pub struct QueueManager {
     engine: Arc<DownloadEngine>,
     file_organizer: Arc<FileOrganizer>,
     metadata_manager: Arc<MetadataManager>,
+    event_log: Arc<EventLog>,
 }
 
 /// Download task
@@ -72,6 +74,7 @@ impl QueueManager {
         engine: DownloadEngine,
         file_organizer: FileOrganizer,
         metadata_manager: MetadataManager,
+        event_log: Arc<EventLog>,
     ) -> Self {
         Self {
             queue: Arc::new(Mutex::new(VecDeque::new())),
@@ -80,7 +83,88 @@ impl QueueManager {
             engine: Arc::new(engine),
             file_organizer: Arc::new(file_organizer),
             metadata_manager: Arc::new(metadata_manager),
+            event_log,
         }
+    }
+
+    /// Rehydrate queue state from event log
+    pub async fn rehydrate(&self) -> Result<()> {
+        info!("Rehydrating queue state from event log...");
+        let events = self.event_log.read_events().await?;
+        
+        // Reconstruct state
+        // We use a map to track the latest state of each task
+        let mut tasks: HashMap<String, DownloadTask> = HashMap::new();
+
+        for event in events {
+            match event {
+                QueueEvent::TaskAdded { task_id, video_info, format, output_path, timestamp } => {
+                    // Create task with fully restored format
+                    tasks.insert(task_id.clone(), DownloadTask {
+                        id: task_id,
+                        video_info,
+                        output_path,
+                        format, // Use the persisted format
+                        status: TaskStatus::Queued,
+                        progress: None,
+                        added_at: timestamp,
+                    });
+                }
+                QueueEvent::TaskStarted { task_id, .. } => {
+                     // If it was started, it might have been interrupted.
+                     // On restart, we should treat it as 'Queued' to retry, or 'Paused' to let user decide?
+                     // Let's set to Paused so we don't auto-blast downloads on startup.
+                     if let Some(task) = tasks.get_mut(&task_id) {
+                         task.status = TaskStatus::Paused;
+                     }
+                }
+                QueueEvent::TaskPaused { task_id, .. } => {
+                    if let Some(task) = tasks.get_mut(&task_id) {
+                        task.status = TaskStatus::Paused;
+                    }
+                }
+                QueueEvent::TaskResumed { task_id, .. } => {
+                    if let Some(task) = tasks.get_mut(&task_id) {
+                        task.status = TaskStatus::Paused; // See TaskStarted logic
+                    }
+                }
+                QueueEvent::TaskCompleted { task_id, output_path, .. } => {
+                    if let Some(task) = tasks.get_mut(&task_id) {
+                        task.status = TaskStatus::Completed;
+                        task.output_path = output_path;
+                    }
+                }
+                QueueEvent::TaskFailed { task_id, error, .. } => {
+                    if let Some(task) = tasks.get_mut(&task_id) {
+                        task.status = TaskStatus::Failed(error);
+                    }
+                }
+                QueueEvent::TaskRemoved { task_id, .. } => {
+                    tasks.remove(&task_id);
+                }
+            }
+        }
+
+        // Populate the live queue
+        let mut queue = self.queue.lock().await;
+        // Clear existing (though mostly empty on startup)
+        queue.clear();
+
+        // Sort by added_at to maintain order? 
+        // HashMap iteration is arbitrary.
+        let mut sorted_tasks: Vec<DownloadTask> = tasks.into_values().collect();
+        sorted_tasks.sort_by_key(|t| t.added_at);
+
+        for task in sorted_tasks {
+            // Only add tasks that are NOT completed/active?
+            // Actually, we want to show completed tasks too if they persist in UI.
+            // But if they are completed, they might just clutter.
+            // Let's load everything for now, but `QueueManager` usually processes Queued tasks.
+            queue.push_back(task);
+        }
+
+        info!("Rehydration complete. Loaded {} tasks.", queue.len());
+        Ok(())
     }
 
     /// Add task to queue
@@ -88,6 +172,11 @@ impl QueueManager {
         let task_id = task.id.clone();
 
         debug!("📥 [QUEUE] add_task called for: {}", task_id);
+
+        // Capture fields for logging
+        let log_video_info = task.video_info.clone();
+        let log_format = task.format.clone();
+        let log_output_path = task.output_path.clone();
 
         // Add to queue
         {
@@ -106,6 +195,21 @@ impl QueueManager {
         // We must let the persistent start() loop (running on the main app runtime) pick it up.
 
         debug!("✅ [QUEUE] add_task completed for: {}", task_id);
+
+        debug!("✅ [QUEUE] add_task completed for: {}", task_id);
+
+        debug!("✅ [QUEUE] add_task completed for: {}", task_id);
+
+        // LOG EVENT
+        if let Err(e) = self.event_log.log(QueueEvent::TaskAdded {
+            task_id: task_id.clone(),
+            video_info: log_video_info,
+            format: log_format,
+            output_path: log_output_path,
+            timestamp: Utc::now(),
+        }).await {
+            error!("Failed to log TaskAdded event: {}", e);
+        }
 
         Ok(task_id)
     }
@@ -136,53 +240,45 @@ impl QueueManager {
 
     /// Pause specific task
     pub async fn pause_task(&self, task_id: &str) -> Result<()> {
-        // Check if task is in active downloads
-        let mut active = self.active_downloads.lock().await;
-
-        if let Some(handle) = active.remove(task_id) {
-            // Send cancel signal
-            if let Err(e) = handle.cancel_tx.send(()).await {
-                warn!("Failed to send pause signal to task {}: {}", task_id, e);
-                return Err(RustloaderError::OperationFailed(format!(
-                    "Failed to pause task: {}",
-                    e
-                ))
-                .into());
-            }
-
-            // Abort the download task
-            handle.join_handle.abort();
-            handle.progress_handle.abort();
-
-            // Update task status to Paused
-            self.update_task_status(task_id, TaskStatus::Paused).await?;
-
-            // ✅ FIX: Move task to queue so resume can find it
-            let task = {
-                let queue = self.queue.lock().await;
-                queue.iter().find(|t| t.id == task_id).cloned()
-            };
-
-            if task.is_none() {
-                // Task not in queue, need to fetch it from database
-                warn!(
-                    "⚠️  [PAUSE] Task {} not found in queue, fetching from DB",
-                    task_id
-                );
-            }
-
-            info!("Paused task {} and moved to queue", task_id);
-            return Ok(());
-        }
-
-        // Check if task is in queue
+        // LOCKING HIERARCHY: queue (Level 2) -> active (Level 1)
+        // We need to update status in queue first (or at least hold the lock),
+        // then remove from active.
+        
         let mut queue = self.queue.lock().await;
-        for task in queue.iter_mut() {
-            if task.id == task_id {
-                task.status = TaskStatus::Paused;
-                info!("Paused queued task {}", task_id);
-                return Ok(());
+
+        // 1. Find and update status in Master Store
+        let task_opt = queue.iter_mut().find(|t| t.id == task_id);
+        
+        if let Some(task) = task_opt {
+            let previous_status = task.status.clone();
+            task.status = TaskStatus::Paused;
+            info!("Paused task {} (Status: {:?} -> Paused)", task_id, previous_status);
+            
+            // LOG EVENT
+            let _ = self.event_log.log(QueueEvent::TaskPaused { 
+                task_id: task_id.to_string(), 
+                timestamp: Utc::now() 
+            }).await;
+            
+            // 2. If it was Downloading, we must cancel the active handle
+            if previous_status == TaskStatus::Downloading {
+               // We must drop queue lock before acquiring active lock?
+               // The Hierarchy Rule says: Lock queue THEN active.
+               // So we can hold queue lock while acquiring active.
+               
+               let mut active = self.active_downloads.lock().await;
+               if let Some(handle) = active.remove(task_id) {
+                   // Send cancel signal
+                    if let Err(e) = handle.cancel_tx.send(()).await {
+                        warn!("Failed to send pause signal to task {}: {}", task_id, e);
+                    }
+                    // Abort
+                    handle.join_handle.abort();
+                    handle.progress_handle.abort();
+               }
             }
+            
+            return Ok(());
         }
 
         Err(RustloaderError::TaskNotFound(task_id.to_string()).into())
@@ -192,104 +288,85 @@ impl QueueManager {
     pub async fn resume_task(&self, task_id: &str) -> Result<()> {
         debug!("🔄 [RESUME] Attempting to resume task: {}", task_id);
 
-        // Check if task is in queue and paused
         let mut queue = self.queue.lock().await;
-        let mut found = false;
-
-        for task in queue.iter_mut() {
-            if task.id == task_id {
-                if task.status == TaskStatus::Paused {
-                    task.status = TaskStatus::Queued;
-                    found = true;
-                                info!("✅ [RESUME] Changed task status from Paused to Queued");
-                    info!("Resumed task {}", task_id);
-                    break;
-                } else {
-                    warn!(
-                        "⚠️  [RESUME] Task found but not paused, current status: {:?}",
-                        task.status
-                    );
-                    return Err(RustloaderError::OperationFailed(format!(
-                        "Task {} is not paused (status: {:?})",
-                        task_id, task.status
-                    ))
-                    .into());
-                }
-            }
+        
+        if let Some(task) = queue.iter_mut().find(|t| t.id == task_id) {
+             // Resume logic: Just set to Queued
+             if task.status == TaskStatus::Paused || task.status == TaskStatus::Failed("".to_string()) || matches!(task.status, TaskStatus::Failed(_)) {
+                 task.status = TaskStatus::Queued;
+                 info!("✅ [RESUME] Task {} set to Queued", task_id);
+                 
+                 // LOG EVENT
+                 let _ = self.event_log.log(QueueEvent::TaskResumed { 
+                     task_id: task_id.to_string(), 
+                     timestamp: Utc::now() 
+                 }).await;
+                 
+                 // Drop lock before triggering process_queue (cleaner, though not strictly required if process_queue handles its own locks correctly)
+             } else {
+                 return Err(RustloaderError::OperationFailed(format!(
+                     "Task {} is not in a resumable state (status: {:?})",
+                     task_id, task.status
+                 )).into());
+             }
+        } else {
+            return Err(RustloaderError::TaskNotFound(task_id.to_string()).into());
         }
-
-        drop(queue); // Release lock before potential re-processing
-
-        if found {
-            // Trigger queue processing to restart the download
-            debug!("🚀 [RESUME] Triggering queue processing to restart download");
-            // The periodic process_queue will pick this up
-            return Ok(());
-        }
-
-        warn!("❌ [RESUME] Task {} not found in queue", task_id);
-        // Task not found or not paused
-        Err(RustloaderError::TaskNotFound(task_id.to_string()).into())
+        
+        drop(queue);
+        
+        // Trigger scheduler to see if it can pick it up immediately
+        self.process_queue().await;
+        
+        Ok(())
     }
 
     /// Cancel task
     pub async fn cancel_task(&self, task_id: &str) -> Result<()> {
-        // Check if task is in active downloads
-        let mut active = self.active_downloads.lock().await;
-
-        if let Some(handle) = active.remove(task_id) {
-            // Send cancel signal
-            if let Err(e) = handle.cancel_tx.send(()).await {
-                warn!("Failed to send cancel signal to task {}: {}", task_id, e);
-            }
-
-            // Abort the task
-            handle.join_handle.abort();
-            // Also abort the progress receiver task so it doesn't keep running
-            handle.progress_handle.abort();
-
-            // Update task status
-            self.update_task_status(task_id, TaskStatus::Cancelled)
-                .await?;
-
-            info!("Cancelled task {}", task_id);
-            return Ok(());
-        }
-
-        // Check if task is in queue
+        // LOCKING HIERARCHY: queue (Level 2) -> active (Level 1)
         let mut queue = self.queue.lock().await;
-        for i in 0..queue.len() {
-            if queue[i].id == task_id {
-                queue[i].status = TaskStatus::Cancelled;
-                info!("Cancelled queued task {}", task_id);
-                return Ok(());
-            }
+
+        // 1. Update Status in Queue
+        let task_opt = queue.iter_mut().find(|t| t.id == task_id);
+    
+        if let Some(task) = task_opt {
+             let was_downloading = task.status == TaskStatus::Downloading;
+             task.status = TaskStatus::Cancelled;
+             
+             // LOG EVENT
+             self.log_cancellation(task_id).await;
+             
+             // 2. If active, cancel engine
+             if was_downloading {
+                 let mut active = self.active_downloads.lock().await;
+                 if let Some(handle) = active.remove(task_id) {
+                    if let Err(e) = handle.cancel_tx.send(()).await {
+                        warn!("Failed to send cancel signal to task {}: {}", task_id, e);
+                    }
+                    handle.join_handle.abort();
+                    handle.progress_handle.abort();
+                 }
+             }
+             
+             info!("Cancelled task {}", task_id);
+             return Ok(());
         }
 
         Err(RustloaderError::TaskNotFound(task_id.to_string()).into())
     }
 
+    /// Log cancellation (Helper called by cancel_task)
+    async fn log_cancellation(&self, task_id: &str) {
+        let _ = self.event_log.log(QueueEvent::TaskRemoved { 
+            task_id: task_id.to_string(), 
+            timestamp: Utc::now() 
+        }).await;
+    }
+
     /// Get all tasks
     pub async fn get_all_tasks(&self) -> Vec<DownloadTask> {
-        let mut tasks = Vec::new();
-
-        // Add queued tasks
-        {
-            let queue = self.queue.lock().await;
-            for t in queue.iter() {
-                tasks.push(t.clone());
-            }
-        }
-
-        // Add active tasks
-        {
-            let active = self.active_downloads.lock().await;
-            for (_k, handle) in active.iter() {
-                tasks.push(handle.task.clone());
-            }
-        }
-
-        tasks
+        let queue = self.queue.lock().await;
+        queue.iter().cloned().collect()
     }
 
     /// Clear completed tasks
@@ -301,6 +378,32 @@ impl QueueManager {
         active.retain(|_, handle| handle.task.status != TaskStatus::Completed);
 
         info!("Cleared completed tasks from queue and active downloads");
+        Ok(())
+    }
+
+    /// Resume all paused and failed tasks
+    pub async fn resume_all(&self) -> Result<()> {
+        info!("🔄 [RESUME ALL] Resuming all paused and failed tasks");
+        
+        {
+            let mut queue = self.queue.lock().await;
+            for task in queue.iter_mut() {
+                if task.status == TaskStatus::Paused || matches!(task.status, TaskStatus::Failed(_)) {
+                    task.status = TaskStatus::Queued;
+                    info!("✅ [RESUME ALL] Task {} set to Queued", task.id);
+                    
+                    // Log event
+                    let _ = self.event_log.log(QueueEvent::TaskResumed { 
+                        task_id: task.id.clone(), 
+                        timestamp: Utc::now() 
+                    }).await;
+                }
+            }
+        }
+        
+        // Trigger scheduler once after all tasks are set to Queued
+        self.process_queue().await;
+        
         Ok(())
     }
 
@@ -319,19 +422,48 @@ impl QueueManager {
         }
 
         info!("Removed task {} from queue and active downloads", task_id);
+        
+        let _ = self.event_log.log(QueueEvent::TaskRemoved { 
+            task_id: task_id.to_string(), 
+            timestamp: Utc::now() 
+        }).await;
+
         Ok(())
     }
 
     /// Process the queue
+    /// Process the queue
+    ///
+    /// This is the heartbeat of the scheduler. It scans the queue for pending tasks
+    /// and starts them if slots are available.
     async fn process_queue(&self) {
-        debug!("⚙️  [QUEUE] process_queue started");
+        debug!("⚙️  [QUEUE] process_queue heartbeat");
 
-        // Check if we can start more downloads
-        let active_count = {
-            let active = self.active_downloads.lock().await;
-            active.len()
-        };
-        debug!("   - Active downloads: {}", active_count);
+        // v0.5.1 ATOMIC PRE-REGISTRATION
+        // Lock BOTH queue and active_downloads to ensure atomic state transitions.
+        // This eliminates the race window where a task is Downloading but not in active.
+        let mut queue = self.queue.lock().await;
+        let mut active = self.active_downloads.lock().await;
+
+        // Zombie Defense: Check for tasks that are Downloading but have no active handle
+        // Since we now hold both locks, this check is safe.
+        for task in queue.iter_mut() {
+            if task.status == TaskStatus::Downloading {
+                if !active.contains_key(&task.id) {
+                    // This should never happen with atomic pre-registration
+                    // If it does, it's a critical bug - log and fail the task
+                    error!("🧟 [ZOMBIE] CRITICAL: Task {} is Downloading but not in active_downloads. This indicates a logic error.", task.id);
+                    task.status = TaskStatus::Failed("Internal error: task lost (zombie)".to_string());
+                }
+            }
+        }
+
+        // Count active downloads from state
+        let active_count = queue.iter()
+            .filter(|t| t.status == TaskStatus::Downloading)
+            .count();
+        
+        debug!("   - Active downloads (from state): {}", active_count);
         debug!("   - Max concurrent: {}", self.max_concurrent);
 
         if active_count >= self.max_concurrent {
@@ -339,46 +471,59 @@ impl QueueManager {
             return;
         }
 
-        // Get tasks to process
-        let tasks_to_process = {
-            let mut queue = self.queue.lock().await;
-            debug!("   - Queue size: {}", queue.len());
-            let mut tasks = Vec::new();
-
-            while tasks.len() < self.max_concurrent - active_count {
-                if let Some(task) = queue.front() {
-                    if task.status == TaskStatus::Queued {
-                        // Get the task and remove it from the front
-                        match queue.pop_front() {
-                            Some(t) => tasks.push(t),
-                            None => {
-                                // This shouldn't happen, but handle gracefully
-                                warn!("⚠️  [QUEUE] Queue became empty unexpectedly");
-                                break;
-                            }
-                        }
-                    } else {
-                        // Skip non-queued tasks
-                        queue.pop_front();
-                    }
-                } else {
-                    break;
-                }
+        // Find candidates and ATOMICALLY pre-register them
+        let mut tasks_to_start = Vec::new();
+        let slots_available = self.max_concurrent - active_count;
+        let mut started_count = 0;
+        
+        for task in queue.iter_mut() {
+            if started_count >= slots_available {
+                break;
             }
+            
+            if task.status == TaskStatus::Queued {
+                // ATOMIC PRE-REGISTRATION:
+                // Step 1: Create placeholder cancellation channel
+                let (cancel_tx, _cancel_rx) = mpsc::channel::<()>(1);
+                
+                // Step 2: Insert placeholder into active_downloads FIRST
+                let placeholder_handle = DownloadHandle {
+                    task_id: task.id.clone(),
+                    join_handle: tokio::spawn(async {}), // Dummy, will be replaced
+                    progress_handle: tokio::spawn(async {}), // Dummy, will be replaced
+                    cancel_tx,
+                    task: task.clone(),
+                };
+                active.insert(task.id.clone(), placeholder_handle);
+                
+                // Step 3: NOW set status to Downloading (safe because already in active)
+                task.status = TaskStatus::Downloading;
+                info!("🚀 [SCHEDULER] Atomically reserved slot for task: {}", task.id);
+                
+                tasks_to_start.push(task.clone());
+                started_count += 1;
+            }
+        }
+        
+        // Drop locks before spawning to avoid blocking
+        drop(active);
+        drop(queue);
 
-            tasks
-        };
-
-        if tasks_to_process.is_empty() {
-            debug!("⚠️  [QUEUE] No queued tasks to start");
+        if tasks_to_start.is_empty() {
+            return;
         }
 
-        // Process each task
-        for task in tasks_to_process {
-            info!("🎯 [QUEUE] Got task from queue: {}", task.id);
-            info!("🚀 [QUEUE] Starting download for: {}", task.id);
+        // Spawn Engines - they will UPDATE the existing active_downloads entry
+        for task in tasks_to_start {
+            info!("🚀 [QUEUE] Spawning engine for: {}", task.id);
+            
+            // Log Started Event
+            let _ = self.event_log.log(QueueEvent::TaskStarted {
+                task_id: task.id.clone(),
+                timestamp: Utc::now(),
+            }).await;
+
             self.start_download(task).await;
-            debug!("✅ [QUEUE] start_download completed");
         }
     }
 
@@ -407,8 +552,9 @@ impl QueueManager {
         debug!("   - Starting download engine...");
 
         // Update task status
-        task.status = TaskStatus::Downloading;
-        self.update_task_in_queue(task.clone()).await;
+        // Update task status - ALREADY DONE in process_queue via reservation
+        // task.status = TaskStatus::Downloading;
+        // self.update_task_in_queue(task.clone()).await;
 
         // Clone engine for the task
         let engine = Arc::clone(&self.engine);
@@ -420,6 +566,7 @@ impl QueueManager {
         // Clone file organizer and metadata manager for the spawned task
         let file_organizer = Arc::clone(&self.file_organizer);
         let metadata_manager = Arc::clone(&self.metadata_manager);
+        let event_log = Arc::clone(&self.event_log); // CLONE EVENT LOG
 
         // Clone a snapshot of the task to keep in the active map
         let task_for_handle = task.clone();
@@ -452,12 +599,10 @@ impl QueueManager {
                         );
 
                         // Update task progress in the queued snapshot
+                        // LOCKING: We need to update the Master List (Queue) with progress
                         let mut queue = queue_clone_for_progress.lock().await;
-                        for t in queue.iter_mut() {
-                            if t.id == task_id_for_progress {
-                                t.progress = Some(progress.clone());
-                                break;
-                            }
+                        if let Some(t) = queue.iter_mut().find(|t| t.id == task_id_for_progress) {
+                             t.progress = Some(progress.clone());
                         }
                         drop(queue); // release queue lock immediately
 
@@ -576,9 +721,16 @@ impl QueueManager {
                             ).await {
                                 Ok(final_path) => {
                                     info!("✅ [ORGANIZE] File organized at: {:?}", final_path);
-                                    task.output_path = final_path;
+                                    task.output_path = final_path.clone();
                                     task.status = TaskStatus::Completed;
                                     info!("Task {} completed and organized successfully", task_id_for_closure);
+                                    
+                                    // LOG EVENT
+                                    let _ = event_log.log(QueueEvent::TaskCompleted { 
+                                        task_id: task_id_for_closure.clone(), 
+                                        output_path: final_path, 
+                                        timestamp: Utc::now() 
+                                    }).await;
                                 }
                                 Err(e) => {
                                     // ✅ DEBUG BUG-007: Enhanced error logging
@@ -602,6 +754,13 @@ impl QueueManager {
                             task.status = TaskStatus::Failed(e.to_string());
                             error!("❌ [ENGINE] Task {} failed: {}", task_id_for_closure, e);
                             error!("Task {} failed: {}", task_id_for_closure, e);
+
+                            // LOG EVENT
+                            let _ = event_log.log(QueueEvent::TaskFailed { 
+                                task_id: task_id_for_closure.clone(), 
+                                error: e.to_string(), 
+                                timestamp: Utc::now() 
+                            }).await;
                         }
                     }
                 }
@@ -614,30 +773,37 @@ impl QueueManager {
                 }
             }
 
-            // Update task in queue
+            // Update task in queue (Master Store)
             {
                 let mut q = queue.lock().await;
-                for t in q.iter_mut() {
-                    if t.id == task_id_for_closure {
-                        t.status = task.status.clone();
-                        t.output_path = task.output_path.clone();
-                        break;
-                    }
+                if let Some(t) = q.iter_mut().find(|t| t.id == task_id_for_closure) {
+                    t.status = task.status.clone();
+                    t.output_path = task.output_path.clone();
                 }
             }
 
-            // Update task in active downloads (keep completed tasks for GUI display)
-            // Only remove if cancelled or failed
+            // Update task in active downloads (for handles/cancellation only)
+            // Remove if no longer downloading (Completed/Failed)
+            // NOTE: The FSM says remove from active if Finished.
             {
                 let mut active = active_downloads.lock().await;
-                if let Some(handle) = active.get_mut(&task_id_for_closure) {
-                    handle.task.status = task.status.clone();
-                    handle.task.output_path = task.output_path.clone();
-
-                    // Only remove if cancelled - keep completed tasks for GUI
-                    if cancelled {
-                        active.remove(&task_id_for_closure);
-                    }
+                // If it's done (Completed/Failed), we should remove it from active map
+                // to free up slots.
+                // If we treat active_downloads purely as "Running Engines", then yes.
+                
+                // wait, if we remove it, we can't send cancel signals? 
+                // But it's done. 
+                
+                if matches!(task.status, TaskStatus::Completed | TaskStatus::Failed(_)) {
+                    active.remove(&task_id_for_closure);
+                } else {
+                     // Update snapshot just in case we need it for something
+                     if let Some(handle) = active.get_mut(&task_id_for_closure) {
+                        handle.task.status = task.status.clone();
+                        handle.task.output_path = task.output_path.clone();
+                         
+                        // If cancelled externally, it might be removed already
+                     }
                 }
             }
 
@@ -653,41 +819,43 @@ impl QueueManager {
             task_id_for_spawn
         );
 
-        // Add to active downloads
+        // v0.5.1: UPDATE the existing active_downloads entry (pre-registered in process_queue)
+        // instead of inserting new. This completes the atomic transaction.
         {
             let mut active = self.active_downloads.lock().await;
 
-            // Preserve any progress that might have been recorded by the progress
-            // handler earlier (race) by copying it into the task snapshot we insert.
-            let existing_progress = if let Some(existing) = active.get(&task_id) {
-                existing.task.progress.clone()
+            if let Some(handle) = active.get_mut(&task_id) {
+                // Update the placeholder with real handles
+                handle.join_handle = join_handle;
+                handle.progress_handle = progress_handler;
+                handle.cancel_tx = cancel_tx;
+                handle.task = task_for_handle.clone();
+                debug!("✅ [DOWNLOAD] Updated active_downloads entry for: {}", task_id);
             } else {
-                None
-            };
-
-            let mut task_for_insert = task_for_handle.clone();
-            task_for_insert.progress = existing_progress;
-
-            active.insert(
-                task_id.clone(),
-                DownloadHandle {
-                    task_id: task_id.clone(),
-                    join_handle,
-                    progress_handle: progress_handler,
-                    cancel_tx,
-                    task: task_for_insert,
-                },
-            );
+                // This should never happen - placeholder was inserted in process_queue
+                // If we get here, something is seriously wrong
+                error!("❌ [DOWNLOAD] CRITICAL: Task {} not found in active_downloads! Placeholder missing.", task_id);
+                
+                // Rollback: Mark task as failed in queue
+                let mut queue = self.queue.lock().await;
+                if let Some(task_in_queue) = queue.iter_mut().find(|t| t.id == task_id) {
+                    task_in_queue.status = TaskStatus::Failed("Internal error: pre-registration failed".to_string());
+                }
+                return;
+            }
         }
 
         debug!(
-            "✅ [DOWNLOAD] Task spawned and added to active_downloads: {}",
+            "✅ [DOWNLOAD] Task spawned and active_downloads updated: {}",
             task_id
         );
 
-        // We keep the progress_handler running alongside the engine.
-        // Note: if you want to monitor or join the handler, you can store the handle.
         info!("Started download for task {}", task_id);
+
+        let _ = self.event_log.log(QueueEvent::TaskStarted { 
+            task_id: task_id.to_string(), 
+            timestamp: Utc::now() 
+        }).await;
     }
 
     /// Update task status in queue

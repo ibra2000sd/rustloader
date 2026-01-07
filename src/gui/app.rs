@@ -5,6 +5,7 @@ use crate::backend::{BackendActor, BackendCommand, BackendEvent};
 use crate::database::{initialize_database, DatabaseManager};
 use crate::extractor::VideoInfo;
 use crate::gui::clipboard;
+use std::time::Instant;
 // DownloadProgressData defined below
 use crate::queue::TaskStatus;
 use crate::utils::config::{AppSettings, VideoQuality};
@@ -53,6 +54,52 @@ pub enum View {
     Settings,
 }
 
+/// v0.7.0: Failure category for UI display and recovery hints
+#[derive(Debug, Clone, PartialEq)]
+pub enum FailureCategory {
+    NetworkError,
+    AuthError,
+    DiskError,
+    ParseError,
+    UnknownError,
+}
+
+impl FailureCategory {
+    /// Classify error string into category (pure UI logic)
+    pub fn from_error(error: &str) -> Self {
+        let lower = error.to_lowercase();
+        if lower.contains("timeout") || lower.contains("connection") 
+           || lower.contains("dns") || lower.contains("503") 
+           || lower.contains("network") || lower.contains("reset") {
+            FailureCategory::NetworkError
+        } else if lower.contains("401") || lower.contains("403") 
+                  || lower.contains("cookie") || lower.contains("auth")
+                  || lower.contains("forbidden") || lower.contains("unauthorized") {
+            FailureCategory::AuthError
+        } else if lower.contains("disk") || lower.contains("permission") 
+                  || lower.contains("space") || lower.contains("full") {
+            FailureCategory::DiskError
+        } else if lower.contains("extractor") || lower.contains("format") 
+                  || lower.contains("parse") || lower.contains("unsupported")
+                  || lower.contains("yt-dlp") {
+            FailureCategory::ParseError
+        } else {
+            FailureCategory::UnknownError
+        }
+    }
+
+    /// Get recovery hint for this category
+    pub fn recovery_hint(&self) -> &'static str {
+        match self {
+            FailureCategory::NetworkError => "Check your internet connection or VPN, then retry.",
+            FailureCategory::AuthError => "This may require refreshing cookies or login credentials.",
+            FailureCategory::DiskError => "Free up disk space or change the download directory.",
+            FailureCategory::ParseError => "Try a different format or re-add the URL.",
+            FailureCategory::UnknownError => "Try again or remove and re-add this download.",
+        }
+    }
+}
+
 /// Download task UI representation
 #[derive(Debug, Clone)]
 pub struct DownloadTaskUI {
@@ -66,6 +113,10 @@ pub struct DownloadTaskUI {
     pub total_mb: f64,
     pub eta_seconds: Option<u64>,
     pub file_path: Option<String>, // Path to the downloaded file
+    pub error_message: Option<String>,
+    pub last_progress_at: Instant,       // v0.6.0: For stall detection
+    pub was_resumed_after_failure: bool, // v0.6.0: Track retry attempts
+    pub error_dismissed: bool,           // v0.7.0: User dismissed error display
 }
 
 /// Progress data transfer object
@@ -96,9 +147,15 @@ pub enum Message {
     CancelDownload(String),
     RemoveCompleted(String),
     ClearAllCompleted,
+    ResumeAll,
     RetryDownload(String),
     OpenFile(String),
     OpenDownloadFolder(String),
+    
+    // v0.7.0: Recovery actions
+    ResetTask(String),       // Cancel + Delete + Re-add as new task
+    DismissError(String),    // Hide error display, keep Failed
+    RestartStalled(String),  // Pause + Resume for stalled tasks
 
     // View navigation
     SwitchToMain,
@@ -263,6 +320,10 @@ impl Application for RustloaderApp {
                              total_mb: video_info.filesize.unwrap_or(0) as f64 / (1024.0 * 1024.0),
                              eta_seconds: None,
                              file_path: None,
+                             error_message: None,
+                             last_progress_at: Instant::now(),
+                             was_resumed_after_failure: false,
+                             error_dismissed: false,
                          };
                          self.active_downloads.push(task_ui);
                          self.status_message = format!("Added to queue: {}", video_info.title);
@@ -274,6 +335,8 @@ impl Application for RustloaderApp {
                              task.downloaded_mb = data.downloaded as f64 / (1024.0 * 1024.0);
                              task.total_mb = data.total as f64 / (1024.0 * 1024.0);
                              task.eta_seconds = data.eta;
+                             task.last_progress_at = Instant::now(); // v0.6.0: Track for stall detection
+                             task.status = "Downloading".to_string(); // Ensure status reflects active download
                          }
                      }
                      BackendEvent::DownloadCompleted { task_id } => {
@@ -286,6 +349,7 @@ impl Application for RustloaderApp {
                      BackendEvent::DownloadFailed { task_id, error } => {
                          if let Some(task) = self.active_downloads.iter_mut().find(|t| t.id == task_id) {
                              task.status = "Failed".to_string();
+                             task.error_message = Some(error.clone());
                          }
                          self.status_message = format!("Failed: {}", error);
                      }
@@ -332,12 +396,60 @@ impl Application for RustloaderApp {
                 Command::none()
             }
 
+            Message::ResumeAll => {
+                let _ = self.backend_sender.try_send(BackendCommand::ResumeAll);
+                Command::none()
+            }
+
             Message::RetryDownload(task_id) => {
-                // Retry logic needs full restart usually? 
-                // For now, if we have URL, we could potential restart.
-                // But simplified: just set status to Queued?
-                // Or send Resume?
+                // v0.6.0: Track that this was retried after failure
+                if let Some(task) = self.active_downloads.iter_mut().find(|t| t.id == task_id) {
+                    if task.status == "Failed" {
+                        task.was_resumed_after_failure = true;
+                        task.error_dismissed = false; // Reset dismissed state on retry
+                    }
+                }
                 let _ = self.backend_sender.try_send(BackendCommand::ResumeDownload(task_id));
+                Command::none()
+            }
+
+            // v0.7.0: Reset Task - Cancel, Delete, Re-add as new task
+            Message::ResetTask(task_id) => {
+                // Find the task and capture URL before removal
+                if let Some(task) = self.active_downloads.iter().find(|t| t.id == task_id) {
+                    let url = task.url.clone();
+                    
+                    // Cancel and remove from backend
+                    let _ = self.backend_sender.try_send(BackendCommand::CancelDownload(task_id.clone()));
+                    let _ = self.backend_sender.try_send(BackendCommand::RemoveTask(task_id.clone()));
+                    
+                    // Remove from UI
+                    self.active_downloads.retain(|t| t.id != task_id);
+                    
+                    // Re-add the URL (will trigger extraction and new task creation)
+                    self.url_input = url;
+                    self.status_message = "Task reset - re-adding...".to_string();
+                    
+                    // Trigger extraction for the URL
+                    let _ = self.backend_sender.try_send(BackendCommand::ExtractInfo { url: self.url_input.clone() });
+                }
+                Command::none()
+            }
+
+            // v0.7.0: Dismiss Error - Hide error display, keep Failed state
+            Message::DismissError(task_id) => {
+                if let Some(task) = self.active_downloads.iter_mut().find(|t| t.id == task_id) {
+                    task.error_dismissed = true;
+                }
+                Command::none()
+            }
+
+            // v0.7.0: Restart Stalled - Pause + Resume to restart engine
+            Message::RestartStalled(task_id) => {
+                // First pause, then resume to restart the engine
+                let _ = self.backend_sender.try_send(BackendCommand::PauseDownload(task_id.clone()));
+                let _ = self.backend_sender.try_send(BackendCommand::ResumeDownload(task_id));
+                self.status_message = "Restarting stalled download...".to_string();
                 Command::none()
             }
 
