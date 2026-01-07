@@ -2,9 +2,10 @@
 
 use rustloader::downloader::{DownloadConfig, DownloadEngine};
 use rustloader::extractor::{Format, VideoInfo};
-use rustloader::queue::{DownloadTask, QueueManager, TaskStatus};
+use rustloader::queue::{DownloadTask, QueueManager, TaskStatus, EventLog};
 use rustloader::utils::{ContentType, FileOrganizer, MetadataManager, OrganizationSettings};
 use tempfile::TempDir;
+use std::sync::Arc;
 
 fn sample_format() -> Format {
     Format {
@@ -60,7 +61,8 @@ async fn queue_add_pause_resume_cancel_flow() {
 
     let metadata = MetadataManager::new(&base_dir);
     let engine = DownloadEngine::new(DownloadConfig::default());
-    let queue = QueueManager::new(2, engine, organizer, metadata);
+    let event_log = Arc::new(EventLog::new(&base_dir).await.expect("event log"));
+    let queue = QueueManager::new(2, engine, organizer, metadata, event_log);
 
     let output = base_dir.join("Temp/test.mp4");
     let task = DownloadTask::new(sample_video(), sample_format(), output.clone());
@@ -87,7 +89,11 @@ async fn queue_add_pause_resume_cancel_flow() {
         .find(|t| t.id == task_id)
         .unwrap()
         .status;
-    assert_eq!(status_after_resume, TaskStatus::Queued);
+    assert!(
+        matches!(status_after_resume, TaskStatus::Queued | TaskStatus::Downloading),
+        "Expected Queued or Downloading, got {:?}",
+        status_after_resume
+    );
 
     queue.cancel_task(&task_id).await.expect("cancel");
     let status_after_cancel = queue

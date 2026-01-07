@@ -74,11 +74,10 @@ target/criterion/
 benchmarks/
 
 # Temporary analysis files
-*_REPORT.md
 *_PROMPT.md
 *.analysis
 
 # Editor backups
 *.swp
 *.swo
-*~
+!QA_*

@@ -1,6 +1,6 @@
 # 🚀 Rustloader - High-Performance Video Downloader
 
-[![Version](https://img.shields.io/badge/version-0.6.x--dev-blue.svg)](https://github.com/ibra2000sd/rustloader/releases)
+[![Version](https://img.shields.io/badge/version-0.7.0--dev-blue.svg)](https://github.com/ibra2000sd/rustloader/releases)
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
 [![Platform](https://img.shields.io/badge/platform-macOS-lightgrey.svg)](https://github.com/ibra2000sd/rustloader)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
