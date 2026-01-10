@@ -43,27 +43,153 @@ impl YtDlpExtractor {
 
     /// Extract video information without downloading
     /// Uses: yt-dlp --dump-json --no-download
-    pub async fn extract_info_impl(&self, url: &str) -> Result<VideoInfo> {
+    pub async fn extract_info_impl(&self, url: &str) -> Result<VideoInfo, RustloaderError> {
         debug!("Extracting video info for URL: {}", url);
 
         let output = AsyncCommand::new(&self.ytdlp_path)
+            .arg("--ignore-config")
             .arg("--dump-json")
             .arg("--no-download")
             .arg("--no-warnings")
             .arg(url)
             .output()
-            .await?;
+            .await
+            .map_err(|e| RustloaderError::IoError(e))?;
 
         if !output.status.success() {
             let error_msg = String::from_utf8_lossy(&output.stderr);
             error!("yt-dlp extraction failed: {}", error_msg);
-            return Err(RustloaderError::ExtractionError(error_msg.to_string()).into());
+            return Err(RustloaderError::ExtractionError(error_msg.to_string()));
         }
 
-        let json_str = String::from_utf8(output.stdout)?;
-        let video_info: VideoInfo = serde_json::from_str(&json_str)?;
+        let json_str = String::from_utf8(output.stdout)
+            .map_err(|e| RustloaderError::ExtractionError(e.to_string()))?;
 
-        Ok(video_info)
+        let json: serde_json::Value =
+            serde_json::from_str(&json_str).map_err(RustloaderError::SerializationError)?;
+
+        self.parse_video_info(&json)
+    }
+
+    /// Parse yt-dlp JSON output into VideoInfo
+    fn parse_video_info(&self, json: &serde_json::Value) -> Result<VideoInfo, RustloaderError> {
+        let id = json["id"]
+            .as_str()
+            .ok_or_else(|| RustloaderError::ExtractionError("Missing video ID".to_string()))?
+            .to_string();
+
+        // Handle title - sometimes it might be missing or null
+        let title = json["title"]
+            .as_str()
+            .unwrap_or("Unknown Title")
+            .to_string();
+
+        let url = json["url"]
+            .as_str()
+            .or_else(|| json["webpage_url"].as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let formats = self.parse_formats(json)?;
+
+        Ok(VideoInfo {
+            id,
+            title,
+            url,
+            // direct_url will be filled when a specific format is selected for download
+            direct_url: String::new(),
+            thumbnail: json["thumbnail"].as_str().map(String::from),
+            duration: json["duration"].as_u64(),
+            uploader: json["uploader"].as_str().map(String::from),
+            description: json["description"].as_str().map(String::from),
+            formats,
+            best_format_id: json["format_id"].as_str().map(String::from),
+            filesize: json["filesize"].as_u64(),
+            view_count: json["view_count"].as_u64(),
+            like_count: json["like_count"].as_u64(),
+            upload_date: json["upload_date"].as_str().map(String::from),
+            extractor: Some(self.id().to_string()),
+        })
+    }
+
+    /// Parse formats array from yt-dlp JSON
+    fn parse_formats(
+        &self,
+        json: &serde_json::Value,
+    ) -> Result<Vec<crate::extractor::models::VideoFormat>, RustloaderError> {
+        let formats_array = json["formats"].as_array();
+
+        if let Some(formats_array) = formats_array {
+            let mut formats: Vec<crate::extractor::models::VideoFormat> = formats_array
+                .iter()
+                .filter_map(|f| self.parse_single_format(f))
+                .collect();
+
+            // Sort by quality (height descending, then filesize)
+            formats.sort_by(|a, b| match (b.height, a.height) {
+                (Some(bh), Some(ah)) => bh.cmp(&ah),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => {
+                    let bs = b.estimated_size().unwrap_or(0);
+                    let as_ = a.estimated_size().unwrap_or(0);
+                    bs.cmp(&as_)
+                }
+            });
+
+            Ok(formats)
+        } else {
+            // Some extractors might not return formats array (e.g. direct file)
+            Ok(Vec::new())
+        }
+    }
+
+    /// Parse a single format entry
+    fn parse_single_format(
+        &self,
+        f: &serde_json::Value,
+    ) -> Option<crate::extractor::models::VideoFormat> {
+        let format_id = f["format_id"].as_str()?.to_string();
+        let ext = f["ext"].as_str().unwrap_or("mp4").to_string();
+
+        // Determine if video/audio only
+        let vcodec = f["vcodec"].as_str().map(String::from);
+        let acodec = f["acodec"].as_str().map(String::from);
+
+        // yt-dlp sends "none" string for missing codecs
+        let video_only = vcodec.as_ref().map(|v| v != "none").unwrap_or(false)
+            && acodec.as_ref().map(|a| a == "none").unwrap_or(true);
+
+        let audio_only = acodec.as_ref().map(|a| a != "none").unwrap_or(false)
+            && vcodec.as_ref().map(|v| v == "none").unwrap_or(true);
+
+        // Skip formats without useful codecs (e.g. "none" for both)
+        let has_video = vcodec.as_ref().map(|v| v != "none").unwrap_or(false);
+        let has_audio = acodec.as_ref().map(|a| a != "none").unwrap_or(false);
+
+        if !has_video && !has_audio {
+            return None;
+        }
+
+        Some(crate::extractor::models::VideoFormat {
+            format_id,
+            format_note: f["format_note"].as_str().map(String::from),
+            ext,
+            resolution: f["resolution"].as_str().map(String::from),
+            height: f["height"].as_u64().map(|h| h as u32),
+            width: f["width"].as_u64().map(|w| w as u32),
+            filesize: f["filesize"].as_u64(),
+            filesize_approx: f["filesize_approx"].as_u64(),
+            vcodec: if has_video { vcodec } else { None },
+            acodec: if has_audio { acodec } else { None },
+            tbr: f["tbr"].as_f64(),
+            vbr: None, // yt-dlp specific parsing could be added
+            abr: None,
+            fps: f["fps"].as_f64(),
+            video_only,
+            audio_only,
+            url: f["url"].as_str().unwrap_or("").to_string(),
+        })
     }
 
     /// Extract playlist information
@@ -72,6 +198,7 @@ impl YtDlpExtractor {
         debug!("Extracting playlist info for URL: {}", url);
 
         let output = AsyncCommand::new(&self.ytdlp_path)
+            .arg("--ignore-config")
             .arg("--flat-playlist")
             .arg("--dump-json")
             .arg("--no-warnings")
@@ -120,6 +247,7 @@ impl YtDlpExtractor {
         let search_query = format!("ytsearch{}:{}", count, query);
 
         let output = AsyncCommand::new(&self.ytdlp_path)
+            .arg("--ignore-config")
             .arg("--dump-json")
             .arg("--no-warnings")
             .arg(search_query)
@@ -143,6 +271,7 @@ impl YtDlpExtractor {
         debug!("Getting direct URL for format {} from {}", format_id, url);
 
         let output = AsyncCommand::new(&self.ytdlp_path)
+            .arg("--ignore-config")
             .arg("-f")
             .arg(format_id)
             .arg("-g")
@@ -179,7 +308,7 @@ impl Extractor for YtDlpExtractor {
     }
 
     async fn extract_info(&self, url: &str) -> Result<VideoInfo> {
-        self.extract_info_impl(url).await
+        self.extract_info_impl(url).await.map_err(|e| e.into())
     }
 
     async fn extract_playlist(&self, url: &str) -> Result<Vec<VideoInfo>> {

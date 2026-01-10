@@ -67,6 +67,20 @@ impl HybridExtractor {
 
     pub async fn get_direct_url(&self, url: &str, format_id: &str) -> Result<String> {
         let extractor = self.find_extractor(url);
-        extractor.get_direct_url(url, format_id).await
+        match extractor.get_direct_url(url, format_id).await {
+            Ok(url) => Ok(url),
+            Err(e) => {
+                info!(
+                    "Primary extractor {} failed to get direct URL: {}. Retrying with fallback...",
+                    extractor.id(),
+                    e
+                );
+                if extractor.id() != self.fallback.id() {
+                    self.fallback.get_direct_url(url, format_id).await
+                } else {
+                    Err(e)
+                }
+            }
+        }
     }
 }

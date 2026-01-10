@@ -584,10 +584,12 @@ impl QueueManager {
         let task_id = task.id.clone();
         let output_path = task.output_path.clone();
         let url = task.format.url.clone();
+        let format_id = Some(task.format.format_id.clone());
 
         info!("💾 [DOWNLOAD] start_download called for: {}", task_id);
         debug!("   - URL: {}", url);
         debug!("   - Output: {:?}", output_path);
+        debug!("   - Format ID: {:?}", format_id);
 
         // Create channels for progress updates and cancellation
         let (progress_tx, mut progress_rx) = mpsc::channel::<DownloadProgress>(100);
@@ -711,7 +713,7 @@ impl QueueManager {
             task_id_for_spawn
         );
 
-        // WATCHDOG: spawn a short monitor that will print if engine logs don't appear
+        // WATCHDOG: spawn a monitor that will print if engine logs don't appear
         {
             let task_id_wd = task_id.clone();
             tokio::spawn(async move {
@@ -737,7 +739,7 @@ impl QueueManager {
             let mut cancelled = false;
 
             // Create a future that completes when either the download finishes or is cancelled
-            let download_task = engine.download(&url, &output_path, progress_tx.clone());
+            let download_task = engine.download(&url, &output_path, format_id, progress_tx.clone());
             let cancel_task = cancel_rx.recv();
 
             tokio::select! {

@@ -1,205 +1,205 @@
-//! Main view implementation - Light Theme
-
-use crate::gui::app::{DownloadTaskUI, Message};
-use crate::gui::components::{download_item, url_input};
-use iced::widget::{button, column, container, pick_list, row, scrollable, slider, text, Space};
+use iced::widget::{
+    button, column, container, pick_list, row, scrollable, text, text_input, Space,
+};
 use iced::{Alignment, Element, Length};
 
-/// Create the main view
-pub fn main_view(
-    url_value: &str,
-    downloads: &[DownloadTaskUI],
-    _status_message: &str,
-    is_extracting: bool,
-    url_error: Option<&str>,
-    quality: &str,
-    segments: usize,
-) -> Element<'static, Message> {
-    use crate::gui::theme;
+use crate::gui::app::{DownloadTaskUI, Message};
+use crate::gui::components::{DownloadCard, DownloadCardMessage, DownloadStatus};
+use crate::gui::theme::{self, RustloaderTheme};
+use crate::utils::config::VideoQuality;
 
-    // Hero Input Section
-    let hero_section = container(
+pub fn main_view<'a>(
+    url_input_value: &'a str,
+    downloads: &'a [DownloadTaskUI],
+    status_message: &'a str,
+    is_extracting: bool,
+    url_error: Option<&'a str>,
+    quality: VideoQuality,
+    _segments: usize,
+) -> Element<'a, Message> {
+    // 1. Input Section
+    let input_section = {
+        let input = text_input("Paste video URL here...", url_input_value)
+            .on_input(Message::UrlInputChanged)
+            .on_submit(Message::DownloadButtonPressed)
+            .padding(12)
+            .size(14)
+            .width(Length::Fill)
+            .style(if url_error.is_some() {
+                iced::theme::TextInput::Custom(Box::new(theme::InputErrorStyle))
+            } else {
+                iced::theme::TextInput::Custom(Box::new(theme::InputStyle))
+            });
+
+        let download_btn = button(
+            text(if is_extracting {
+                "Processing..."
+            } else {
+                "Download"
+            })
+            .size(14)
+            .horizontal_alignment(iced::alignment::Horizontal::Center),
+        )
+        .on_press(Message::DownloadButtonPressed)
+        .padding(12)
+        .width(Length::Fixed(120.0))
+        .style(iced::theme::Button::Custom(Box::new(theme::PrimaryButton)));
+
+        let paste_btn = button(
+            text("Paste")
+                .size(14)
+                .horizontal_alignment(iced::alignment::Horizontal::Center),
+        )
+        .on_press(Message::PasteFromClipboard)
+        .padding(12)
+        .width(Length::Fixed(80.0))
+        .style(iced::theme::Button::Secondary);
+
         column![
             text("Download Video")
-                .size(30)
-                .style(iced::theme::Text::Color(theme::GRAY_800)),
-            url_input(
-                url_value,
-                Message::UrlInputChanged,
-                Message::PasteFromClipboard,
-                Message::ClearUrlInput,
-                url_error,
-            ),
-            // Download button row
-            row![
-                Space::with_width(Length::Fill),
-                button(
-                    text(if is_extracting {
-                        "Extracting..."
-                    } else {
-                        "Download"
-                    })
-                    .size(16)
-                )
-                .on_press_maybe(if !url_value.is_empty() && !is_extracting {
-                    Some(Message::DownloadButtonPressed)
-                } else {
-                    None
-                })
-                .padding([16, 32])
-                .style(iced::theme::Button::Custom(Box::new(theme::PrimaryButton))),
-            ],
-            // Info row with interactive dropdowns
-            row![
-                // Quality dropdown
-                container(
-                    column![
-                        text("Quality")
-                            .size(11)
-                            .style(iced::theme::Text::Color(theme::GRAY_500)),
-                        pick_list(
-                            vec![
-                                "Best Available".to_string(),
-                                "1080p".to_string(),
-                                "720p".to_string(),
-                                "480p".to_string()
-                            ],
-                            Some(quality.to_string()),
-                            Message::QualityChanged
-                        )
-                        .text_size(12)
-                        .padding([6, 10])
-                        .width(iced::Length::Fixed(140.0)),
-                    ]
-                    .spacing(4)
-                )
-                .padding([8, 12])
-                .style(iced::theme::Container::Custom(Box::new(InfoTagStyle))),
-                // Format tag (static for now - could be made selectable)
-                container(
-                    column![
-                        text("Format")
-                            .size(11)
-                            .style(iced::theme::Text::Color(theme::GRAY_500)),
-                        text("MP4")
-                            .size(12)
-                            .style(iced::theme::Text::Color(theme::GRAY_800)),
-                    ]
-                    .spacing(4)
-                )
-                .padding([8, 12])
-                .style(iced::theme::Container::Custom(Box::new(InfoTagStyle))),
-                // Segments slider
-                container(
-                    column![
-                        row![
-                            text("Segments")
-                                .size(11)
-                                .style(iced::theme::Text::Color(theme::GRAY_500)),
-                            Space::with_width(iced::Length::Fill),
-                            text(format!("{}", segments))
-                                .size(11)
-                                .style(iced::theme::Text::Color(theme::GRAY_800)),
-                        ],
-                        iced::widget::slider(4..=32, segments as u8, |v| Message::SegmentsChanged(
-                            v as usize
-                        ))
-                        .width(iced::Length::Fixed(120.0)),
-                    ]
-                    .spacing(4)
-                )
-                .padding([8, 12])
-                .style(iced::theme::Container::Custom(Box::new(InfoTagStyle))),
-            ]
-            .spacing(12),
+                .size(18)
+                .style(iced::theme::Text::Color(RustloaderTheme::TEXT_PRIMARY)),
+            Space::with_height(8),
+            row![input, paste_btn, download_btn].spacing(10),
+            if let Some(error) = url_error {
+                text(error)
+                    .size(12)
+                    .style(iced::theme::Text::Color(RustloaderTheme::ERROR))
+            } else {
+                text("Supports YouTube, Vimeo, and more")
+                    .size(12)
+                    .style(iced::theme::Text::Color(RustloaderTheme::TEXT_SECONDARY))
+            }
         ]
-        .spacing(20),
-    )
-    .padding(32)
-    .width(Length::Fill)
-    .style(iced::theme::Container::Custom(Box::new(
-        theme::GlassContainer,
-    )));
+        .spacing(4)
+    };
 
-    // Downloads section
-    let downloads_section: Element<'static, Message> = if downloads.is_empty() {
+    // 2. Options Section
+    let options_section = {
+        let quality_options = vec![
+            VideoQuality::Best,
+            VideoQuality::Specific("1080".to_string()),
+            VideoQuality::Specific("720".to_string()),
+            VideoQuality::Specific("480".to_string()),
+            VideoQuality::Worst,
+        ];
+
+        let quality_picker = pick_list(quality_options, Some(quality.clone()), |q| {
+            Message::QualityChanged(q.to_format_string())
+        })
+        .width(Length::Fixed(150.0))
+        .padding(10);
+
+        row![
+            text("Quality:")
+                .size(14)
+                .style(iced::theme::Text::Color(RustloaderTheme::TEXT_SECONDARY)),
+            quality_picker,
+        ]
+        .spacing(12)
+        .align_items(Alignment::Center)
+    };
+
+    // 3. Status Bar
+    let status_bar = container(
+        text(status_message)
+            .size(12)
+            .style(iced::theme::Text::Color(RustloaderTheme::TEXT_SECONDARY)),
+    )
+    .padding(10)
+    .width(Length::Fill);
+
+    // 4. Downloads List
+    let downloads_list = if downloads.is_empty() {
         container(
             column![
                 text("No active downloads")
                     .size(16)
-                    .style(iced::theme::Text::Color(theme::GRAY_500)),
-                text("Your downloads will appear here")
-                    .size(14)
-                    .style(iced::theme::Text::Color(theme::GRAY_400)),
+                    .style(iced::theme::Text::Color(RustloaderTheme::TEXT_SECONDARY)),
+                text("Paste a URL above to start")
+                    .size(12)
+                    .style(iced::theme::Text::Color(RustloaderTheme::TEXT_DISABLED)),
             ]
-            .spacing(10)
+            .spacing(8)
             .align_items(Alignment::Center),
         )
         .width(Length::Fill)
         .height(Length::Fill)
         .center_x()
         .center_y()
-        .into()
     } else {
-        let mut downloads_col = column![row![
-            text("Active Downloads")
-                .size(24)
-                .style(iced::theme::Text::Color(theme::GRAY_800)),
-            Space::with_width(Length::Fill),
-            button(text("Resume All").size(14))
-                .on_press(Message::ResumeAll)
-                .padding([10, 16])
-                .style(iced::theme::Button::Custom(Box::new(theme::PrimaryButton))),
-            button(text("Clear Completed").size(14))
-                .on_press(Message::ClearAllCompleted)
-                .padding([10, 16])
-                .style(iced::theme::Button::Custom(Box::new(
-                    theme::SecondaryButton
-                ))),
-        ]
-        .spacing(12)
-        .align_items(Alignment::Center)]
-        .spacing(24);
+        let list = column(
+            downloads
+                .iter()
+                .map(|task| {
+                    let status = match task.status.as_str() {
+                        "Downloading" => DownloadStatus::Downloading,
+                        "Paused" => DownloadStatus::Paused,
+                        "Completed" | "Complete" => DownloadStatus::Complete,
+                        "Failed" => DownloadStatus::Failed,
+                        _ => DownloadStatus::Queued,
+                    };
 
-        for task in downloads {
-            downloads_col = downloads_col.push(download_item(task));
-        }
+                    DownloadCard {
+                        id: task.id.clone(),
+                        title: task.title.clone(),
+                        progress: task.progress as f32,
+                        speed: if task.speed > 0.0 {
+                            format!("{:.1} MB/s", task.speed / 1024.0 / 1024.0)
+                        } else {
+                            "0.0 MB/s".to_string()
+                        },
+                        eta_seconds: task.eta_seconds,
+                        downloaded_mb: task.downloaded_mb,
+                        total_mb: task.total_mb,
+                        status,
+                        quality_label: "MP4".to_string(),
+                    }
+                    .view()
+                    .map(Message::from)
+                })
+                .collect::<Vec<_>>(),
+        )
+        .spacing(16);
 
-        scrollable(downloads_col)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .style(iced::theme::Scrollable::Custom(Box::new(
+        container(
+            scrollable(list).style(iced::theme::Scrollable::Custom(Box::new(
                 theme::ScrollableStyle,
-            )))
-            .into()
-    };
-
-    // Main content
-    column![hero_section, downloads_section,]
-        .spacing(32)
+            ))),
+        )
         .width(Length::Fill)
         .height(Length::Fill)
-        .padding([32, 32, 32, 32])
-        .into()
+    };
+
+    column![
+        container(input_section)
+            .padding(24)
+            .style(iced::theme::Container::Custom(Box::new(
+                theme::GlassContainer
+            ))),
+        container(options_section).padding(12),
+        Space::with_height(12),
+        text("Active Downloads")
+            .size(14)
+            .style(iced::theme::Text::Color(RustloaderTheme::TEXT_SECONDARY)),
+        Space::with_height(12),
+        downloads_list,
+        status_bar,
+    ]
+    .spacing(0)
+    .padding(24)
+    .into()
 }
 
-// Info tag style
-struct InfoTagStyle;
-
-impl iced::widget::container::StyleSheet for InfoTagStyle {
-    type Style = iced::Theme;
-
-    fn appearance(&self, _style: &Self::Style) -> iced::widget::container::Appearance {
-        use crate::gui::theme;
-
-        iced::widget::container::Appearance {
-            background: Some(iced::Background::Color(theme::GRAY_100)),
-            border: iced::Border {
-                color: theme::GRAY_200,
-                width: 1.0,
-                radius: 10.0.into(),
-            },
-            ..Default::default()
+// Adapters
+impl From<DownloadCardMessage> for Message {
+    fn from(msg: DownloadCardMessage) -> Self {
+        match msg {
+            DownloadCardMessage::Pause(id) => Message::PauseDownload(id),
+            DownloadCardMessage::Resume(id) => Message::ResumeDownload(id),
+            DownloadCardMessage::Cancel(id) => Message::CancelDownload(id),
+            DownloadCardMessage::OpenFolder(id) => Message::OpenDownloadFolder(id),
+            DownloadCardMessage::Remove(id) => Message::RemoveCompleted(id),
         }
     }
 }

@@ -7,6 +7,7 @@ use crate::extractor::VideoInfo;
 use crate::gui::clipboard;
 use std::time::Instant;
 // DownloadProgressData defined below
+use crate::gui::components::{FormatSelector, FormatSelectorMessage};
 use crate::queue::TaskStatus;
 use crate::utils::config::{AppSettings, VideoQuality};
 
@@ -41,10 +42,14 @@ pub struct RustloaderApp {
     max_concurrent: usize,
     segments_per_download: usize,
     quality: VideoQuality,
+    always_show_format_selector: bool,
 
     // Flags
     is_extracting: bool,
     url_error: Option<String>,
+
+    // Format Selection
+    format_selector: Option<FormatSelector>,
 }
 
 /// Application view
@@ -173,6 +178,11 @@ pub enum Message {
     DismissError(String),   // Hide error display, keep Failed
     RestartStalled(String), // Pause + Resume for stalled tasks
 
+    // Format Selection
+    ShowFormatSelector(VideoInfo),
+    FormatSelector(FormatSelectorMessage),
+    StartDownloadWithFormat(VideoInfo, String),
+
     // View navigation
     SwitchToMain,
     SwitchToSettings,
@@ -242,8 +252,10 @@ impl Application for RustloaderApp {
             max_concurrent: settings.max_concurrent,
             segments_per_download: settings.segments,
             quality: settings.quality,
+            always_show_format_selector: settings.always_show_format_selector,
             is_extracting: false,
             url_error: None,
+            format_selector: None,
         };
 
         (app, Command::none())
@@ -305,22 +317,11 @@ impl Application for RustloaderApp {
                         self.is_extracting = false;
                         match result {
                             Ok(video_info) => {
-                                // Auto-start download logic
-                                let output_path = PathBuf::from(&self.download_location)
-                                    .join(format!("{}.mp4", sanitize_filename(&video_info.title)));
-
-                                self.url_input.clear();
-                                self.url_error = None;
-                                self.status_message =
-                                    format!("Starting download: {}", video_info.title);
-
-                                // Send start command
-                                let _ =
-                                    self.backend_sender.try_send(BackendCommand::StartDownload {
-                                        video_info,
-                                        output_path,
-                                        format_id: None, // Auto format
-                                    });
+                                // v1.0.0: Use dropdown quality directly (no modal)
+                                let format_id = self.quality.to_format_string();
+                                return Command::perform(async {}, move |_| {
+                                    Message::StartDownloadWithFormat(video_info, format_id)
+                                });
                             }
                             Err(e) => {
                                 self.url_error = Some(make_error_user_friendly(&e));
@@ -504,6 +505,29 @@ impl Application for RustloaderApp {
                 Command::none()
             }
 
+            // v1.0.0: Format Selector logic deprecated
+            // Message::ShowFormatSelector(video) => { ... }
+            // Message::FormatSelector(msg) => { ... }
+            Message::ShowFormatSelector(_) => Command::none(),
+            Message::FormatSelector(_) => Command::none(),
+
+            Message::StartDownloadWithFormat(video_info, format_id) => {
+                let output_path = PathBuf::from(&self.download_location)
+                    .join(format!("{}.mp4", sanitize_filename(&video_info.title)));
+
+                self.url_input.clear();
+                self.url_error = None;
+                self.status_message = format!("Starting download: {}", video_info.title);
+
+                // Send start command
+                let _ = self.backend_sender.try_send(BackendCommand::StartDownload {
+                    video_info,
+                    output_path,
+                    format_id: Some(format_id),
+                });
+                Command::none()
+            }
+
             Message::OpenFile(task_id) => {
                 if let Some(task) = self.active_downloads.iter().find(|t| t.id == task_id) {
                     // Logic to find file...
@@ -587,6 +611,7 @@ impl Application for RustloaderApp {
                     chunk_size: 8192,
                     retry_attempts: 3,
                     enable_resume: true,
+                    always_show_format_selector: self.always_show_format_selector,
                 };
 
                 // Save settings to database
@@ -665,6 +690,10 @@ impl Application for RustloaderApp {
         use iced::widget::{button, column, container, row, text, Space};
         use iced::Length;
 
+        // If format selector is active, show it as a modal/overlay
+        // v1.0.0: Format selector modal removed in favor of main UI dropdown
+        // if let Some(ref selector) = self.format_selector { ... }
+
         // Sidebar
         let sidebar = container(
             column![
@@ -708,18 +737,14 @@ impl Application for RustloaderApp {
         let content = match self.current_view {
             View::Main => {
                 use crate::gui::views::main_view;
-                let quality_str = match self.quality {
-                    VideoQuality::Best => "Best Available",
-                    VideoQuality::Worst => "Worst Available",
-                    VideoQuality::Specific(_) => "Custom",
-                };
+                // v1.0.0: Redesign passes full quality enum to allow dropdown selection
                 main_view(
                     &self.url_input,
                     &self.active_downloads,
                     &self.status_message,
                     self.is_extracting,
                     self.url_error.as_deref(),
-                    quality_str,
+                    self.quality.clone(), // Pass enum
                     self.segments_per_download,
                 )
             }

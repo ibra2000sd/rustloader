@@ -173,6 +173,7 @@ impl DownloadEngine {
         &self,
         url: &str,
         output_path: &Path,
+        format_id: Option<String>,
         progress_tx: mpsc::Sender<DownloadProgress>,
     ) -> Result<()> {
         debug!("🚀🚀🚀 [ENGINE-ENTRY] download() ENTERED - First line executed!");
@@ -197,14 +198,18 @@ impl DownloadEngine {
             info!("🔀 [ENGINE] YouTube URL detected - bypassing probe, using yt-dlp directly");
             debug!("   - Reason: YouTube URLs redirect to HLS manifests during HTTP probing");
             debug!("   - Solution: yt-dlp handles YouTube streams natively");
-            return self.download_via_ytdlp(url, output_path, progress_tx).await;
+            return self
+                .download_via_ytdlp(url, output_path, format_id, progress_tx)
+                .await;
         }
 
         // Quick HLS detection: if URL looks like a playlist, fallback to yt-dlp
         if url.contains(".m3u8") || url.contains("/manifest") || url.contains("playlist") {
             info!("🔀 [ENGINE] Taking path: yt-dlp fallback (HLS/playlist detected)");
             debug!("Detected HLS/playlist URL, using yt-dlp fallback: {}", url);
-            return self.download_via_ytdlp(url, output_path, progress_tx).await;
+            return self
+                .download_via_ytdlp(url, output_path, format_id, progress_tx)
+                .await;
         }
         // Check if server supports range requests and get file size.
         // If probing fails (some servers return unexpected responses or redirect to manifests),
@@ -230,7 +235,9 @@ impl DownloadEngine {
                 info!("🔀 [ENGINE] Taking path: yt-dlp fallback (probing failed)");
                 warn!("⚠️ [ENGINE] Probing ranges/size failed, falling back to yt-dlp. range_err={:?} size_err={:?}", err1.as_ref().err(), err2.as_ref().err());
                 debug!("Probing ranges/size failed, falling back to yt-dlp. range_err={:?} size_err={:?}", err1.as_ref().err(), err2.as_ref().err());
-                return self.download_via_ytdlp(url, output_path, progress_tx).await;
+                return self
+                    .download_via_ytdlp(url, output_path, format_id, progress_tx)
+                    .await;
             }
         };
 
@@ -471,9 +478,13 @@ impl DownloadEngine {
         &self,
         url: &str,
         output_path: &Path,
+        format_id: Option<String>,
         progress_tx: mpsc::Sender<DownloadProgress>,
     ) -> Result<()> {
-        debug!("download_via_ytdlp called for URL: {}", url);
+        debug!(
+            "download_via_ytdlp called for URL: {}, format: {:?}",
+            url, format_id
+        );
 
         // Clone the sender before spawning any background tasks and
         // use a best-effort initial send so a dropped receiver doesn't fail us.
@@ -491,8 +502,9 @@ impl DownloadEngine {
         debug!("🔧 [YT-DLP] Spawning yt-dlp process...");
         let out = output_path.to_string_lossy().to_string();
         let mut cmd = AsyncCommand::new("yt-dlp");
-        cmd.arg("-f")
-            .arg("best")
+        cmd.arg("--ignore-config")
+            .arg("-f")
+            .arg(format_id.unwrap_or_else(|| "best".to_string()))
             .arg("--newline") // Force newline after each progress line (critical for non-TTY)
             .arg("--no-warnings") // Reduce stderr noise
             .arg("--progress") // Explicitly enable progress output

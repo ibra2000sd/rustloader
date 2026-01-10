@@ -14,16 +14,8 @@ fn sample_format() -> Format {
         resolution: Some("720p".to_string()),
         filesize: Some(1_024),
         url: "https://example.com/video-720.mp4".to_string(),
-        quality: None,
-        fps: None,
-        vcodec: None,
-        acodec: None,
-        format_note: None,
-        width: Some(1280),
         height: Some(720),
-        tbr: None,
-        vbr: None,
-        abr: None,
+        ..Default::default()
     }
 }
 
@@ -43,6 +35,7 @@ fn sample_video() -> VideoInfo {
         view_count: None,
         like_count: None,
         extractor: Some("test".to_string()),
+        best_format_id: None,
     }
 }
 

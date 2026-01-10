@@ -27,6 +27,9 @@ pub struct AppSettings {
 
     /// Enable resume capability
     pub enable_resume: bool,
+
+    /// Always show format selector before download
+    pub always_show_format_selector: bool,
 }
 
 impl Default for AppSettings {
@@ -42,12 +45,13 @@ impl Default for AppSettings {
             chunk_size: 8192, // 8KB
             retry_attempts: 3,
             enable_resume: true,
+            always_show_format_selector: true,
         }
     }
 }
 
 /// Video quality options
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum VideoQuality {
     Best,
     Worst,
@@ -62,6 +66,29 @@ impl VideoQuality {
             VideoQuality::Worst => "Worst Available",
             VideoQuality::Specific(_) => "Custom",
         }
+    }
+
+    /// Convert to yt-dlp format string
+    pub fn to_format_string(&self) -> String {
+        match self {
+            VideoQuality::Best => "best".to_string(),
+            VideoQuality::Worst => "worst".to_string(),
+            VideoQuality::Specific(h) => {
+                // If it looks like a number, treat as height constraint
+                if h.chars().all(char::is_numeric) {
+                    format!("bestvideo[height<={}]+bestaudio/best[height<={}]", h, h)
+                } else {
+                    // Otherwise assume it's a raw format ID (backward compatibility)
+                    h.clone()
+                }
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for VideoQuality {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
     }
 }
 

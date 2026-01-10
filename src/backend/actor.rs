@@ -237,16 +237,8 @@ impl BackendActor {
         video_info: &VideoInfo,
         format_id: Option<String>,
     ) -> Result<Format, String> {
-        // Logic from BackendBridge::start_download
-        if let Some(id) = format_id {
-            video_info
-                .formats
-                .iter()
-                .find(|f| f.format_id == id)
-                .cloned()
-                .ok_or_else(|| "Format not found".to_string())
-        } else {
-            // combined format logic
+        // Helper to find best combined format
+        let find_best_combined = || -> Result<Format, String> {
             let combined_formats: Vec<_> = video_info
                 .formats
                 .iter()
@@ -266,6 +258,54 @@ impl BackendActor {
             } else {
                 Err("No combined format found".to_string())
             }
+        };
+
+        match format_id.as_deref() {
+            // Case 1: No format or "best" requested -> Use best combined
+            None | Some("best") => find_best_combined(),
+
+            // Case 2: "worst" requested -> Find lowest quality combined
+            Some("worst") => {
+                let mut combined_formats: Vec<_> = video_info
+                    .formats
+                    .iter()
+                    .filter(|f| f.is_combined())
+                    .cloned()
+                    .collect();
+                
+                // Sort by height ascending
+                combined_formats.sort_by_key(|f| f.height.unwrap_or(u32::MAX));
+                
+                combined_formats.first()
+                    .cloned()
+                    .ok_or_else(|| "No format found for 'worst'".to_string())
+            }
+
+            // Case 3: Resolution selector (e.g. "bestvideo[height<=1080]...")
+            Some(selector) if selector.contains("height<=") => {
+                // Parse height from selector string
+                if let Some(start) = selector.find("height<=") {
+                    let remainder = &selector[start + 8..];
+                    // Find end of number (could be ']' or other non-digit)
+                    let end = remainder.find(|c: char| !c.is_ascii_digit()).unwrap_or(remainder.len());
+                    
+                    if let Ok(height) = remainder[..end].parse::<u32>() {
+                        if let Some(fmt) = video_info.best_format_for_quality(height) {
+                            return Ok(fmt.clone());
+                        }
+                    }
+                }
+                // Fallback to best if parsing fails or no match
+                find_best_combined()
+            }
+
+            // Case 4: Specific Format ID (Exact Match)
+            Some(id) => video_info
+                .formats
+                .iter()
+                .find(|f| f.format_id == *id)
+                .cloned()
+                .ok_or_else(|| format!("Format not found: {}", id)),
         }
     }
 

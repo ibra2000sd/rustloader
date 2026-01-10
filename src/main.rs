@@ -156,7 +156,7 @@ async fn test_download_cli(url: String) {
     };
 
     match engine
-        .download(&download_url, &output_path, progress_tx)
+        .download(&download_url, &output_path, None, progress_tx)
         .await
     {
         Ok(_) => println!("Download completed successfully!"),
