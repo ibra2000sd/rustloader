@@ -74,31 +74,7 @@ pub fn main_view<'a>(
         .spacing(4)
     };
 
-    // 2. Options Section
-    let options_section = {
-        let quality_options = vec![
-            VideoQuality::Best,
-            VideoQuality::Specific("1080".to_string()),
-            VideoQuality::Specific("720".to_string()),
-            VideoQuality::Specific("480".to_string()),
-            VideoQuality::Worst,
-        ];
-
-        let quality_picker = pick_list(quality_options, Some(quality.clone()), |q| {
-            Message::QualityChanged(q.to_format_string())
-        })
-        .width(Length::Fixed(150.0))
-        .padding(10);
-
-        row![
-            text("Quality:")
-                .size(14)
-                .style(iced::theme::Text::Color(RustloaderTheme::TEXT_SECONDARY)),
-            quality_picker,
-        ]
-        .spacing(12)
-        .align_items(Alignment::Center)
-    };
+    // 2. Options Section (removed quality dropdown; format selected via modal after extraction)
 
     // 3. Status Bar
     let status_bar = container(
@@ -109,8 +85,26 @@ pub fn main_view<'a>(
     .padding(10)
     .width(Length::Fill);
 
-    // 4. Downloads List
-    let downloads_list = if downloads.is_empty() {
+    // 4. Downloads/List or Loading Indicator
+    let downloads_list = if is_extracting {
+        container(
+            column![
+                text("Analyzing video...")
+                    .size(18)
+                    .style(iced::theme::Text::Color(RustloaderTheme::TEXT_SECONDARY)),
+                Space::with_height(10),
+                text("Please wait while we fetch video information")
+                    .size(12)
+                    .style(iced::theme::Text::Color(RustloaderTheme::TEXT_DISABLED)),
+            ]
+            .spacing(8)
+            .align_items(Alignment::Center),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .center_x()
+        .center_y()
+    } else if downloads.is_empty() {
         container(
             column![
                 text("No active downloads")
@@ -177,7 +171,7 @@ pub fn main_view<'a>(
             .style(iced::theme::Container::Custom(Box::new(
                 theme::GlassContainer
             ))),
-        container(options_section).padding(12),
+        // Options section removed to avoid duplicate quality UI
         Space::with_height(12),
         text("Active Downloads")
             .size(14)

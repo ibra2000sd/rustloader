@@ -317,11 +317,12 @@ impl Application for RustloaderApp {
                         self.is_extracting = false;
                         match result {
                             Ok(video_info) => {
-                                // v1.0.0: Use dropdown quality directly (no modal)
-                                let format_id = self.quality.to_format_string();
-                                return Command::perform(async {}, move |_| {
-                                    Message::StartDownloadWithFormat(video_info, format_id)
-                                });
+                                // Show format selector modal instead of auto-download
+                                self.status_message = format!(
+                                    "Select format for: {}",
+                                    video_info.title
+                                );
+                                self.format_selector = Some(FormatSelector::new(video_info));
                             }
                             Err(e) => {
                                 self.url_error = Some(make_error_user_friendly(&e));
@@ -505,11 +506,41 @@ impl Application for RustloaderApp {
                 Command::none()
             }
 
-            // v1.0.0: Format Selector logic deprecated
-            // Message::ShowFormatSelector(video) => { ... }
-            // Message::FormatSelector(msg) => { ... }
+            // Format selector modal integration
             Message::ShowFormatSelector(_) => Command::none(),
-            Message::FormatSelector(_) => Command::none(),
+            Message::FormatSelector(msg) => {
+                if let Some(selector) = &mut self.format_selector {
+                    selector.update(msg.clone());
+
+                    // On confirm, start download with selected format
+                    if let FormatSelectorMessage::Confirm = msg {
+                        let selected = selector.selected_format_id.clone();
+                        let video_info = selector.video.clone();
+
+                        // Fallback to best if none selected
+                        let format_id = selected.unwrap_or_else(|| {
+                            video_info
+                                .best_format_id
+                                .clone()
+                                .unwrap_or_else(|| "best".to_string())
+                        });
+
+                        // Hide modal
+                        self.format_selector = None;
+
+                        return Command::perform(async {}, move |_| {
+                            Message::StartDownloadWithFormat(video_info, format_id)
+                        });
+                    }
+
+                    // On cancel, hide modal
+                    if let FormatSelectorMessage::Cancel = msg {
+                        self.format_selector = None;
+                        self.status_message = "Format selection cancelled".to_string();
+                    }
+                }
+                Command::none()
+            }
 
             Message::StartDownloadWithFormat(video_info, format_id) => {
                 let output_path = PathBuf::from(&self.download_location)
@@ -518,6 +549,9 @@ impl Application for RustloaderApp {
                 self.url_input.clear();
                 self.url_error = None;
                 self.status_message = format!("Starting download: {}", video_info.title);
+
+                // Ensure any visible format selector is closed
+                self.format_selector = None;
 
                 // Send start command
                 let _ = self.backend_sender.try_send(BackendCommand::StartDownload {
@@ -691,8 +725,9 @@ impl Application for RustloaderApp {
         use iced::Length;
 
         // If format selector is active, show it as a modal/overlay
-        // v1.0.0: Format selector modal removed in favor of main UI dropdown
-        // if let Some(ref selector) = self.format_selector { ... }
+        if let Some(ref selector) = self.format_selector {
+            return selector.view().map(Message::FormatSelector);
+        }
 
         // Sidebar
         let sidebar = container(
@@ -852,6 +887,10 @@ async fn save_settings_to_db(db_manager: &DatabaseManager, settings: &AppSetting
 fn make_error_user_friendly(error: &str) -> String {
     let error_lower = error.to_lowercase();
 
+    if error_lower.contains("requested format is not available") {
+        return "Could not get video information. The selected quality may not be available for this video. Try 'Best Available' or choose a different format.".to_string();
+    }
+
     if error_lower.contains("truncated") || error_lower.contains("incomplete") {
         "Please enter a complete and valid URL".to_string()
     } else if error_lower.contains("invalid url") || error_lower.contains("malformed") {
@@ -876,6 +915,6 @@ fn make_error_user_friendly(error: &str) -> String {
         "This video cannot be downloaded due to copyright restrictions".to_string()
     } else {
         // Generic fallback
-        "Unable to process this URL. Please try a different video".to_string()
+        "Unable to process this URL. Please check the URL and try again. If the problem persists, try a different video.".to_string()
     }
 }

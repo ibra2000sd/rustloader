@@ -30,6 +30,8 @@ impl YtDlpExtractor {
         let ytdlp_path = match find_ytdlp() {
             Some(path) => {
                 info!("Found yt-dlp at: {}", path.display());
+                // Explicitly log to stdout for debugging visibility in GUI console
+                println!("Using yt-dlp binary at: {}", path.display());
                 path
             }
             None => {
