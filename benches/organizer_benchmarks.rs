@@ -1,24 +1,30 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use rustloader::utils::organizer::{get_quality_folder, sanitize_filename};
+// `sanitize_filename` and `get_quality_folder` are associated functions of
+// `FileOrganizer` (not free functions), so they are called as `FileOrganizer::…`.
+use rustloader::utils::organizer::FileOrganizer;
 
 fn benchmark_sanitize_filename(c: &mut Criterion) {
     let mut group = c.benchmark_group("Filename Sanitization");
 
     group.bench_function("simple", |b| {
-        b.iter(|| sanitize_filename(black_box("video.mp4")))
+        b.iter(|| FileOrganizer::sanitize_filename(black_box("video.mp4")))
     });
 
     group.bench_function("complex", |b| {
-        b.iter(|| sanitize_filename(black_box("My Video (2024) - Best Quality [1080p].mp4")))
+        b.iter(|| {
+            FileOrganizer::sanitize_filename(black_box(
+                "My Video (2024) - Best Quality [1080p].mp4",
+            ))
+        })
     });
 
     group.bench_function("malicious", |b| {
-        b.iter(|| sanitize_filename(black_box("../../../etc/passwd")))
+        b.iter(|| FileOrganizer::sanitize_filename(black_box("../../../etc/passwd")))
     });
 
     let long_name = "a".repeat(500) + ".mp4";
     group.bench_function("long", |b| {
-        b.iter(|| sanitize_filename(black_box(&long_name)))
+        b.iter(|| FileOrganizer::sanitize_filename(black_box(&long_name)))
     });
 
     group.finish();
@@ -30,7 +36,7 @@ fn benchmark_quality_folder(c: &mut Criterion) {
 
     for height in heights {
         group.bench_function(format!("{}p", height), |b| {
-            b.iter(|| get_quality_folder(black_box(height)))
+            b.iter(|| FileOrganizer::get_quality_folder(black_box(height)))
         });
     }
 

@@ -110,9 +110,9 @@ impl QueueManager {
                         task_id.clone(),
                         DownloadTask {
                             id: task_id,
-                            video_info,
+                            video_info: *video_info,
                             output_path,
-                            format, // Use the persisted format
+                            format: *format, // Use the persisted format
                             status: TaskStatus::Queued,
                             progress: None,
                             added_at: timestamp,
@@ -218,8 +218,8 @@ impl QueueManager {
             .event_log
             .log(QueueEvent::TaskAdded {
                 task_id: task_id.clone(),
-                video_info: log_video_info,
-                format: log_format,
+                video_info: Box::new(log_video_info),
+                format: Box::new(log_format),
                 output_path: log_output_path,
                 timestamp: Utc::now(),
             })

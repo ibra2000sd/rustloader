@@ -9,7 +9,9 @@ pub enum BackendCommand {
         url: String,
     },
     StartDownload {
-        video_info: VideoInfo,
+        // Boxed: VideoInfo is large; boxing keeps the enum variants similar in
+        // size (clippy::large_enum_variant).
+        video_info: Box<VideoInfo>,
         output_path: PathBuf,
         format_id: Option<String>,
     },
