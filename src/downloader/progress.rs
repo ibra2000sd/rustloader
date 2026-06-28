@@ -1,6 +1,11 @@
 //! Progress tracking for downloads
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// Number of seconds without forward progress before a download is considered
+/// stalled. Ported from the legacy `rustloader2` engine
+/// (`STALL_DETECTION_SECONDS` in its `src/downloader.rs`).
+pub const STALL_DETECTION_SECONDS: u64 = 30;
 
 /// Progress tracking structure
 #[derive(Debug, Clone)]
@@ -68,6 +73,11 @@ impl DownloadProgress {
         self.status = DownloadStatus::Failed(error);
     }
 
+    /// Mark as stalled (no forward progress within the stall threshold).
+    pub fn stalled(&mut self) {
+        self.status = DownloadStatus::Stalled;
+    }
+
     /// Mark as paused
     #[allow(dead_code)] // Reserved for pause/resume controls
     pub fn pause(&mut self) {
@@ -100,6 +110,68 @@ pub enum DownloadStatus {
     Completed,
     Failed(String),
     Paused,
+    /// No forward progress was observed within the stall threshold.
+    Stalled,
+}
+
+/// Detects download stalls: no forward progress within a time threshold.
+///
+/// This provides the automatic stall *classification* the engine previously
+/// lacked — the GUI only tracked per-task timestamps and offered a manual
+/// "restart stalled" button, but nothing classified a download as stalled on
+/// its own. The detector is a small, clock-injectable helper (see
+/// [`StallDetector::is_stalled_at`]) so it can be tested deterministically
+/// without sleeping or network I/O.
+#[derive(Debug)]
+pub struct StallDetector {
+    threshold: Duration,
+    last_progress: Instant,
+    last_downloaded: u64,
+}
+
+impl StallDetector {
+    /// Create a detector with the default [`STALL_DETECTION_SECONDS`] threshold.
+    pub fn new() -> Self {
+        Self::with_threshold(Duration::from_secs(STALL_DETECTION_SECONDS))
+    }
+
+    /// Create a detector with a custom threshold.
+    pub fn with_threshold(threshold: Duration) -> Self {
+        Self {
+            threshold,
+            last_progress: Instant::now(),
+            last_downloaded: 0,
+        }
+    }
+
+    /// Record the latest cumulative downloaded-byte count. If it advanced, the
+    /// stall timer is reset. Returns `true` when progress was made.
+    pub fn record(&mut self, downloaded: u64) -> bool {
+        if downloaded > self.last_downloaded {
+            self.last_downloaded = downloaded;
+            self.last_progress = Instant::now();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Whether the download has stalled as of `now` (no progress within the
+    /// threshold).
+    pub fn is_stalled_at(&self, now: Instant) -> bool {
+        now.duration_since(self.last_progress) >= self.threshold
+    }
+
+    /// Whether the download has stalled as of the current instant.
+    pub fn is_stalled(&self) -> bool {
+        self.is_stalled_at(Instant::now())
+    }
+}
+
+impl Default for StallDetector {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
@@ -297,6 +369,57 @@ mod tests {
 
         progress.resume();
         assert!(matches!(progress.status, DownloadStatus::Downloading));
+    }
+
+    #[test]
+    fn test_stalled_status() {
+        let mut progress = DownloadProgress::new(1000, 10);
+        progress.stalled();
+        assert!(matches!(progress.status, DownloadStatus::Stalled));
+    }
+
+    // ============================================================
+    // STALL DETECTION TESTS
+    // ============================================================
+
+    #[test]
+    fn test_stall_detector_default_threshold() {
+        let detector = StallDetector::new();
+        // With the default 30s threshold a freshly-created detector is not
+        // stalled "now".
+        assert!(!detector.is_stalled());
+    }
+
+    #[test]
+    fn test_stall_detector_flags_no_progress_within_threshold() {
+        // A controllable fake source: feed the detector non-advancing byte
+        // counts. With a zero threshold, "no progress" classifies as stalled
+        // immediately — deterministic, no sleeping or network.
+        let mut detector = StallDetector::with_threshold(Duration::ZERO);
+        assert!(!detector.record(0), "0 bytes is not forward progress");
+        assert!(
+            detector.is_stalled(),
+            "no progress past the threshold must classify as stalled"
+        );
+    }
+
+    #[test]
+    fn test_stall_detector_resets_on_progress() {
+        let now = Instant::now();
+        let mut detector = StallDetector::with_threshold(Duration::from_secs(30));
+
+        // Forward progress is recorded and resets the stall timer.
+        assert!(detector.record(1024));
+        assert!(!detector.is_stalled_at(now));
+
+        // A long time later with the same byte count => stalled.
+        let later = now + Duration::from_secs(31);
+        assert!(!detector.record(1024), "same byte count is not progress");
+        assert!(detector.is_stalled_at(later));
+
+        // Fresh progress clears the stall again.
+        assert!(detector.record(2048));
+        assert!(!detector.is_stalled());
     }
 
     // ============================================================
