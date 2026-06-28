@@ -9,7 +9,9 @@
 
 use crate::downloader::merger::{cleanup_segments, merge_segments, MergeProgress};
 // progress types already imported above
-use crate::downloader::progress::{DownloadProgress, DownloadStatus};
+use crate::downloader::progress::{
+    DownloadProgress, DownloadStatus, StallDetector, STALL_DETECTION_SECONDS,
+};
 use crate::downloader::segment::{calculate_segments, download_segment, SegmentProgress};
 use anyhow::Result;
 use futures::stream::{self, StreamExt};
@@ -470,6 +472,39 @@ impl DownloadEngine {
             }
         });
 
+        // Stall watchdog: classify the download as stalled and surface a
+        // `DownloadStatus::Stalled` event if no forward progress is observed
+        // within the stall threshold (`STALL_DETECTION_SECONDS`). This is the
+        // automatic stall detection the engine previously lacked; it flows
+        // through the same `progress_tx` the GUI and CLI already consume.
+        let stall_progress = Arc::clone(&segment_progress_clone);
+        let stall_tx = progress_tx.clone();
+        let stall_watchdog = tokio::spawn(async move {
+            let mut detector = StallDetector::new();
+            let mut ticker = tokio::time::interval(Duration::from_secs(5));
+            ticker.tick().await; // consume the immediate first tick
+            let mut reported = false;
+            loop {
+                ticker.tick().await;
+                let downloaded: u64 = { stall_progress.lock().await.iter().sum() };
+                if detector.record(downloaded) {
+                    // Progress resumed; allow a fresh stall report later.
+                    reported = false;
+                } else if detector.is_stalled() && !reported {
+                    reported = true;
+                    warn!(
+                        "⏱️ [ENGINE] Download stalled (no progress for {STALL_DETECTION_SECONDS}s)"
+                    );
+                    let mut progress = DownloadProgress::new(file_size, segments_count);
+                    progress.downloaded_bytes = downloaded;
+                    progress.stalled();
+                    if stall_tx.send(progress).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+
         // Wait for all segments to complete
         tokio::pin!(download_tasks);
 
@@ -487,8 +522,9 @@ impl DownloadEngine {
             }
         }
 
-        // Abort the progress task
+        // Abort the progress + stall-watchdog tasks
         segment_progress_task.abort();
+        stall_watchdog.abort();
 
         // Check if download failed
         if let Some(error) = download_error {
