@@ -97,6 +97,11 @@ mod tests {
     fn test_app_support_dir_is_not_relative() {
         let path = get_app_support_dir();
         assert!(path.is_absolute(), "App support dir must be absolute path");
+        // The "Library/Application Support" layout is a macOS convention. On
+        // other platforms `get_app_support_dir()` still returns an absolute
+        // path (asserted above) but with a platform-specific layout, so only
+        // assert the macOS convention on macOS.
+        #[cfg(target_os = "macos")]
         assert!(
             path.to_string_lossy()
                 .contains("Library/Application Support"),
