@@ -76,9 +76,10 @@ impl Default for OrganizationSettings {
 impl FileOrganizer {
     /// Initialize organizer with user settings
     pub async fn new(settings: OrganizationSettings) -> Result<Self> {
-        let base_dir = dirs::download_dir()
-            .context("Failed to get downloads directory")?
-            .join("Rustloader");
+        // Use the shared downloads-dir resolver, which falls back gracefully
+        // (home/Downloads, then a temp dir) when the OS reports no Downloads
+        // directory — e.g. on headless CI runners — instead of failing.
+        let base_dir = crate::utils::get_downloads_dir().join("Rustloader");
 
         let organizer = Self { base_dir, settings };
 
