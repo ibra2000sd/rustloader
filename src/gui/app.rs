@@ -155,7 +155,9 @@ pub enum Message {
     ClearUrlInput,
 
     // Backend Events
-    BackendEventReceived(BackendEvent),
+    // Boxed: BackendEvent carries a large VideoInfo; boxing keeps the Message
+    // enum variants similar in size (clippy::large_enum_variant).
+    BackendEventReceived(Box<BackendEvent>),
 
     // Queue control
     PauseDownload(String),
@@ -296,7 +298,7 @@ impl Application for RustloaderApp {
 
             // Backend Events Handling
             Message::BackendEventReceived(event) => {
-                match event {
+                match *event {
                     BackendEvent::ExtractionStarted => {
                         self.is_extracting = true;
                         self.status_message = "Extracting video information...".to_string();
@@ -317,7 +319,7 @@ impl Application for RustloaderApp {
                                 // Send start command
                                 let _ =
                                     self.backend_sender.try_send(BackendCommand::StartDownload {
-                                        video_info,
+                                        video_info: Box::new(video_info),
                                         output_path,
                                         format_id: None, // Auto format
                                     });
@@ -392,7 +394,6 @@ impl Application for RustloaderApp {
                     BackendEvent::Error(e) => {
                         self.status_message = format!("Error: {}", e);
                     }
-                    _ => {}
                 }
                 Command::none()
             }
@@ -637,9 +638,10 @@ impl Application for RustloaderApp {
                         if let Some(rx) = rx_opt {
                             let mut rx = rx;
                             match rx.recv().await {
-                                Some(event) => {
-                                    (Message::BackendEventReceived(event), State::Ready(rx))
-                                }
+                                Some(event) => (
+                                    Message::BackendEventReceived(Box::new(event)),
+                                    State::Ready(rx),
+                                ),
                                 None => std::future::pending().await,
                             }
                         } else {
@@ -647,7 +649,10 @@ impl Application for RustloaderApp {
                         }
                     }
                     State::Ready(mut rx) => match rx.recv().await {
-                        Some(event) => (Message::BackendEventReceived(event), State::Ready(rx)),
+                        Some(event) => (
+                            Message::BackendEventReceived(Box::new(event)),
+                            State::Ready(rx),
+                        ),
                         None => std::future::pending().await,
                     },
                     State::Empty => std::future::pending().await,

@@ -105,9 +105,7 @@ pub struct MergeProgress {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
     use tempfile::TempDir;
-    use tokio::fs;
 
     // ============================================================
     // MERGE SEGMENTS TESTS
@@ -124,7 +122,7 @@ mod tests {
         std::fs::write(&segment_path, test_data).unwrap();
 
         // Merge without progress channel
-        let result = merge_segments(&[segment_path.clone()], &output_path, None).await;
+        let result = merge_segments(std::slice::from_ref(&segment_path), &output_path, None).await;
         assert!(result.is_ok(), "Single segment merge should succeed");
 
         // Verify output file exists and contains correct data
