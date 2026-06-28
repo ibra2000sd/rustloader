@@ -1,7 +1,7 @@
 use chrono::Utc;
 use rustloader::downloader::{DownloadConfig, DownloadEngine};
 use rustloader::extractor::{Format, VideoInfo};
-use rustloader::queue::{DownloadTask, EventLog, QueueEvent, QueueManager, TaskStatus};
+use rustloader::queue::{EventLog, QueueEvent, QueueManager, TaskStatus};
 use rustloader::utils::{FileOrganizer, MetadataManager, OrganizationSettings};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -25,17 +25,17 @@ async fn test_persistence_rehydration() {
     let events = vec![
         QueueEvent::TaskAdded {
             task_id: task_id.clone(),
-            video_info: VideoInfo {
+            video_info: Box::new(VideoInfo {
                 id: "video-id".to_string(),
                 title: "Test Video".to_string(),
                 url: "https://example.com/video".to_string(),
                 ..Default::default()
-            },
-            format: Format {
+            }),
+            format: Box::new(Format {
                 format_id: "best".to_string(),
                 ext: "mp4".to_string(),
                 ..Default::default()
-            },
+            }),
             output_path: base_dir.join("test.mp4"),
             timestamp: Utc::now(),
         },
@@ -118,11 +118,11 @@ async fn test_persistence_corruption_resilience() {
     let task_id_valid = "valid-task-1";
     let valid_event = QueueEvent::TaskAdded {
         task_id: task_id_valid.to_string(),
-        video_info: VideoInfo {
+        video_info: Box::new(VideoInfo {
             title: "Valid Video".into(),
             ..Default::default()
-        },
-        format: Format::default(),
+        }),
+        format: Box::new(Format::default()),
         output_path: PathBuf::from("/tmp/video.mp4"),
         timestamp: Utc::now(),
     };

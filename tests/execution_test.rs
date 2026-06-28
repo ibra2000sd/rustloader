@@ -1,9 +1,8 @@
 use chrono::Utc;
 use rustloader::downloader::{DownloadConfig, DownloadEngine};
 use rustloader::extractor::{Format, VideoInfo};
-use rustloader::queue::{EventLog, QueueEvent, QueueManager};
+use rustloader::queue::{EventLog, QueueManager};
 use rustloader::utils::{FileOrganizer, MetadataManager, OrganizationSettings};
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::tempdir;

@@ -15,8 +15,12 @@ pub enum QueueEvent {
     /// A new task was added to the queue
     TaskAdded {
         task_id: String,
-        video_info: VideoInfo,
-        format: Format,
+        // Boxed: VideoInfo and Format are large; boxing keeps the enum
+        // variants similar in size (clippy::large_enum_variant). Box<T>
+        // serializes/deserializes transparently, so the event-log format is
+        // unchanged.
+        video_info: Box<VideoInfo>,
+        format: Box<Format>,
         output_path: PathBuf,
         timestamp: DateTime<Utc>,
     },

@@ -80,9 +80,11 @@ mod tests {
 
     #[test]
     fn test_config_validation_like_defaults() {
-        let mut config = AppSettings::default();
-        config.max_concurrent = 0;
-        config.segments = 0;
+        let mut config = AppSettings {
+            max_concurrent: 0,
+            segments: 0,
+            ..Default::default()
+        };
 
         // Enforce sane minimums
         if config.max_concurrent == 0 {

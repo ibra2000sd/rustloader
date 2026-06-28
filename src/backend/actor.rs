@@ -120,7 +120,7 @@ impl BackendActor {
                     output_path,
                     format_id,
                 } => {
-                    self.handle_start_download(video_info, output_path, format_id)
+                    self.handle_start_download(*video_info, output_path, format_id)
                         .await;
                 }
                 BackendCommand::PauseDownload(id) => {
