@@ -7,6 +7,6 @@ pub mod segment;
 
 // Re-export for convenience
 #[allow(unused_imports)] // Exposed for external callers; may be unused internally
-pub use engine::{DownloadConfig, DownloadEngine};
+pub use engine::{build_ytdlp_args, DownloadConfig, DownloadEngine, YtDlpOptions};
 #[allow(unused_imports)] // Exposed for external callers; may be unused internally
 pub use progress::{DownloadProgress, DownloadStatus};

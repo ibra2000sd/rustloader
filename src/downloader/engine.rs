@@ -124,6 +124,93 @@ fn parse_yt_dlp_progress(line: &str) -> Option<(f64, f64, u64)> {
     Some((pct, speed_bps, total_bytes))
 }
 
+/// Options that tune the yt-dlp invocation used for YouTube / HLS / complex
+/// sources.
+///
+/// Semantics ported from the legacy `rustloader2` CLI (`src/cli.rs`,
+/// `src/downloader.rs`). These map the CLI's ergonomic flags onto the yt-dlp
+/// arguments the engine already shells out with — they do **not** introduce a
+/// second download code path. `YtDlpOptions::default()` reproduces the engine's
+/// historical invocation exactly.
+#[derive(Debug, Clone, Default)]
+pub struct YtDlpOptions {
+    /// Maximum video height (e.g. 480/720/1080). `None` => best available.
+    pub quality: Option<u32>,
+    /// Extract audio only (maps to yt-dlp `-x`).
+    pub audio_only: bool,
+    /// Audio format when extracting audio (e.g. "mp3").
+    pub audio_format: Option<String>,
+    /// Download subtitles (`--write-subs --sub-langs all`).
+    pub subtitles: bool,
+    /// Download the whole playlist (`--yes-playlist`).
+    pub playlist: bool,
+    /// Clip start time (e.g. 00:01:00).
+    pub start_time: Option<String>,
+    /// Clip end time (e.g. 00:02:00).
+    pub end_time: Option<String>,
+    /// Audio bitrate passed to the ffmpeg postprocessor (e.g. "128K").
+    pub audio_bitrate: Option<String>,
+}
+
+/// Build the yt-dlp argument vector for the given options, URL and output path.
+///
+/// With [`YtDlpOptions::default()`] this returns exactly the engine's historical
+/// argument list (`-f best --newline --no-warnings --progress -o <out> <url>`),
+/// so the GUI download path is unchanged. Extra arguments are only emitted when
+/// the corresponding option is set, which is how the CLI flags become real
+/// behaviour instead of cosmetics.
+pub fn build_ytdlp_args(opts: &YtDlpOptions, url: &str, output: &str) -> Vec<String> {
+    let mut args: Vec<String> = Vec::new();
+
+    if opts.audio_only {
+        args.push("-x".to_string());
+        if let Some(fmt) = &opts.audio_format {
+            args.push("--audio-format".to_string());
+            args.push(fmt.clone());
+        }
+    } else {
+        let selector = match opts.quality {
+            Some(h) => {
+                format!("bestvideo[height<={h}]+bestaudio/best[height<={h}]/best")
+            }
+            None => "best".to_string(),
+        };
+        args.push("-f".to_string());
+        args.push(selector);
+    }
+
+    if let Some(bitrate) = &opts.audio_bitrate {
+        args.push("--postprocessor-args".to_string());
+        args.push(format!("ffmpeg:-b:a {bitrate}"));
+    }
+
+    if opts.subtitles {
+        args.push("--write-subs".to_string());
+        args.push("--sub-langs".to_string());
+        args.push("all".to_string());
+    }
+
+    if opts.playlist {
+        args.push("--yes-playlist".to_string());
+    }
+
+    if opts.start_time.is_some() || opts.end_time.is_some() {
+        let start = opts.start_time.clone().unwrap_or_else(|| "0".to_string());
+        let end = opts.end_time.clone().unwrap_or_else(|| "inf".to_string());
+        args.push("--download-sections".to_string());
+        args.push(format!("*{start}-{end}"));
+    }
+
+    args.push("--newline".to_string());
+    args.push("--no-warnings".to_string());
+    args.push("--progress".to_string());
+    args.push("-o".to_string());
+    args.push(output.to_string());
+    args.push(url.to_string());
+
+    args
+}
+
 /// Download configuration
 #[derive(Debug, Clone)]
 pub struct DownloadConfig {
@@ -154,6 +241,7 @@ impl Default for DownloadConfig {
 pub struct DownloadEngine {
     client: Client,
     config: DownloadConfig,
+    ytdlp_options: YtDlpOptions,
 }
 
 impl DownloadEngine {
@@ -165,7 +253,18 @@ impl DownloadEngine {
             .build()
             .expect("Failed to create HTTP client");
 
-        Self { client, config }
+        Self {
+            client,
+            config,
+            ytdlp_options: YtDlpOptions::default(),
+        }
+    }
+
+    /// Configure the yt-dlp options used by the yt-dlp download path
+    /// (builder-style). Defaults preserve the engine's historical behaviour.
+    pub fn with_ytdlp_options(mut self, options: YtDlpOptions) -> Self {
+        self.ytdlp_options = options;
+        self
     }
 
     /// Download file with progress tracking
@@ -487,18 +586,15 @@ impl DownloadEngine {
         // Best-effort: don't propagate an error if receiver was dropped.
         let _ = progress_tx_for_spawn.send(initial.clone()).await;
 
-        // Prepare command: yt-dlp with explicit progress flags
+        // Prepare command: yt-dlp with explicit progress flags. Arguments are
+        // built from the configured options; with default options this is the
+        // historical `-f best --newline --no-warnings --progress -o <out> <url>`.
         debug!("🔧 [YT-DLP] Spawning yt-dlp process...");
         let out = output_path.to_string_lossy().to_string();
+        let args = build_ytdlp_args(&self.ytdlp_options, url, &out);
+        debug!("🔧 [YT-DLP] Args: {:?}", args);
         let mut cmd = AsyncCommand::new("yt-dlp");
-        cmd.arg("-f")
-            .arg("best")
-            .arg("--newline") // Force newline after each progress line (critical for non-TTY)
-            .arg("--no-warnings") // Reduce stderr noise
-            .arg("--progress") // Explicitly enable progress output
-            .arg("-o")
-            .arg(out)
-            .arg(url);
+        cmd.args(&args);
         // Combine stderr and stdout to capture all output
         cmd.stderr(Stdio::piped());
         cmd.stdout(Stdio::piped());
@@ -975,6 +1071,97 @@ mod tests {
 
         assert_eq!(config.segments, 32);
         assert_eq!(config.retry_attempts, 0, "Should allow 0 retry attempts");
+    }
+
+    // ============================================================
+    // YT-DLP ARGUMENT BUILDER TESTS
+    // ============================================================
+
+    #[test]
+    fn test_build_ytdlp_args_default_matches_legacy() {
+        // Default options MUST reproduce the engine's historical invocation so
+        // the GUI download path is unchanged by the CLI work.
+        let opts = YtDlpOptions::default();
+        let args = build_ytdlp_args(&opts, "https://example.com/v", "/tmp/out.mp4");
+        assert_eq!(
+            args,
+            vec![
+                "-f",
+                "best",
+                "--newline",
+                "--no-warnings",
+                "--progress",
+                "-o",
+                "/tmp/out.mp4",
+                "https://example.com/v",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_build_ytdlp_args_quality_selector() {
+        let opts = YtDlpOptions {
+            quality: Some(720),
+            ..Default::default()
+        };
+        let args = build_ytdlp_args(&opts, "URL", "/out.mp4");
+        assert!(args.iter().any(|a| a == "-f"));
+        assert!(
+            args.iter().any(|a| a.contains("height<=720")),
+            "quality must produce a height-capped selector: {args:?}"
+        );
+    }
+
+    #[test]
+    fn test_build_ytdlp_args_audio_only() {
+        let opts = YtDlpOptions {
+            audio_only: true,
+            audio_format: Some("mp3".to_string()),
+            audio_bitrate: Some("128K".to_string()),
+            ..Default::default()
+        };
+        let args = build_ytdlp_args(&opts, "URL", "/out.mp3");
+        assert!(args.iter().any(|a| a == "-x"));
+        assert!(args.windows(2).any(|w| w == ["--audio-format", "mp3"]));
+        assert!(args.iter().any(|a| a.contains("ffmpeg:-b:a 128K")));
+        // No video format selector when extracting audio.
+        assert!(!args.iter().any(|a| a == "-f"));
+    }
+
+    #[test]
+    fn test_build_ytdlp_args_subs_and_playlist() {
+        let opts = YtDlpOptions {
+            subtitles: true,
+            playlist: true,
+            ..Default::default()
+        };
+        let args = build_ytdlp_args(&opts, "URL", "/out.mp4");
+        assert!(args.iter().any(|a| a == "--write-subs"));
+        assert!(args.windows(2).any(|w| w == ["--sub-langs", "all"]));
+        assert!(args.iter().any(|a| a == "--yes-playlist"));
+    }
+
+    #[test]
+    fn test_build_ytdlp_args_sections() {
+        let opts = YtDlpOptions {
+            start_time: Some("00:00:10".to_string()),
+            end_time: Some("00:00:20".to_string()),
+            ..Default::default()
+        };
+        let args = build_ytdlp_args(&opts, "URL", "/out.mp4");
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["--download-sections", "*00:00:10-00:00:20"]));
+    }
+
+    #[test]
+    fn test_engine_with_ytdlp_options_builder() {
+        let opts = YtDlpOptions {
+            quality: Some(1080),
+            ..Default::default()
+        };
+        let engine = DownloadEngine::default().with_ytdlp_options(opts);
+        assert_eq!(engine.ytdlp_options.quality, Some(1080));
     }
 
     #[test]

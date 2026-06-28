@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod backend;
+pub mod cli;
 pub mod database;
 pub mod downloader;
 pub mod extractor;

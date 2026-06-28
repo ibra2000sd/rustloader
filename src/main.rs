@@ -6,21 +6,12 @@
 use anyhow::Result;
 use clap::Parser;
 use iced::Application;
-use rustloader::downloader;
-use rustloader::extractor::{self, Extractor};
+use rustloader::cli::Cli;
 use rustloader::gui;
-use rustloader::utils;
 use std::process::Command;
 
-#[derive(Parser)]
-struct Args {
-    /// Test download with provided URL
-    #[arg(long)]
-    test_download: Option<String>,
-}
-
 fn main() -> Result<()> {
-    let args = Args::parse();
+    let cli = Cli::parse();
 
     // Initialize logging
     tracing_subscriber::fmt::init();
@@ -28,12 +19,11 @@ fn main() -> Result<()> {
     // Check for yt-dlp
     check_ytdlp_installed();
 
-    if let Some(url) = args.test_download {
-        // Run headless test inside a temporary Tokio runtime
+    if cli.is_cli_mode() {
+        // Run a headless download through the existing engine inside a
+        // temporary Tokio runtime, then exit (no GUI).
         let rt = tokio::runtime::Runtime::new()?;
-        rt.block_on(async move {
-            test_download_cli(url).await;
-        });
+        rt.block_on(async move { rustloader::cli::run(&cli).await })?;
         return Ok(());
     }
 
@@ -83,83 +73,4 @@ fn check_ytdlp_installed() {
     eprintln!("  pip install yt-dlp");
     eprintln!("  or: brew install yt-dlp");
     eprintln!("  or visit: https://github.com/yt-dlp/yt-dlp");
-}
-
-async fn test_download_cli(url: String) {
-    println!("Testing download: {}", url);
-
-    // Initialize extractor
-    let extractor = match extractor::YtDlpExtractor::new() {
-        Ok(e) => e,
-        Err(e) => {
-            eprintln!("Failed to initialize extractor: {}", e);
-            return;
-        }
-    };
-
-    // Extract video info
-    println!("Extracting video info...");
-    let video_info = match extractor.extract_info(&url).await {
-        Ok(info) => info,
-        Err(e) => {
-            eprintln!("Failed to extract video info: {}", e);
-            return;
-        }
-    };
-
-    println!("Title: {}", video_info.title);
-    println!("Duration: {:?}", video_info.duration);
-    println!("File size: {:?}", video_info.filesize);
-
-    // Initialize download engine
-    let config = downloader::DownloadConfig::default();
-    let engine = downloader::DownloadEngine::new(config);
-
-    // Create output path using bundle-aware utilities
-    // Use ~/Downloads/test_download.mp4 instead of relative path ./test_download.mp4
-    // to ensure the file is saved to the correct location even when launched from Finder/Dock
-    let output_path = utils::get_download_file_path("test_download.mp4");
-
-    // Create progress channel
-    let (progress_tx, mut progress_rx) =
-        tokio::sync::mpsc::channel::<crate::downloader::DownloadProgress>(100);
-
-    // Spawn progress reporter
-    tokio::spawn(async move {
-        while let Some(progress) = progress_rx.recv().await {
-            println!(
-                "Progress: {:.1}%, Speed: {:.2} MB/s",
-                progress.percentage() * 100.0,
-                progress.speed / 1024.0 / 1024.0
-            );
-        }
-    });
-
-    // Ensure we have a direct URL to download. If extractor didn't populate `direct_url`,
-    // try to resolve one via extractor.get_direct_url using the first available format.
-    println!("Starting download...");
-    let download_url = if !video_info.direct_url.is_empty() {
-        video_info.direct_url.clone()
-    } else if let Some(first_fmt) = video_info.formats.first() {
-        match extractor
-            .get_direct_url(&video_info.url, &first_fmt.format_id)
-            .await
-        {
-            Ok(u) => u,
-            Err(e) => {
-                eprintln!("Failed to resolve direct url via extractor: {}", e);
-                video_info.url.clone()
-            }
-        }
-    } else {
-        video_info.url.clone()
-    };
-
-    match engine
-        .download(&download_url, &output_path, progress_tx)
-        .await
-    {
-        Ok(_) => println!("Download completed successfully!"),
-        Err(e) => eprintln!("Download failed: {}", e),
-    }
 }
