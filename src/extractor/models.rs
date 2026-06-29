@@ -1,6 +1,18 @@
 //! Data structures for video information
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+/// Deserialize an optional unsigned integer that the source may emit as a JSON
+/// float (yt-dlp does this for some sites' `duration`, e.g. SoundCloud's
+/// `213.886`). Accepts `null`, an integer, or a float; a float is truncated to
+/// its whole part. This keeps the field's public type (`Option<u64>`) and its
+/// consumers unchanged while no longer aborting the parse on a fractional value.
+fn deserialize_opt_u64_lossy<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<f64>::deserialize(deserializer)?.map(|f| f as u64))
+}
 
 /// Video information structure
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -22,7 +34,11 @@ pub struct VideoInfo {
     pub webpage_url: Option<String>,
     #[serde(default)]
     pub direct_url: String, // Actual download URL (filled later)
-    #[serde(default)]
+    // yt-dlp emits `duration` as a float for some sites (e.g. SoundCloud:
+    // 213.886). A plain `Option<u64>` made serde abort the WHOLE parse with
+    // `invalid type: floating point ..., expected u64`, losing the entire
+    // extraction. Deserialize leniently (int OR float, truncated to seconds).
+    #[serde(default, deserialize_with = "deserialize_opt_u64_lossy")]
     pub duration: Option<u64>,
     #[serde(default)]
     pub filesize: Option<u64>,
@@ -78,6 +94,29 @@ impl VideoInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_json_with_fractional_duration() {
+        // yt-dlp emits `duration` as a float for some sites (SoundCloud:
+        // 213.886). Before the fix this aborted the whole parse with
+        // "invalid type: floating point `213.886`, expected u64", losing the
+        // title/url too.
+        let json = r#"{"id":"x","title":"Flickermood","url":"https://h/page",
+            "duration":213.886}"#;
+        let v: VideoInfo =
+            serde_json::from_str(json).expect("fractional duration must not abort the parse");
+        assert_eq!(v.title, "Flickermood");
+        assert_eq!(v.url, "https://h/page");
+        assert_eq!(v.duration, Some(213)); // truncated whole seconds
+    }
+
+    #[test]
+    fn parses_json_with_integer_duration() {
+        // Integer durations (most sites) must still work.
+        let json = r#"{"id":"x","title":"t","duration":635}"#;
+        let v: VideoInfo = serde_json::from_str(json).expect("integer duration must parse");
+        assert_eq!(v.duration, Some(635));
+    }
 
     #[test]
     fn parses_json_with_both_url_and_webpage_url() {
