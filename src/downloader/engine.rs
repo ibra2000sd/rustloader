@@ -307,30 +307,21 @@ impl DownloadEngine {
             debug!("Detected HLS/playlist URL, using yt-dlp fallback: {}", url);
             return self.download_via_ytdlp(url, output_path, progress_tx).await;
         }
-        // Check if server supports range requests and get file size.
-        // If probing fails (some servers return unexpected responses or redirect to manifests),
-        // fall back to yt-dlp to handle complex cases (HLS, DASH, etc.).
-        debug!("🔍 [ENGINE] Probing server for range support and file size...");
-        let supports_ranges_res = self.supports_ranges(url).await;
-        debug!(
-            "✅ [ENGINE] supports_ranges() await returned: {:?}",
-            &supports_ranges_res
-        );
-        let file_size_res = self.get_file_size(url).await;
-        debug!(
-            "✅ [ENGINE] get_file_size() await returned: {:?}",
-            &file_size_res
-        );
-
-        let (supports_ranges, file_size) = match (supports_ranges_res, file_size_res) {
-            (Ok(r), Ok(s)) => {
-                debug!("   - supports_ranges={}, file_size={}", r, s);
-                (r, s)
+        // Probe the server for range support and total size with a SINGLE
+        // ranged GET (`Range: bytes=0-0`). This is HEAD-independent: HEAD-based
+        // probing was unreliable (some servers answer HEAD slowly, and reqwest's
+        // `content_length()` on a HEAD response reflects the empty body, not the
+        // `Content-Length` header — so size always came back 0 and the segmented
+        // path was never taken). If probing fails, fall back to yt-dlp.
+        debug!("🔍 [ENGINE] Probing server (ranged GET) for range support and size...");
+        let (supports_ranges, file_size) = match self.probe(url).await {
+            Ok((ranges, size)) => {
+                debug!("   - supports_ranges={}, file_size={}", ranges, size);
+                (ranges, size)
             }
-            (err1, err2) => {
+            Err(e) => {
                 info!("🔀 [ENGINE] Taking path: yt-dlp fallback (probing failed)");
-                warn!("⚠️ [ENGINE] Probing ranges/size failed, falling back to yt-dlp. range_err={:?} size_err={:?}", err1.as_ref().err(), err2.as_ref().err());
-                debug!("Probing ranges/size failed, falling back to yt-dlp. range_err={:?} size_err={:?}", err1.as_ref().err(), err2.as_ref().err());
+                warn!("⚠️ [ENGINE] Probe failed, falling back to yt-dlp: {}", e);
                 return self.download_via_ytdlp(url, output_path, progress_tx).await;
             }
         };
@@ -363,7 +354,7 @@ impl DownloadEngine {
         info!("📦 [ENGINE] Using segmented download path (ranges supported and file large enough)");
 
         // Calculate segments
-        let segments = calculate_segments(file_size, self.config.segments);
+        let segments = calculate_segments(file_size, self.config.segments, output_path);
         progress.total_segments = segments.len();
 
         // Create channels for segment progress
@@ -869,60 +860,57 @@ impl DownloadEngine {
         Ok(())
     }
 
-    /// Check if server supports range requests
-    async fn supports_ranges(&self, url: &str) -> Result<bool> {
-        // wrap HEAD in a timeout to avoid blocking indefinitely
-        match tokio::time::timeout(
+    /// Probe a URL for range support and total size in a single request.
+    ///
+    /// Sends a ranged `GET` (`Range: bytes=0-0`) and interprets the response:
+    /// - `206 Partial Content` → ranges supported; the total size is the value
+    ///   after `/` in the `Content-Range` header (`bytes 0-0/<total>`).
+    /// - `200 OK` (server ignored `Range`) → ranges not supported; the size is
+    ///   read from the `Content-Length` **header** (not `Response::content_length`,
+    ///   which would be the body length).
+    ///
+    /// Returns `(supports_ranges, total_size)`. `total_size` is `0` when the
+    /// server didn't advertise a usable length, which makes the caller fall back
+    /// to the simple (non-segmented) download path.
+    async fn probe(&self, url: &str) -> Result<(bool, u64)> {
+        let response = tokio::time::timeout(
             std::time::Duration::from_secs(10),
-            self.client.head(url).send(),
+            self.client.get(url).header("Range", "bytes=0-0").send(),
         )
         .await
-        {
-            Ok(Ok(response)) => {
-                let accepts_ranges = response
-                    .headers()
-                    .get("accept-ranges")
-                    .and_then(|v| v.to_str().ok())
-                    .map(|v| v.to_lowercase() == "bytes")
-                    .unwrap_or(false);
-                debug!("Server supports range requests: {}", accepts_ranges);
-                Ok(accepts_ranges)
-            }
-            Ok(Err(e)) => {
-                warn!("⚠️ [ENGINE] HEAD request failed: {}", e);
-                Err(e.into())
-            }
-            Err(_) => {
-                warn!("⏰ [ENGINE] HEAD request timeout (10s)");
-                Err(anyhow::anyhow!("HEAD timeout"))
-            }
-        }
-    }
+        .map_err(|_| anyhow::anyhow!("probe request timeout (10s)"))?
+        .map_err(|e| anyhow::anyhow!("probe request failed: {}", e))?;
 
-    /// Get total file size
-    async fn get_file_size(&self, url: &str) -> Result<u64> {
-        // wrap HEAD in a timeout to avoid blocking indefinitely
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            self.client.head(url).send(),
-        )
-        .await
-        {
-            Ok(Ok(response)) => {
-                let size = response
-                    .content_length()
-                    .ok_or_else(|| anyhow::anyhow!("Unknown file size"))?;
-                debug!("File size: {} bytes", size);
-                Ok(size)
-            }
-            Ok(Err(e)) => {
-                warn!("⚠️ [ENGINE] HEAD request failed: {}", e);
-                Err(e.into())
-            }
-            Err(_) => {
-                warn!("⏰ [ENGINE] HEAD request timeout (10s)");
-                Err(anyhow::anyhow!("HEAD timeout"))
-            }
+        let status = response.status();
+        let headers = response.headers();
+
+        if status == reqwest::StatusCode::PARTIAL_CONTENT {
+            // 206: ranges supported. Parse the total from `bytes 0-0/<total>`.
+            let total = headers
+                .get(reqwest::header::CONTENT_RANGE)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.rsplit('/').next())
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .unwrap_or(0);
+            debug!(
+                "Probe: ranges supported (206), total_size={} (from Content-Range)",
+                total
+            );
+            Ok((true, total))
+        } else if status.is_success() {
+            // 200: server ignored Range. Read the header directly.
+            let size = headers
+                .get(reqwest::header::CONTENT_LENGTH)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(0);
+            debug!(
+                "Probe: server ignored Range (200), size={} (from Content-Length header)",
+                size
+            );
+            Ok((false, size))
+        } else {
+            Err(anyhow::anyhow!("probe got unexpected status {}", status))
         }
     }
 }

@@ -11,7 +11,7 @@ use crate::downloader::progress::DownloadProgress;
 use anyhow::Result;
 use futures::stream::{self, StreamExt};
 use reqwest::Client;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
@@ -187,8 +187,14 @@ pub struct SegmentProgress {
     pub speed: f64, // bytes per second
 }
 
-/// Calculate optimal segments for a file
-pub fn calculate_segments(file_size: u64, max_segments: usize) -> Vec<Segment> {
+/// Calculate optimal segments for a file.
+///
+/// Segment temp files are placed next to `output_path` (which lives in a
+/// writable directory) as `<output>.partN`, rather than relative
+/// `segment_N.tmp` paths. Relative paths were written into the process CWD,
+/// which fails when the CWD is read-only (e.g. a macOS app launched from Finder,
+/// where CWD is `/`) and collides between concurrent downloads.
+pub fn calculate_segments(file_size: u64, max_segments: usize, output_path: &Path) -> Vec<Segment> {
     if file_size == 0 {
         return Vec::new();
     }
@@ -218,12 +224,21 @@ pub fn calculate_segments(file_size: u64, max_segments: usize) -> Vec<Segment> {
 
         let size = end - start + 1;
 
+        // Place the segment file next to the output (writable, unique per
+        // output, so concurrent downloads of different files don't collide).
+        let mut seg_name = output_path.file_name().unwrap_or_default().to_os_string();
+        seg_name.push(format!(".part{}", i));
+        let path = match output_path.parent() {
+            Some(parent) => parent.join(&seg_name),
+            None => PathBuf::from(&seg_name),
+        };
+
         segments.push(Segment {
             id: i,
             start,
             end,
             size,
-            path: PathBuf::from(format!("segment_{}.tmp", i)),
+            path,
         });
     }
 
@@ -236,7 +251,7 @@ mod tests {
 
     #[test]
     fn test_calculate_segments_small_file() {
-        let segments = calculate_segments(1_000, 16);
+        let segments = calculate_segments(1_000, 16, Path::new("/tmp/out.mp4"));
         assert!(segments.len() <= 16);
         if let Some(last) = segments.last() {
             assert_eq!(last.end, 999);
@@ -245,13 +260,27 @@ mod tests {
 
     #[test]
     fn test_calculate_segments_large_file() {
-        let segments = calculate_segments(100_000_000, 16);
+        let segments = calculate_segments(100_000_000, 16, Path::new("/tmp/out.mp4"));
         assert_eq!(segments.len(), 16);
     }
 
     #[test]
+    fn test_segment_paths_derive_from_output() {
+        // Segment temp files live next to the output (absolute, writable),
+        // not as relative `segment_N.tmp` in the CWD. Assert via parent/file_name
+        // (platform-agnostic — avoids path-separator and is_absolute differences).
+        let out = Path::new("/tmp/dl/movie.mp4");
+        let segments = calculate_segments(100_000_000, 16, out);
+        assert_eq!(segments[0].path.parent(), out.parent());
+        assert_eq!(
+            segments[0].path.file_name().unwrap(),
+            std::ffi::OsStr::new("movie.mp4.part0")
+        );
+    }
+
+    #[test]
     fn test_segment_ranges_no_overlap() {
-        let segments = calculate_segments(10_000, 4);
+        let segments = calculate_segments(10_000, 4, Path::new("/tmp/out.mp4"));
         for window in segments.windows(2) {
             let first = &window[0];
             let second = &window[1];
