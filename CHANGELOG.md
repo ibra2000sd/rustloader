@@ -14,6 +14,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.8.1] - 2026-06-29
+
+First published release. Reliability, correctness, and download-coverage fixes on
+top of 0.8.0, plus authenticated-site support.
+
+### 🐛 Fixed / Correctness
+- **Content-Type-aware routing**: the engine now decides native-download vs
+  yt-dlp by the response `Content-Type`, not by hard-coded site-name strings. Any
+  non-direct URL (Vimeo, SoundCloud, TikTok, X, HLS/DASH, …) is routed to yt-dlp
+  and an HTML page is **never** written out as a media file (previously such URLs
+  could be silently saved as a corrupt `.mp4`). A defensive guard refuses to
+  write a non-media response as the output file.
+- **Resilient segmented engine**: the resurrected multi-segment engine probes
+  range support / size with a single ranged GET (HEAD-independent) so the
+  segmented path is taken correctly; cross-platform path fixes.
+- **Tolerant `VideoInfo` deserialization**: extraction no longer fails on
+  yt-dlp JSON with missing/variant fields.
+
+### ✨ Added
+- **yt-dlp cookies support** for sites that require authentication (e.g.
+  YouTube's "Sign in to confirm you're not a bot"): `--cookies-from-browser` and
+  `--cookies` CLI flags, a GUI "YouTube / Authenticated Sites" setting, and
+  config fields — applied to both extraction and download.
+- **Dependency health check** for required external tools (yt-dlp/ffmpeg).
+
+### 🔧 Changed
+- **Friendlier CLI errors** and a heads-up when yt-dlp-only options are passed
+  with a direct-file URL that ignores them.
+- **Accurate, measured performance docs**: the README's unverified "5–10×" claim
+  is replaced with a measured, conditional result (≈5× on per-connection-throttled
+  / high-latency links; ≈1× when total bandwidth is the bottleneck).
+
+### 📦 Distribution
+- **Fixed the release workflow** (correct `dtolnay/rust-toolchain` action and
+  `libwebkit2gtk-4.1-dev` dependency) so pre-built binaries for macOS
+  (arm64 + x86_64), Windows, and Linux are published with SHA256 checksums. This
+  is the project's first successfully published GitHub release.
+
 ## [0.8.0] - 2026-01-08
 
 ### 🌍 Cross-Platform Support
