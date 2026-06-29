@@ -267,10 +267,15 @@ mod tests {
     #[test]
     fn test_segment_paths_derive_from_output() {
         // Segment temp files live next to the output (absolute, writable),
-        // not as relative `segment_N.tmp` in the CWD.
-        let segments = calculate_segments(100_000_000, 16, Path::new("/tmp/dl/movie.mp4"));
-        assert_eq!(segments[0].path, PathBuf::from("/tmp/dl/movie.mp4.part0"));
-        assert!(segments[0].path.is_absolute());
+        // not as relative `segment_N.tmp` in the CWD. Assert via parent/file_name
+        // (platform-agnostic — avoids path-separator and is_absolute differences).
+        let out = Path::new("/tmp/dl/movie.mp4");
+        let segments = calculate_segments(100_000_000, 16, out);
+        assert_eq!(segments[0].path.parent(), out.parent());
+        assert_eq!(
+            segments[0].path.file_name().unwrap(),
+            std::ffi::OsStr::new("movie.mp4.part0")
+        );
     }
 
     #[test]
