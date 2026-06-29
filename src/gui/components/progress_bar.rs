@@ -26,7 +26,9 @@ pub fn progress_bar(
     let bar = iced_progress_bar(0.0..=1.0, progress).style(style);
 
     let eta_text = if progress >= 1.0 {
-        "Completed".to_string()
+        // The row's status label already says "Completed"; keep the bar caption
+        // empty to avoid repeating it three times in one row.
+        String::new()
     } else if is_stalled {
         "⚠ Stalled - No progress".to_string()
     } else if let Some(seconds) = eta_seconds {
