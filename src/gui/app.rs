@@ -195,9 +195,9 @@ impl Application for RustloaderApp {
     type Executor = iced::executor::Default;
     type Message = Message;
     type Theme = Theme;
-    type Flags = ();
+    type Flags = Vec<String>;
 
-    fn new(_flags: Self::Flags) -> (Self, Command<Message>) {
+    fn new(startup_warnings: Self::Flags) -> (Self, Command<Message>) {
         // Initialize settings
         let mut settings = AppSettings::default();
 
@@ -238,7 +238,12 @@ impl Application for RustloaderApp {
             runtime: Arc::new(rt),
             current_view: View::Main,
             url_input: String::new(),
-            status_message: "Ready".to_string(),
+            // Surface any startup dependency-health warning as the initial
+            // status banner (non-blocking); otherwise show "Ready".
+            status_message: startup_warnings
+                .first()
+                .map(|w| format!("⚠️  {w}"))
+                .unwrap_or_else(|| "Ready".to_string()),
             active_downloads: Vec::new(),
             download_location: settings.download_location.to_string_lossy().to_string(),
             max_concurrent: settings.max_concurrent,

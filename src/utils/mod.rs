@@ -3,6 +3,7 @@
 
 pub mod bundle_paths;
 pub mod config;
+pub mod depcheck;
 pub mod error;
 pub mod metadata;
 pub mod organizer;
