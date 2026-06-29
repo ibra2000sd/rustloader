@@ -27,6 +27,17 @@ pub struct AppSettings {
 
     /// Enable resume capability
     pub enable_resume: bool,
+
+    /// Browser to read cookies from for authenticated sites (yt-dlp
+    /// `--cookies-from-browser`), e.g. "chrome"/"firefox"/"safari". `None` =
+    /// no browser cookies.
+    #[serde(default)]
+    pub cookies_from_browser: Option<String>,
+
+    /// Path to a Netscape-format cookies.txt file (yt-dlp `--cookies`). `None` =
+    /// no cookies file.
+    #[serde(default)]
+    pub cookies_file: Option<PathBuf>,
 }
 
 impl Default for AppSettings {
@@ -42,6 +53,8 @@ impl Default for AppSettings {
             chunk_size: 8192, // 8KB
             retry_attempts: 3,
             enable_resume: true,
+            cookies_from_browser: None,
+            cookies_file: None,
         }
     }
 }
