@@ -1,5 +1,6 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use rustloader::downloader::segment::calculate_segments;
+use std::path::Path;
 
 fn benchmark_segment_calculation(c: &mut Criterion) {
     let mut group = c.benchmark_group("Segment Calculation");
@@ -15,7 +16,11 @@ fn benchmark_segment_calculation(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("calculate_segments", format!("{}MB", size / 1_000_000)),
             &size,
-            |b, &size| b.iter(|| calculate_segments(black_box(size), black_box(16))),
+            |b, &size| {
+                b.iter(|| {
+                    calculate_segments(black_box(size), black_box(16), Path::new("/tmp/o.mp4"))
+                })
+            },
         );
     }
 
@@ -29,7 +34,13 @@ fn benchmark_segment_count_variation(c: &mut Criterion) {
 
     for count in segment_counts {
         group.bench_with_input(BenchmarkId::new("segments", count), &count, |b, &count| {
-            b.iter(|| calculate_segments(black_box(file_size), black_box(count)))
+            b.iter(|| {
+                calculate_segments(
+                    black_box(file_size),
+                    black_box(count),
+                    Path::new("/tmp/o.mp4"),
+                )
+            })
         });
     }
 
