@@ -1,6 +1,8 @@
 //! Settings view implementation
 
-use iced::widget::{button, column, container, pick_list, row, slider, text, text_input, Space};
+use iced::widget::{
+    button, column, container, pick_list, row, scrollable, slider, text, text_input, Space,
+};
 use iced::{Alignment, Element, Length};
 
 /// Create the settings view
@@ -9,6 +11,7 @@ pub fn settings_view(
     max_concurrent: usize,
     segments: usize,
     cookies_from_browser: &str,
+    detected_browsers: &[String],
 ) -> Element<'static, crate::gui::app::Message> {
     // Header with back button
     let header = row![
@@ -112,24 +115,47 @@ pub fn settings_view(
     .spacing(10);
 
     // Cookies section — for sites that need authentication (e.g. YouTube's
-    // "Sign in to confirm you're not a bot"). Empty = no cookies.
-    let cookies_section =
-        column![
+    // "Sign in to confirm you're not a bot"). A dropdown of detected browsers
+    // (plus "None") replaces free-text so the value is always valid for yt-dlp.
+    const NONE_LABEL: &str = "None";
+    let mut cookie_options: Vec<String> = vec![NONE_LABEL.to_string()];
+    cookie_options.extend(detected_browsers.iter().cloned());
+    // Keep a previously-saved browser selectable even if detection missed it.
+    if !cookies_from_browser.is_empty() && !cookie_options.iter().any(|o| o == cookies_from_browser)
+    {
+        cookie_options.push(cookies_from_browser.to_string());
+    }
+    let selected = if cookies_from_browser.is_empty() {
+        NONE_LABEL.to_string()
+    } else {
+        cookies_from_browser.to_string()
+    };
+    let detected_note = if detected_browsers.is_empty() {
+        "No browsers detected — choose None, or install/sign in to a browser.".to_string()
+    } else {
+        format!("Detected: {}.", detected_browsers.join(", "))
+    };
+    let cookies_section = column![
         text("YouTube / Authenticated Sites")
             .size(16)
             .style(iced::theme::Text::Color(crate::gui::theme::TEXT_PRIMARY)),
-        text("Read cookies from this browser (e.g. chrome, firefox, safari). Leave empty for none.")
+        text("Read cookies from this browser so logged-in / age-restricted videos work. Applies on next launch.")
             .size(13)
             .style(iced::theme::Text::Color(crate::gui::theme::TEXT_SECONDARY)),
-        text_input("e.g. chrome", cookies_from_browser)
-            .on_input(crate::gui::app::Message::CookiesFromBrowserChanged)
-            .padding(12)
-            .width(Length::Fill)
-            .style(iced::theme::TextInput::Custom(Box::new(
-                crate::gui::theme::InputStyle
-            ))),
+        pick_list(cookie_options, Some(selected), |s| {
+            crate::gui::app::Message::CookiesFromBrowserChanged(if s == NONE_LABEL {
+                String::new()
+            } else {
+                s
+            })
+        })
+        .width(Length::Fill)
+        .padding(10),
+        text(detected_note)
+            .size(11)
+            .style(iced::theme::Text::Color(crate::gui::theme::TEXT_SECONDARY)),
     ]
-        .spacing(10);
+    .spacing(10);
 
     // Save button
     let save_button = button(text("Save Settings").size(16))
@@ -140,23 +166,28 @@ pub fn settings_view(
             crate::gui::theme::PrimaryButton,
         )));
 
-    // Main content
+    // Main content: header pinned at the top, the settings sections in a
+    // scroll area, and the Save button pinned at the bottom so it is always
+    // visible regardless of window height (previously it sat below the fold).
     let content = column![
         header,
-        container(
-            column![
-                download_location_section,
-                performance_section,
-                quality_section,
-                cookies_section,
-            ]
-            .spacing(24)
+        scrollable(
+            container(
+                column![
+                    download_location_section,
+                    performance_section,
+                    quality_section,
+                    cookies_section,
+                ]
+                .spacing(24)
+            )
+            .padding(24)
+            .width(Length::Fill)
+            .style(iced::theme::Container::Custom(Box::new(
+                crate::gui::theme::GlassContainer
+            )))
         )
-        .padding(24)
-        .style(iced::theme::Container::Custom(Box::new(
-            crate::gui::theme::GlassContainer
-        ))),
-        Space::with_height(Length::Fill),
+        .height(Length::Fill),
         save_button,
     ]
     .spacing(24)

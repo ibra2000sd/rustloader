@@ -7,7 +7,52 @@
 //! configuration can be applied to both the extraction call and the download
 //! call from a single source of truth (CLI flags, GUI setting, or config).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+/// Browsers yt-dlp can read cookies from, in preferred display order.
+pub const SUPPORTED_BROWSERS: &[&str] = &[
+    "firefox", "chrome", "safari", "edge", "brave", "chromium", "opera", "vivaldi",
+];
+
+/// Detect which supported browsers appear installed by probing their
+/// profile/cookie locations under `home`. Returns names in
+/// [`SUPPORTED_BROWSERS`] order. Pure (takes `home`) so it is unit-testable.
+pub fn detect_browsers_in(home: &Path) -> Vec<String> {
+    let lib = home.join("Library");
+    // (browser, any-of these relative-to-~/Library paths exists)
+    let candidates: &[(&str, &[&str])] = &[
+        ("firefox", &["Application Support/Firefox/Profiles"]),
+        ("chrome", &["Application Support/Google/Chrome"]),
+        (
+            "safari",
+            &[
+                "Containers/com.apple.Safari/Data/Library/Cookies",
+                "Cookies/Cookies.binarycookies",
+            ],
+        ),
+        ("edge", &["Application Support/Microsoft Edge"]),
+        (
+            "brave",
+            &["Application Support/BraveSoftware/Brave-Browser"],
+        ),
+        ("chromium", &["Application Support/Chromium"]),
+        ("opera", &["Application Support/com.operasoftware.Opera"]),
+        ("vivaldi", &["Application Support/Vivaldi"]),
+    ];
+    candidates
+        .iter()
+        .filter(|(_, paths)| paths.iter().any(|p| lib.join(p).exists()))
+        .map(|(name, _)| name.to_string())
+        .collect()
+}
+
+/// Detect installed browsers under the current user's home directory.
+pub fn detect_browsers() -> Vec<String> {
+    match dirs::home_dir() {
+        Some(home) => detect_browsers_in(&home),
+        None => Vec::new(),
+    }
+}
 
 /// How to supply cookies to yt-dlp.
 ///
@@ -96,6 +141,35 @@ mod tests {
             c.to_args(),
             vec!["--cookies".to_string(), "/tmp/cookies.txt".to_string()]
         );
+    }
+
+    #[test]
+    fn detect_browsers_finds_only_present_profiles() {
+        let tmp = std::env::temp_dir().join(format!("rl-browsers-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        // Create firefox + chrome profile dirs only.
+        std::fs::create_dir_all(tmp.join("Library/Application Support/Firefox/Profiles")).unwrap();
+        std::fs::create_dir_all(tmp.join("Library/Application Support/Google/Chrome")).unwrap();
+
+        let found = detect_browsers_in(&tmp);
+        assert!(found.contains(&"firefox".to_string()));
+        assert!(found.contains(&"chrome".to_string()));
+        assert!(!found.contains(&"brave".to_string()));
+        assert!(!found.contains(&"edge".to_string()));
+        // Order follows SUPPORTED_BROWSERS (firefox before chrome).
+        let fi = found.iter().position(|b| b == "firefox").unwrap();
+        let ci = found.iter().position(|b| b == "chrome").unwrap();
+        assert!(fi < ci);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn detect_browsers_empty_when_nothing_installed() {
+        let tmp = std::env::temp_dir().join(format!("rl-nobrowsers-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        assert!(detect_browsers_in(&tmp).is_empty());
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

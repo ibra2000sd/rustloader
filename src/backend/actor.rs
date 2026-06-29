@@ -354,6 +354,7 @@ impl BackendActor {
                         let _ = sender
                             .send(BackendEvent::DownloadCompleted {
                                 task_id: task.id.clone(),
+                                file_path: Some(task.output_path.to_string_lossy().to_string()),
                             })
                             .await;
                     }
@@ -369,24 +370,31 @@ impl BackendActor {
                     last_statuses.insert(task.id.clone(), task.status.clone());
                 }
 
-                // Send Progress
-                if let Some(progress) = &task.progress {
-                    let data = DownloadProgressData {
-                        progress: progress.percentage() as f32,
-                        speed: progress.speed,
-                        downloaded: progress.downloaded_bytes,
-                        total: progress.total_bytes,
-                        eta: progress.eta.map(|d| d.as_secs()),
-                    };
+                // Send Progress only while the task is actually active — never
+                // for terminal states (Completed/Failed/Cancelled), otherwise a
+                // late progress event would flip a finished row back to
+                // "Downloading" in the GUI.
+                let active = matches!(
+                    task.status,
+                    TaskStatus::Downloading | TaskStatus::Queued | TaskStatus::Paused
+                );
+                if active {
+                    if let Some(progress) = &task.progress {
+                        let data = DownloadProgressData {
+                            progress: progress.percentage() as f32,
+                            speed: progress.speed,
+                            downloaded: progress.downloaded_bytes,
+                            total: progress.total_bytes,
+                            eta: progress.eta.map(|d| d.as_secs()),
+                        };
 
-                    // Only send if downloading or recently changed?
-                    // To save bandwidth, maybe check if changed? For now send all.
-                    let _ = sender
-                        .send(BackendEvent::DownloadProgress {
-                            task_id: task.id.clone(),
-                            data,
-                        })
-                        .await;
+                        let _ = sender
+                            .send(BackendEvent::DownloadProgress {
+                                task_id: task.id.clone(),
+                                data,
+                            })
+                            .await;
+                    }
                 }
             }
         }

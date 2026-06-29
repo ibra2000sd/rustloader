@@ -44,6 +44,8 @@ pub struct RustloaderApp {
     /// Browser to read cookies from for authenticated sites (yt-dlp
     /// `--cookies-from-browser`); empty = none.
     cookies_from_browser: String,
+    /// Browsers detected on this machine (for the Settings cookies dropdown).
+    cookie_browser_options: Vec<String>,
 
     // Flags
     is_extracting: bool,
@@ -255,6 +257,7 @@ impl Application for RustloaderApp {
             segments_per_download: settings.segments,
             quality: settings.quality,
             cookies_from_browser: settings.cookies_from_browser.clone().unwrap_or_default(),
+            cookie_browser_options: crate::utils::cookies::detect_browsers(),
             is_extracting: false,
             url_error: None,
         };
@@ -368,21 +371,31 @@ impl Application for RustloaderApp {
                         if let Some(task) =
                             self.active_downloads.iter_mut().find(|t| t.id == task_id)
                         {
-                            task.progress = data.progress;
-                            task.speed = data.speed;
-                            task.downloaded_mb = data.downloaded as f64 / (1024.0 * 1024.0);
-                            task.total_mb = data.total as f64 / (1024.0 * 1024.0);
-                            task.eta_seconds = data.eta;
-                            task.last_progress_at = Instant::now(); // v0.6.0: Track for stall detection
-                            task.status = "Downloading".to_string(); // Ensure status reflects active download
+                            // Row status is owned solely by the status events
+                            // (TaskStatusUpdated / DownloadCompleted / Failed).
+                            // Ignore progress for already-terminal rows so a late
+                            // event can't flip a finished download back to active,
+                            // and never set the status here.
+                            if !matches!(task.status.as_str(), "Completed" | "Failed" | "Cancelled")
+                            {
+                                task.progress = data.progress;
+                                task.speed = data.speed;
+                                task.downloaded_mb = data.downloaded as f64 / (1024.0 * 1024.0);
+                                task.total_mb = data.total as f64 / (1024.0 * 1024.0);
+                                task.eta_seconds = data.eta;
+                                task.last_progress_at = Instant::now(); // stall detection
+                            }
                         }
                     }
-                    BackendEvent::DownloadCompleted { task_id } => {
+                    BackendEvent::DownloadCompleted { task_id, file_path } => {
                         if let Some(task) =
                             self.active_downloads.iter_mut().find(|t| t.id == task_id)
                         {
                             task.status = "Completed".to_string();
                             task.progress = 1.0;
+                            if let Some(p) = file_path {
+                                task.file_path = Some(p);
+                            }
                         }
                         self.status_message = "Download completed".to_string();
                     }
@@ -539,7 +552,16 @@ impl Application for RustloaderApp {
             }
 
             Message::OpenDownloadFolder(task_id) => {
-                let folder = std::path::PathBuf::from(&self.download_location);
+                // Open the folder that actually contains the file (the organizer
+                // moves it into a quality/date subfolder), falling back to the
+                // configured download location.
+                let folder = self
+                    .active_downloads
+                    .iter()
+                    .find(|t| t.id == task_id)
+                    .and_then(|t| t.file_path.as_ref())
+                    .and_then(|p| PathBuf::from(p).parent().map(PathBuf::from))
+                    .unwrap_or_else(|| PathBuf::from(&self.download_location));
                 let _ = open::that(&folder);
                 Command::none()
             }
@@ -776,6 +798,7 @@ impl Application for RustloaderApp {
                     self.max_concurrent,
                     self.segments_per_download,
                     &self.cookies_from_browser,
+                    &self.cookie_browser_options,
                 )
             }
         };

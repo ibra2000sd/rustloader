@@ -43,6 +43,9 @@ pub enum BackendEvent {
     },
     DownloadCompleted {
         task_id: String,
+        /// Final on-disk path after organization, so the GUI's Open File /
+        /// Show in Folder actions point at the real file.
+        file_path: Option<String>,
     },
     DownloadFailed {
         task_id: String,

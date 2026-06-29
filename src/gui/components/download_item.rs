@@ -130,7 +130,9 @@ pub fn download_item(task: &DownloadTaskUI) -> Element<'static, Message> {
     };
 
     let speed_text = if task.status == "Completed" {
-        "Complete".to_string()
+        // Don't repeat "Complete"/"Completed" here — the status label already
+        // shows it. Leave the speed slot blank; the size is shown on the right.
+        String::new()
     } else if is_stalled {
         "0.0 MB/s (stalled)".to_string()
     } else if task.speed > 0.0 {
