@@ -291,40 +291,54 @@ impl DownloadEngine {
             debug!("✅ [ENGINE] Initial progress sent");
         }
 
-        // CRITICAL FIX: If URL is a YouTube page, bypass HTTP probing entirely.
-        // YouTube URLs redirect to HLS manifests when probed via HTTP HEAD/GET,
-        // causing the engine to incorrectly report 50-byte manifest as file size.
-        if url.contains("youtube.com/watch") || url.contains("youtu.be/") {
-            info!("🔀 [ENGINE] YouTube URL detected - bypassing probe, using yt-dlp directly");
-            debug!("   - Reason: YouTube URLs redirect to HLS manifests during HTTP probing");
-            debug!("   - Solution: yt-dlp handles YouTube streams natively");
-            return self.download_via_ytdlp(url, output_path, progress_tx).await;
-        }
-
-        // Quick HLS detection: if URL looks like a playlist, fallback to yt-dlp
-        if url.contains(".m3u8") || url.contains("/manifest") || url.contains("playlist") {
-            info!("🔀 [ENGINE] Taking path: yt-dlp fallback (HLS/playlist detected)");
-            debug!("Detected HLS/playlist URL, using yt-dlp fallback: {}", url);
-            return self.download_via_ytdlp(url, output_path, progress_tx).await;
-        }
-        // Probe the server for range support and total size with a SINGLE
-        // ranged GET (`Range: bytes=0-0`). This is HEAD-independent: HEAD-based
-        // probing was unreliable (some servers answer HEAD slowly, and reqwest's
-        // `content_length()` on a HEAD response reflects the empty body, not the
-        // `Content-Length` header — so size always came back 0 and the segmented
-        // path was never taken). If probing fails, fall back to yt-dlp.
-        debug!("🔍 [ENGINE] Probing server (ranged GET) for range support and size...");
-        let (supports_ranges, file_size) = match self.probe(url).await {
-            Ok((ranges, size)) => {
-                debug!("   - supports_ranges={}, file_size={}", ranges, size);
-                (ranges, size)
+        // Route on WHAT THE URL ACTUALLY IS, not its site name. Probe the URL
+        // with a SINGLE ranged GET (`Range: bytes=0-0`) and let the response's
+        // Content-Type decide the path:
+        //   • a direct media stream (video/*, audio/*, octet-stream) → native
+        //     engine (segmented or simple);
+        //   • anything else — HTML pages, HLS/DASH manifests, unknown types — or
+        //     a probe failure → yt-dlp, which resolves and muxes the real streams.
+        // yt-dlp runs on the page URL itself, so every yt-dlp-supported site (and
+        // HLS/DASH) is handled here with NO per-site special-casing, and a 200
+        // HTML body is never mistaken for a media file.
+        //
+        // The ranged GET is also HEAD-independent: HEAD-based probing was
+        // unreliable (reqwest's `content_length()` on a HEAD response reflects the
+        // empty body, not the `Content-Length` header, so size came back 0 and the
+        // segmented path was never taken).
+        debug!(
+            "🔍 [ENGINE] Probing server (ranged GET) for range support, size, and content type..."
+        );
+        let probe = match self.probe(url).await {
+            Ok(p) => {
+                debug!(
+                    "   - supports_ranges={}, file_size={}, content_type={:?}",
+                    p.supports_ranges, p.size, p.content_type
+                );
+                p
             }
             Err(e) => {
-                info!("🔀 [ENGINE] Taking path: yt-dlp fallback (probing failed)");
+                info!("🔀 [ENGINE] Taking path: yt-dlp fallback (probe failed)");
                 warn!("⚠️ [ENGINE] Probe failed, falling back to yt-dlp: {}", e);
                 return self.download_via_ytdlp(url, output_path, progress_tx).await;
             }
         };
+
+        // Content-Type-based routing: anything that isn't a direct media stream
+        // (HTML pages, HLS/DASH manifests, unknown types) goes to yt-dlp.
+        if !is_direct_media(probe.content_type.as_deref()) {
+            info!(
+                "🔀 [ENGINE] Taking path: yt-dlp (not a direct media URL; content_type={:?})",
+                probe.content_type
+            );
+            return self.download_via_ytdlp(url, output_path, progress_tx).await;
+        }
+
+        info!(
+            "🔀 [ENGINE] Direct media URL (content_type={:?}) - using native engine",
+            probe.content_type
+        );
+        let (supports_ranges, file_size) = (probe.supports_ranges, probe.size);
 
         // Initialize progress
         info!(
@@ -784,6 +798,22 @@ impl DownloadEngine {
             return Err(anyhow::anyhow!("HTTP error: {}", response.status()));
         }
 
+        // Defensive Content-Type guard: never write a non-media response (e.g. an
+        // HTML error/interstitial page returned with 200) as the output media
+        // file. Routing already filters non-media URLs to yt-dlp, but this is the
+        // last line of defence against silent corruption.
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        if !is_direct_media(content_type.as_deref()) {
+            return Err(anyhow::anyhow!(
+                "refusing to write non-media response as a media file (content_type={:?})",
+                content_type
+            ));
+        }
+
         // Get file size
         let total_size = response.content_length().unwrap_or(0);
 
@@ -869,10 +899,12 @@ impl DownloadEngine {
     ///   read from the `Content-Length` **header** (not `Response::content_length`,
     ///   which would be the body length).
     ///
-    /// Returns `(supports_ranges, total_size)`. `total_size` is `0` when the
-    /// server didn't advertise a usable length, which makes the caller fall back
-    /// to the simple (non-segmented) download path.
-    async fn probe(&self, url: &str) -> Result<(bool, u64)> {
+    /// Returns a [`ProbeResult`] carrying range support, total size, and the
+    /// response `Content-Type`. `size` is `0` when the server didn't advertise a
+    /// usable length, which makes the caller fall back to the simple
+    /// (non-segmented) download path; `content_type` drives media-vs-yt-dlp
+    /// routing (see [`is_direct_media`]).
+    async fn probe(&self, url: &str) -> Result<ProbeResult> {
         let response = tokio::time::timeout(
             std::time::Duration::from_secs(10),
             self.client.get(url).header("Range", "bytes=0-0").send(),
@@ -884,6 +916,12 @@ impl DownloadEngine {
         let status = response.status();
         let headers = response.headers();
 
+        // Capture the Content-Type for routing (independent of range support).
+        let content_type = headers
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
         if status == reqwest::StatusCode::PARTIAL_CONTENT {
             // 206: ranges supported. Parse the total from `bytes 0-0/<total>`.
             let total = headers
@@ -893,10 +931,14 @@ impl DownloadEngine {
                 .and_then(|s| s.trim().parse::<u64>().ok())
                 .unwrap_or(0);
             debug!(
-                "Probe: ranges supported (206), total_size={} (from Content-Range)",
-                total
+                "Probe: ranges supported (206), total_size={} (from Content-Range), content_type={:?}",
+                total, content_type
             );
-            Ok((true, total))
+            Ok(ProbeResult {
+                supports_ranges: true,
+                size: total,
+                content_type,
+            })
         } else if status.is_success() {
             // 200: server ignored Range. Read the header directly.
             let size = headers
@@ -905,13 +947,62 @@ impl DownloadEngine {
                 .and_then(|s| s.parse::<u64>().ok())
                 .unwrap_or(0);
             debug!(
-                "Probe: server ignored Range (200), size={} (from Content-Length header)",
-                size
+                "Probe: server ignored Range (200), size={} (from Content-Length header), content_type={:?}",
+                size, content_type
             );
-            Ok((false, size))
+            Ok(ProbeResult {
+                supports_ranges: false,
+                size,
+                content_type,
+            })
         } else {
             Err(anyhow::anyhow!("probe got unexpected status {}", status))
         }
+    }
+}
+
+/// Outcome of probing a URL with a single ranged GET: whether the server
+/// supports byte ranges, the total size (`0` if unknown), and the response
+/// `Content-Type` (used by [`is_direct_media`] to route media vs yt-dlp).
+#[derive(Debug, Clone)]
+struct ProbeResult {
+    supports_ranges: bool,
+    size: u64,
+    content_type: Option<String>,
+}
+
+/// Decide whether a `Content-Type` denotes a directly-downloadable media stream
+/// the native engine can fetch.
+///
+/// Returns `true` only for `video/*`, `audio/*`, and `application/octet-stream`
+/// (a generic binary commonly used for direct media files). Everything else —
+/// HTML pages, HLS/DASH manifests (`application/x-mpegURL`,
+/// `application/vnd.apple.mpegurl`, `application/dash+xml`), any other type, or a
+/// missing header — is treated as "not a direct media file" and routed to yt-dlp,
+/// which resolves the real streams. This is what makes engine coverage equal
+/// yt-dlp's without any per-site logic.
+fn is_direct_media(content_type: Option<&str>) -> bool {
+    match content_type {
+        Some(ct) => {
+            // Strip any `; charset=...`/parameters and normalise case.
+            let main = ct
+                .split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase();
+            // HLS/DASH manifests are NOT direct media and must go to yt-dlp — even
+            // when served with an `audio/...` mpegurl type (e.g. `audio/mpegurl`,
+            // `audio/x-mpegurl`) that would otherwise match the `audio/` prefix
+            // below. Catch every mpegurl spelling and DASH manifests explicitly.
+            if main.contains("mpegurl") || main.contains("dash+xml") {
+                return false;
+            }
+            main.starts_with("video/")
+                || main.starts_with("audio/")
+                || main == "application/octet-stream"
+        }
+        None => false,
     }
 }
 
@@ -1059,6 +1150,44 @@ mod tests {
     // ============================================================
     // DOWNLOAD ENGINE FUNCTIONAL TESTS
     // ============================================================
+
+    // ============================================================
+    // CONTENT-TYPE ROUTING CLASSIFIER TESTS
+    // ============================================================
+
+    #[test]
+    fn test_is_direct_media_accepts_media_types() {
+        assert!(is_direct_media(Some("video/mp4")));
+        assert!(is_direct_media(Some("video/webm")));
+        assert!(is_direct_media(Some("audio/mpeg")));
+        assert!(is_direct_media(Some("audio/mp4")));
+        assert!(is_direct_media(Some("application/octet-stream")));
+        // Parameters and odd casing must not defeat the match.
+        assert!(is_direct_media(Some("video/mp4; charset=binary")));
+        assert!(is_direct_media(Some("Video/MP4")));
+        assert!(is_direct_media(Some("  audio/ogg  ")));
+    }
+
+    #[test]
+    fn test_is_direct_media_rejects_non_media_types() {
+        // HTML pages (the silent-corruption case).
+        assert!(!is_direct_media(Some("text/html")));
+        assert!(!is_direct_media(Some("text/html; charset=utf-8")));
+        // HLS / DASH manifests must go to yt-dlp, not the native engine —
+        // including the `audio/...` mpegurl spellings that start with `audio/`.
+        assert!(!is_direct_media(Some("application/x-mpegURL")));
+        assert!(!is_direct_media(Some("application/vnd.apple.mpegurl")));
+        assert!(!is_direct_media(Some("application/dash+xml")));
+        assert!(!is_direct_media(Some("audio/mpegurl")));
+        assert!(!is_direct_media(Some("audio/x-mpegurl")));
+        assert!(!is_direct_media(Some("application/mpegurl")));
+        assert!(!is_direct_media(Some("audio/mpegurl; charset=utf-8")));
+        // Other / unknown / missing.
+        assert!(!is_direct_media(Some("application/json")));
+        assert!(!is_direct_media(Some("application/xml")));
+        assert!(!is_direct_media(Some("")));
+        assert!(!is_direct_media(None));
+    }
 
     #[tokio::test]
     async fn test_engine_supports_ranges_mock() {
