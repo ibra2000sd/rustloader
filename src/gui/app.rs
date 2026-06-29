@@ -833,34 +833,6 @@ async fn save_settings_to_db(db_manager: &DatabaseManager, settings: &AppSetting
     Ok(())
 }
 
-/// Convert technical error messages to user-friendly text
-fn make_error_user_friendly(error: &str) -> String {
-    let error_lower = error.to_lowercase();
-
-    if error_lower.contains("truncated") || error_lower.contains("incomplete") {
-        "Please enter a complete and valid URL".to_string()
-    } else if error_lower.contains("invalid url") || error_lower.contains("malformed") {
-        "This doesn't appear to be a valid video URL".to_string()
-    } else if error_lower.contains("network")
-        || error_lower.contains("connection")
-        || error_lower.contains("timeout")
-    {
-        "Unable to connect. Please check your internet connection".to_string()
-    } else if error_lower.contains("unavailable")
-        || error_lower.contains("not found")
-        || error_lower.contains("removed")
-    {
-        "This video is not available or has been removed".to_string()
-    } else if error_lower.contains("private") || error_lower.contains("restricted") {
-        "This video is private or restricted".to_string()
-    } else if error_lower.contains("age") && error_lower.contains("restricted") {
-        "This video is age-restricted and cannot be downloaded".to_string()
-    } else if error_lower.contains("geo") || error_lower.contains("region") {
-        "This video is not available in your region".to_string()
-    } else if error_lower.contains("copyright") {
-        "This video cannot be downloaded due to copyright restrictions".to_string()
-    } else {
-        // Generic fallback
-        "Unable to process this URL. Please try a different video".to_string()
-    }
-}
+// `make_error_user_friendly` now lives in `crate::utils` so the CLI and GUI
+// share one implementation (see `src/utils/error.rs`).
+use crate::utils::make_error_user_friendly;

@@ -14,6 +14,6 @@ pub use bundle_paths::{
     get_app_support_dir, get_database_path, get_download_file_path, get_downloads_dir,
 };
 pub use config::AppSettings;
-pub use error::RustloaderError;
+pub use error::{make_error_user_friendly, RustloaderError};
 pub use metadata::{MetadataManager, MetadataStats, VideoMetadata};
 pub use organizer::{ContentType, FileOrganizer, OrganizationSettings, OrganizeMode, QualityTier};
