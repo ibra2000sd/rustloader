@@ -178,7 +178,11 @@ pub fn build_ytdlp_args(opts: &YtDlpOptions, url: &str, output: &str) -> Vec<Str
             Some(h) => {
                 format!("bestvideo[height<={h}]+bestaudio/best[height<={h}]/best")
             }
-            None => "best".to_string(),
+            // A bare `best` makes yt-dlp reject HLS master playlists with
+            // "Requested format is not available". `bestvideo*+bestaudio/best`
+            // resolves HLS/DASH variants (merging video+audio when split) and
+            // still falls back to a single progressive stream via `/best`.
+            None => "bestvideo*+bestaudio/best".to_string(),
         };
         args.push("-f".to_string());
         args.push(selector);
@@ -1238,16 +1242,17 @@ mod tests {
     // ============================================================
 
     #[test]
-    fn test_build_ytdlp_args_default_matches_legacy() {
-        // Default options MUST reproduce the engine's historical invocation so
-        // the GUI download path is unchanged by the CLI work.
+    fn test_build_ytdlp_args_default_selector() {
+        // The no-quality default must use a robust selector that also resolves
+        // HLS/DASH variants — a bare `best` makes yt-dlp reject HLS master
+        // playlists ("Requested format is not available").
         let opts = YtDlpOptions::default();
         let args = build_ytdlp_args(&opts, "https://example.com/v", "/tmp/out.mp4");
         assert_eq!(
             args,
             vec![
                 "-f",
-                "best",
+                "bestvideo*+bestaudio/best",
                 "--newline",
                 "--no-warnings",
                 "--progress",
@@ -1256,6 +1261,9 @@ mod tests {
                 "https://example.com/v",
             ]
         );
+        // `-f` is still present and the selector is the robust chain (not bare best).
+        assert!(args.iter().any(|a| a == "-f"));
+        assert_eq!(args[1], "bestvideo*+bestaudio/best");
     }
 
     #[test]
