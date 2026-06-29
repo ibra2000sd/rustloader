@@ -190,6 +190,7 @@ pub enum Message {
     QualityChanged(String),
     CookiesFromBrowserChanged(String),
     SaveSettings,
+    SettingsSaved(Result<(), String>),
 
     // System
     Tick, // For periodic UI updates
@@ -614,17 +615,33 @@ impl Application for RustloaderApp {
                     cookies_file: None,
                 };
 
-                // Save settings to database
+                // Save settings to database. The result is surfaced (see
+                // SettingsSaved) instead of being swallowed — previously the
+                // closure ignored it and always switched to Main, so a failed
+                // save looked successful.
                 let db_manager = Arc::clone(&self.db_manager);
                 Command::perform(
                     async move {
                         save_settings_to_db(&db_manager, &settings)
                             .await
-                            .map_err(|e| e.to_string())?;
-                        Ok::<(), String>(())
+                            .map_err(|e| e.to_string())
                     },
-                    |result: Result<(), String>| Message::SwitchToMain,
+                    Message::SettingsSaved,
                 )
+            }
+
+            Message::SettingsSaved(result) => {
+                match result {
+                    Ok(()) => {
+                        self.status_message = "Settings saved".to_string();
+                        self.current_view = View::Main;
+                    }
+                    Err(e) => {
+                        // Keep the user on Settings and show why it failed.
+                        self.status_message = format!("Failed to save settings: {e}");
+                    }
+                }
+                Command::none()
             }
 
             Message::Tick => Command::none(), // No polling needed
@@ -871,3 +888,50 @@ async fn save_settings_to_db(db_manager: &DatabaseManager, settings: &AppSetting
 // `make_error_user_friendly` now lives in `crate::utils` so the CLI and GUI
 // share one implementation (see `src/utils/error.rs`).
 use crate::utils::make_error_user_friendly;
+
+#[cfg(test)]
+mod settings_tests {
+    use super::{load_settings_from_db, save_settings_to_db};
+    use crate::database::{initialize_database, DatabaseManager};
+    use crate::utils::config::AppSettings;
+
+    // Proves the settings save actually writes a row and round-trips. The GUI
+    // bug was that the save's Result was swallowed; here we assert the
+    // persistence layer used by SaveSettings genuinely writes and reloads.
+    #[tokio::test]
+    async fn save_settings_writes_and_reloads_from_db() {
+        let dir = std::env::temp_dir().join(format!("rl-settings-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("settings.db");
+        let _ = std::fs::remove_file(&db_path);
+        let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
+
+        let pool = initialize_database(&db_url).await.expect("init db");
+        let db = DatabaseManager::new(pool);
+
+        let settings = AppSettings {
+            max_concurrent: 7,
+            segments: 12,
+            cookies_from_browser: Some("firefox".to_string()),
+            ..AppSettings::default()
+        };
+
+        save_settings_to_db(&db, &settings).await.expect("save");
+
+        // A row must exist — the bug was that nothing got persisted at all.
+        assert_eq!(
+            db.get_setting("cookies_from_browser")
+                .await
+                .expect("get")
+                .as_deref(),
+            Some("firefox")
+        );
+
+        let loaded = load_settings_from_db(&db).await.expect("load");
+        assert_eq!(loaded.cookies_from_browser.as_deref(), Some("firefox"));
+        assert_eq!(loaded.max_concurrent, 7);
+        assert_eq!(loaded.segments, 12);
+
+        std::fs::remove_file(&db_path).ok();
+    }
+}
