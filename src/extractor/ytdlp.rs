@@ -61,7 +61,8 @@ impl YtDlpExtractor {
         }
 
         let json_str = String::from_utf8(output.stdout)?;
-        let video_info: VideoInfo = serde_json::from_str(&json_str)?;
+        let mut video_info: VideoInfo = serde_json::from_str(&json_str)?;
+        video_info.normalize_url();
 
         Ok(video_info)
     }
@@ -95,7 +96,10 @@ impl YtDlpExtractor {
             }
 
             match serde_json::from_str::<VideoInfo>(line) {
-                Ok(video) => videos.push(video),
+                Ok(mut video) => {
+                    video.normalize_url();
+                    videos.push(video);
+                }
                 Err(e) => {
                     error!("Failed to parse video info: {}", e);
                     // Continue with other videos
@@ -133,7 +137,8 @@ impl YtDlpExtractor {
         }
 
         let json_str = String::from_utf8(output.stdout)?;
-        let video_info: VideoInfo = serde_json::from_str(&json_str)?;
+        let mut video_info: VideoInfo = serde_json::from_str(&json_str)?;
+        video_info.normalize_url();
 
         Ok(vec![video_info])
     }
