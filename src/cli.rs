@@ -122,6 +122,47 @@ impl Cli {
         };
         dir.join(format!("{}.{}", sanitize_filename(title), ext))
     }
+
+    /// A heads-up note when yt-dlp-only options (`-q`, `-f mp3`, `--subs`, clip
+    /// section) are set but `url` is a direct media file — which the engine
+    /// downloads as-is, ignoring those options. Returns `None` when the URL
+    /// routes through yt-dlp (which honors them) or no such options are set.
+    pub fn ignored_options_note(&self, url: &str) -> Option<String> {
+        let has_ytdlp_only = self.quality.is_some()
+            || self.format.as_deref() == Some("mp3")
+            || self.subs
+            || self.start_time.is_some()
+            || self.end_time.is_some();
+        if !has_ytdlp_only {
+            return None;
+        }
+
+        let lower = url.to_lowercase();
+        // The engine routes these through yt-dlp, which honors the options.
+        if lower.contains("youtube.com/watch")
+            || lower.contains("youtu.be/")
+            || lower.contains(".m3u8")
+            || lower.contains("/manifest")
+            || lower.contains("playlist")
+        {
+            return None;
+        }
+
+        // A direct media-file URL is downloaded as-is by the engine.
+        const MEDIA_EXTS: [&str; 9] = [
+            ".mp4", ".mkv", ".webm", ".m4a", ".mp3", ".mov", ".avi", ".flv", ".ogg",
+        ];
+        let path = lower.split(['?', '#']).next().unwrap_or(&lower);
+        if MEDIA_EXTS.iter().any(|e| path.ends_with(e)) {
+            Some(
+                "-q/-f/--subs/section flags apply to streaming-site downloads (yt-dlp); this \
+                 looks like a direct file URL, which is downloaded as-is and ignores them."
+                    .to_string(),
+            )
+        } else {
+            None
+        }
+    }
 }
 
 /// Sanitize a video title into a safe single-path-component filename.
@@ -189,6 +230,13 @@ pub async fn run(cli: &Cli) -> Result<()> {
     // Configure the existing engine with the CLI-derived options and run it.
     let engine = DownloadEngine::default().with_ytdlp_options(options);
 
+    // Heads-up rather than silent no-op: -q/-f/--subs/section flags only affect
+    // the yt-dlp (streaming-site) path; a direct media-file URL is downloaded
+    // as-is and ignores them.
+    if let Some(note) = cli.ignored_options_note(&url) {
+        eprintln!("⚠️  {note}");
+    }
+
     let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel::<DownloadProgress>(100);
     tokio::spawn(async move {
         while let Some(p) = progress_rx.recv().await {
@@ -202,7 +250,14 @@ pub async fn run(cli: &Cli) -> Result<()> {
     });
 
     println!("Downloading {url} -> {}", output_path.display());
-    engine.download(&url, &output_path, progress_tx).await?;
+    engine
+        .download(&url, &output_path, progress_tx)
+        .await
+        .map_err(|e| {
+            // Keep the raw error in the logs; show the user a friendly message.
+            tracing::debug!("download failed (raw): {e:#}");
+            anyhow::anyhow!("{}", crate::utils::make_error_user_friendly(&e.to_string()))
+        })?;
     println!("Done.");
     Ok(())
 }
@@ -215,6 +270,26 @@ mod tests {
     fn no_url_is_gui_mode() {
         let cli = Cli::try_parse_from(["rustloader"]).unwrap();
         assert!(!cli.is_cli_mode());
+    }
+
+    #[test]
+    fn ignored_options_note_fires_for_direct_file() {
+        // -q set + a direct media-file URL -> note.
+        let cli = Cli::try_parse_from(["rustloader", "URL", "-q", "720"]).unwrap();
+        assert!(cli
+            .ignored_options_note("https://h/clip.mp4?token=1")
+            .is_some());
+        // Same options but a YouTube URL (yt-dlp honors them) -> no note.
+        assert!(cli
+            .ignored_options_note("https://www.youtube.com/watch?v=x")
+            .is_none());
+    }
+
+    #[test]
+    fn ignored_options_note_silent_without_options() {
+        // No yt-dlp-only options set -> never a note, even for a direct file.
+        let cli = Cli::try_parse_from(["rustloader", "URL"]).unwrap();
+        assert!(cli.ignored_options_note("https://h/clip.mp4").is_none());
     }
 
     #[test]
