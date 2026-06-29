@@ -210,16 +210,32 @@ Downloads are automatically organized:
 
 ## ⚡ Performance
 
-Rustloader achieves **5-10x faster download speeds** compared to vanilla yt-dlp:
+Rustloader splits a download into up to 16 parallel HTTP range requests. The
+speedup this yields is **conditional on the link** — so we measured it rather
+than guessing:
+
+| Scenario | Single stream | Rustloader (16 segments) | Speedup |
+|----------|---------------|--------------------------|---------|
+| Per-connection-throttled link (server caps each connection; spare aggregate bandwidth) | 57.6 s | 11.3 s | **~5×** |
+| Unthrottled / total-bandwidth-capped link | baseline | ≈ baseline | **~1×** |
+
+<sub>Measured on a 150 MB file, median of 3 alternating trials (single-stream `curl` vs the 16-segment engine), outputs verified byte-identical via SHA-256. The ~5× row used a 3 MiB/s per-connection cap with spare aggregate bandwidth; the ~1× row reflects links where the bottleneck is total bandwidth, not per-connection limits.</sub>
+
+**When the extra connections actually help:** multi-segment downloading only
+beats a single stream when each connection is individually rate-limited (common
+on some file hosts) or on high-latency links. When your *total* bandwidth is the
+bottleneck — typical home/office connections and unthrottled CDNs — all 16
+segments share the same pipe, so the result is ≈1×. On links that drop idle
+connections, splitting one slow stream into 16 slower ones can even be *less*
+reliable than a single stream, so the engine falls back to a single stream for
+small files and servers that don't support range requests.
 
 | Metric | Rustloader | yt-dlp (vanilla) |
 |--------|------------|------------------|
-| 100MB file | ~10 seconds | ~60 seconds |
 | Parallel connections | Up to 16 | 1 |
-| Memory usage | <150 MB | ~50 MB |
 | Resume support | ✅ Yes | ✅ Yes |
 
-*Performance varies based on network conditions and server capabilities.*
+*Performance varies with network conditions and server behavior.*
 
 ---
 
