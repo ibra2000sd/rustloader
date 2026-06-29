@@ -32,6 +32,7 @@ fn sample_video() -> VideoInfo {
         id: "vid123".to_string(),
         title: "Sample Video".to_string(),
         url: "https://example.com/watch?v=vid123".to_string(),
+        webpage_url: None,
         direct_url: String::new(),
         duration: Some(60),
         filesize: None,
