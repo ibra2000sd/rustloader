@@ -190,7 +190,7 @@ impl BackendActor {
         // Validation and setup logic ported from BackendBridge
 
         // 1. Format Selection
-        let format = match self.select_format(&video_info, format_id) {
+        let format = match Self::select_format(&video_info, format_id) {
             Ok(f) => f,
             Err(e) => {
                 let _ = self.sender.send(BackendEvent::Error(e)).await;
@@ -244,11 +244,15 @@ impl BackendActor {
             .await;
     }
 
-    fn select_format(
-        &self,
-        video_info: &VideoInfo,
-        format_id: Option<String>,
-    ) -> Result<Format, String> {
+    /// Choose the format to download.
+    ///
+    /// With an explicit `format_id`, returns that exact format. Otherwise prefers
+    /// the best single progressive (video+audio) format; if none exists — direct
+    /// media files and DASH video/audio-split sources — it falls back to the best
+    /// available format rather than failing, so the engine/yt-dlp path can still
+    /// fetch it. (Returning an error here is what previously stopped the GUI from
+    /// ever starting a download.)
+    fn select_format(video_info: &VideoInfo, format_id: Option<String>) -> Result<Format, String> {
         // Logic from BackendBridge::start_download
         if let Some(id) = format_id {
             video_info
@@ -276,7 +280,20 @@ impl BackendActor {
             {
                 Ok((*best).clone())
             } else {
-                Err("No combined format found".to_string())
+                // No single progressive (video+audio) format. This is the common
+                // case for direct media files (a lone format with no codec info)
+                // and for DASH sources whose video and audio are split — failing
+                // here is what stopped the GUI from ever starting a download.
+                // Fall back to the best available format (by resolution) so the
+                // engine / yt-dlp path can still fetch it.
+                video_info
+                    .formats
+                    .iter()
+                    .filter(|f| !f.format_id.starts_with("sb"))
+                    .max_by_key(|f| f.width.unwrap_or(0) * f.height.unwrap_or(0))
+                    .or_else(|| video_info.formats.first())
+                    .cloned()
+                    .ok_or_else(|| "No downloadable format found".to_string())
             }
         }
     }
@@ -373,5 +390,80 @@ impl BackendActor {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fmt(id: &str, vcodec: Option<&str>, acodec: Option<&str>, w: u32, h: u32) -> Format {
+        Format {
+            format_id: id.to_string(),
+            vcodec: vcodec.map(str::to_string),
+            acodec: acodec.map(str::to_string),
+            width: Some(w),
+            height: Some(h),
+            url: format!("https://example.com/{id}"),
+            ..Default::default()
+        }
+    }
+
+    fn info(formats: Vec<Format>) -> VideoInfo {
+        VideoInfo {
+            title: "t".to_string(),
+            url: "https://example.com/page".to_string(),
+            formats,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn explicit_format_id_is_returned() {
+        let vi = info(vec![fmt("18", Some("h264"), Some("aac"), 640, 360)]);
+        let f = BackendActor::select_format(&vi, Some("18".to_string())).unwrap();
+        assert_eq!(f.format_id, "18");
+    }
+
+    #[test]
+    fn prefers_best_progressive_format() {
+        let vi = info(vec![
+            fmt("low", Some("h264"), Some("aac"), 640, 360),
+            fmt("high", Some("h264"), Some("aac"), 1920, 1080),
+            fmt("videoonly", Some("vp9"), Some("none"), 3840, 2160),
+        ]);
+        let f = BackendActor::select_format(&vi, None).unwrap();
+        assert_eq!(f.format_id, "high"); // best *progressive*, not the 4k video-only
+    }
+
+    #[test]
+    fn direct_file_single_format_no_codecs_now_selectable() {
+        // A direct .mp4 yields one format with no codec info — previously this
+        // returned Err("No combined format found") and the GUI never downloaded.
+        let vi = info(vec![Format {
+            format_id: "0".to_string(),
+            url: "https://example.com/video.mp4".to_string(),
+            ..Default::default()
+        }]);
+        let f = BackendActor::select_format(&vi, None).expect("must pick a format, not error");
+        assert_eq!(f.format_id, "0");
+    }
+
+    #[test]
+    fn dash_split_falls_back_to_best_available() {
+        // No single progressive format (video-only + audio-only). Must fall back
+        // rather than fail.
+        let vi = info(vec![
+            fmt("video", Some("vp9"), Some("none"), 1920, 1080),
+            fmt("audio", Some("none"), Some("mp4a"), 0, 0),
+        ]);
+        let f = BackendActor::select_format(&vi, None).expect("must fall back, not error");
+        assert_eq!(f.format_id, "video"); // best by resolution
+    }
+
+    #[test]
+    fn empty_formats_is_an_error() {
+        let vi = info(vec![]);
+        assert!(BackendActor::select_format(&vi, None).is_err());
     }
 }
