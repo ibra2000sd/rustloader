@@ -17,6 +17,7 @@ use tracing::{debug, error, info};
 /// Main video extractor using yt-dlp
 pub struct YtDlpExtractor {
     ytdlp_path: PathBuf,
+    cookies: crate::utils::CookieConfig,
 }
 
 impl YtDlpExtractor {
@@ -38,7 +39,18 @@ impl YtDlpExtractor {
             }
         };
 
-        Ok(Self { ytdlp_path })
+        Ok(Self {
+            ytdlp_path,
+            cookies: crate::utils::CookieConfig::default(),
+        })
+    }
+
+    /// Set the cookie source applied to every yt-dlp invocation (extraction,
+    /// playlist, search, direct-URL). Used so authenticated sites like YouTube
+    /// can extract when configured via CLI flag, GUI setting, or config.
+    pub fn with_cookies(mut self, cookies: crate::utils::CookieConfig) -> Self {
+        self.cookies = cookies;
+        self
     }
 
     /// Extract video information without downloading
@@ -47,6 +59,7 @@ impl YtDlpExtractor {
         debug!("Extracting video info for URL: {}", url);
 
         let output = AsyncCommand::new(&self.ytdlp_path)
+            .args(self.cookies.to_args())
             .arg("--dump-json")
             .arg("--no-download")
             .arg("--no-warnings")
@@ -73,6 +86,7 @@ impl YtDlpExtractor {
         debug!("Extracting playlist info for URL: {}", url);
 
         let output = AsyncCommand::new(&self.ytdlp_path)
+            .args(self.cookies.to_args())
             .arg("--flat-playlist")
             .arg("--dump-json")
             .arg("--no-warnings")
@@ -124,6 +138,7 @@ impl YtDlpExtractor {
         let search_query = format!("ytsearch{}:{}", count, query);
 
         let output = AsyncCommand::new(&self.ytdlp_path)
+            .args(self.cookies.to_args())
             .arg("--dump-json")
             .arg("--no-warnings")
             .arg(search_query)
@@ -148,6 +163,7 @@ impl YtDlpExtractor {
         debug!("Getting direct URL for format {} from {}", format_id, url);
 
         let output = AsyncCommand::new(&self.ytdlp_path)
+            .args(self.cookies.to_args())
             .arg("-f")
             .arg(format_id)
             .arg("-g")

@@ -31,9 +31,16 @@ impl BackendActor {
         receiver: mpsc::Receiver<BackendCommand>,
         sender: mpsc::Sender<BackendEvent>,
     ) -> Result<Self> {
+        // Cookie source from settings, applied to both extraction and download
+        // so authenticated sites (e.g. YouTube) work from the GUI.
+        let cookies = crate::utils::CookieConfig::new(
+            settings.cookies_from_browser.clone(),
+            settings.cookies_file.clone(),
+        );
+
         // Initialize components
         // 1. Initialize Extractors
-        let ytdlp = Arc::new(YtDlpExtractor::new()?);
+        let ytdlp = Arc::new(YtDlpExtractor::new()?.with_cookies(cookies.clone()));
         let native_youtube = Arc::new(NativeYoutubeExtractor::new());
 
         // 2. Build Hybrid Registry
@@ -52,7 +59,12 @@ impl BackendActor {
             request_delay: std::time::Duration::from_millis(100),
         };
 
-        let engine = DownloadEngine::new(download_config);
+        let engine = DownloadEngine::new(download_config).with_ytdlp_options(
+            crate::downloader::YtDlpOptions {
+                cookies: cookies.clone(),
+                ..Default::default()
+            },
+        );
 
         let org_settings = OrganizationSettings::default();
         let file_organizer = FileOrganizer::new(org_settings)

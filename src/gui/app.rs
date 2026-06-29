@@ -41,6 +41,9 @@ pub struct RustloaderApp {
     max_concurrent: usize,
     segments_per_download: usize,
     quality: VideoQuality,
+    /// Browser to read cookies from for authenticated sites (yt-dlp
+    /// `--cookies-from-browser`); empty = none.
+    cookies_from_browser: String,
 
     // Flags
     is_extracting: bool,
@@ -185,6 +188,7 @@ pub enum Message {
     MaxConcurrentChanged(usize),
     SegmentsChanged(usize),
     QualityChanged(String),
+    CookiesFromBrowserChanged(String),
     SaveSettings,
 
     // System
@@ -249,6 +253,7 @@ impl Application for RustloaderApp {
             max_concurrent: settings.max_concurrent,
             segments_per_download: settings.segments,
             quality: settings.quality,
+            cookies_from_browser: settings.cookies_from_browser.clone().unwrap_or_default(),
             is_extracting: false,
             url_error: None,
         };
@@ -584,6 +589,11 @@ impl Application for RustloaderApp {
                 Command::none()
             }
 
+            Message::CookiesFromBrowserChanged(value) => {
+                self.cookies_from_browser = value;
+                Command::none()
+            }
+
             Message::SaveSettings => {
                 let settings = AppSettings {
                     download_location: PathBuf::from(&self.download_location),
@@ -593,6 +603,15 @@ impl Application for RustloaderApp {
                     chunk_size: 8192,
                     retry_attempts: 3,
                     enable_resume: true,
+                    cookies_from_browser: {
+                        let t = self.cookies_from_browser.trim();
+                        if t.is_empty() {
+                            None
+                        } else {
+                            Some(t.to_string())
+                        }
+                    },
+                    cookies_file: None,
                 };
 
                 // Save settings to database
@@ -739,6 +758,7 @@ impl Application for RustloaderApp {
                     &self.download_location,
                     self.max_concurrent,
                     self.segments_per_download,
+                    &self.cookies_from_browser,
                 )
             }
         };
@@ -805,6 +825,14 @@ async fn load_settings_from_db(db_manager: &DatabaseManager) -> Result<AppSettin
         };
     }
 
+    // Load cookies-from-browser (empty string => unset)
+    if let Some(value) = db_manager.get_setting("cookies_from_browser").await? {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            settings.cookies_from_browser = Some(trimmed.to_string());
+        }
+    }
+
     Ok(settings)
 }
 
@@ -829,6 +857,13 @@ async fn save_settings_to_db(db_manager: &DatabaseManager, settings: &AppSetting
         VideoQuality::Specific(_) => "Custom",
     };
     db_manager.save_setting("quality", quality_str).await?;
+
+    db_manager
+        .save_setting(
+            "cookies_from_browser",
+            settings.cookies_from_browser.as_deref().unwrap_or(""),
+        )
+        .await?;
 
     Ok(())
 }

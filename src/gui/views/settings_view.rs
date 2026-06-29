@@ -8,6 +8,7 @@ pub fn settings_view(
     download_location: &str,
     max_concurrent: usize,
     segments: usize,
+    cookies_from_browser: &str,
 ) -> Element<'static, crate::gui::app::Message> {
     // Header with back button
     let header = row![
@@ -110,6 +111,26 @@ pub fn settings_view(
     ]
     .spacing(10);
 
+    // Cookies section — for sites that need authentication (e.g. YouTube's
+    // "Sign in to confirm you're not a bot"). Empty = no cookies.
+    let cookies_section =
+        column![
+        text("YouTube / Authenticated Sites")
+            .size(16)
+            .style(iced::theme::Text::Color(crate::gui::theme::TEXT_PRIMARY)),
+        text("Read cookies from this browser (e.g. chrome, firefox, safari). Leave empty for none.")
+            .size(13)
+            .style(iced::theme::Text::Color(crate::gui::theme::TEXT_SECONDARY)),
+        text_input("e.g. chrome", cookies_from_browser)
+            .on_input(crate::gui::app::Message::CookiesFromBrowserChanged)
+            .padding(12)
+            .width(Length::Fill)
+            .style(iced::theme::TextInput::Custom(Box::new(
+                crate::gui::theme::InputStyle
+            ))),
+    ]
+        .spacing(10);
+
     // Save button
     let save_button = button(text("Save Settings").size(16))
         .on_press(crate::gui::app::Message::SaveSettings)
@@ -127,6 +148,7 @@ pub fn settings_view(
                 download_location_section,
                 performance_section,
                 quality_section,
+                cookies_section,
             ]
             .spacing(24)
         )

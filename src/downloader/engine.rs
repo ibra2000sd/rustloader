@@ -152,6 +152,9 @@ pub struct YtDlpOptions {
     pub end_time: Option<String>,
     /// Audio bitrate passed to the ffmpeg postprocessor (e.g. "128K").
     pub audio_bitrate: Option<String>,
+    /// Cookie source for sites that require authentication (e.g. YouTube's
+    /// anti-bot check). Default (empty) emits no cookie arguments.
+    pub cookies: crate::utils::CookieConfig,
 }
 
 /// Build the yt-dlp argument vector for the given options, URL and output path.
@@ -202,6 +205,10 @@ pub fn build_ytdlp_args(opts: &YtDlpOptions, url: &str, output: &str) -> Vec<Str
         args.push("--download-sections".to_string());
         args.push(format!("*{start}-{end}"));
     }
+
+    // Cookie source (if configured) for authenticated sites. Default config
+    // appends nothing, so the historical argument list is unchanged.
+    opts.cookies.append_args(&mut args);
 
     args.push("--newline".to_string());
     args.push("--no-warnings".to_string());

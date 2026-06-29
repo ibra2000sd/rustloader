@@ -71,12 +71,31 @@ pub struct Cli {
     /// Legacy alias for a single headless download (kept for backwards compat).
     #[arg(long, hide = true)]
     pub test_download: Option<String>,
+
+    /// Read cookies from this browser for sites that require authentication
+    /// (e.g. YouTube's "Sign in to confirm you're not a bot"). One of:
+    /// chrome, firefox, safari, edge, brave, chromium, opera, vivaldi.
+    #[arg(long = "cookies-from-browser", value_name = "BROWSER")]
+    pub cookies_from_browser: Option<String>,
+
+    /// Path to a Netscape-format cookies.txt file passed to yt-dlp via
+    /// `--cookies`.
+    #[arg(long = "cookies", value_name = "FILE")]
+    pub cookies_file: Option<PathBuf>,
 }
 
 impl Cli {
     /// The URL to download, if the binary was invoked in CLI mode.
     pub fn target_url(&self) -> Option<&str> {
         self.url.as_deref().or(self.test_download.as_deref())
+    }
+
+    /// Cookie configuration derived from `--cookies-from-browser` / `--cookies`.
+    pub fn cookie_config(&self) -> crate::utils::CookieConfig {
+        crate::utils::CookieConfig::new(
+            self.cookies_from_browser.clone(),
+            self.cookies_file.clone(),
+        )
     }
 
     /// True when the binary should run a headless download rather than the GUI.
@@ -100,6 +119,7 @@ impl Cli {
             start_time: self.start_time.clone(),
             end_time: self.end_time.clone(),
             audio_bitrate: self.bitrate.clone(),
+            cookies: self.cookie_config(),
         }
     }
 
@@ -209,7 +229,11 @@ pub async fn run(cli: &Cli) -> Result<()> {
 
     // Build the same hybrid extractor the backend uses: native extractors with
     // a yt-dlp fallback.
-    let ytdlp = Arc::new(YtDlpExtractor::new().context("failed to initialise yt-dlp extractor")?);
+    let ytdlp = Arc::new(
+        YtDlpExtractor::new()
+            .context("failed to initialise yt-dlp extractor")?
+            .with_cookies(cli.cookie_config()),
+    );
     let extractor = HybridExtractor::new(Vec::new(), ytdlp);
 
     // Resolve a title for the output filename (best-effort; playlists skip this
