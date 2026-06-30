@@ -12,7 +12,47 @@ use serde_json;
 use std::path::PathBuf;
 use std::process::Command;
 use tokio::process::Command as AsyncCommand;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
+
+/// Upper bound for a single yt-dlp extraction subprocess. Generous so slow but
+/// legitimate extractions (playlists, slow sites) don't false-fail — a
+/// standalone YouTube extraction is ~6s, so this leaves ~10x headroom. A
+/// constant for now; could be made configurable later.
+const EXTRACTION_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(60);
+
+/// Run a prepared yt-dlp command and capture its output, bounded by
+/// [`EXTRACTION_TIMEOUT`]. See [`run_bounded`] for the mechanism.
+async fn run_ytdlp_bounded(cmd: AsyncCommand) -> Result<std::process::Output> {
+    run_bounded(cmd, EXTRACTION_TIMEOUT).await
+}
+
+/// Run `cmd` to completion capturing its output, but no longer than `limit`. On
+/// overrun the child is killed (`kill_on_drop` fires when the timed-out future
+/// is dropped) and a clear error is returned — so a stalled extraction (e.g. a
+/// contended browser-cookie read that never returns) fails cleanly and
+/// recoverably instead of hanging the extraction task forever and letting
+/// retries pile up orphaned processes.
+async fn run_bounded(
+    mut cmd: AsyncCommand,
+    limit: tokio::time::Duration,
+) -> Result<std::process::Output> {
+    cmd.kill_on_drop(true);
+    match tokio::time::timeout(limit, cmd.output()).await {
+        Ok(result) => Ok(result?),
+        Err(_) => {
+            // Log it: the error otherwise only surfaces to the GUI, so a timeout
+            // would be invisible to anyone reading the logs.
+            warn!(
+                "yt-dlp extraction exceeded {}s — killing the subprocess",
+                limit.as_secs()
+            );
+            Err(anyhow::anyhow!(
+                "yt-dlp extraction timed out after {}s (subprocess killed)",
+                limit.as_secs()
+            ))
+        }
+    }
+}
 
 /// Main video extractor using yt-dlp
 pub struct YtDlpExtractor {
@@ -58,14 +98,13 @@ impl YtDlpExtractor {
     pub async fn extract_info_impl(&self, url: &str) -> Result<VideoInfo> {
         debug!("Extracting video info for URL: {}", url);
 
-        let output = AsyncCommand::new(&self.ytdlp_path)
-            .args(self.cookies.to_args())
+        let mut cmd = AsyncCommand::new(&self.ytdlp_path);
+        cmd.args(self.cookies.to_args())
             .arg("--dump-json")
             .arg("--no-download")
             .arg("--no-warnings")
-            .arg(url)
-            .output()
-            .await?;
+            .arg(url);
+        let output = run_ytdlp_bounded(cmd).await?;
 
         if !output.status.success() {
             let error_msg = String::from_utf8_lossy(&output.stderr);
@@ -85,14 +124,13 @@ impl YtDlpExtractor {
     pub async fn extract_playlist_impl(&self, url: &str) -> Result<Vec<VideoInfo>> {
         debug!("Extracting playlist info for URL: {}", url);
 
-        let output = AsyncCommand::new(&self.ytdlp_path)
-            .args(self.cookies.to_args())
+        let mut cmd = AsyncCommand::new(&self.ytdlp_path);
+        cmd.args(self.cookies.to_args())
             .arg("--flat-playlist")
             .arg("--dump-json")
             .arg("--no-warnings")
-            .arg(url)
-            .output()
-            .await?;
+            .arg(url);
+        let output = run_ytdlp_bounded(cmd).await?;
 
         if !output.status.success() {
             let error_msg = String::from_utf8_lossy(&output.stderr);
@@ -137,13 +175,12 @@ impl YtDlpExtractor {
 
         let search_query = format!("ytsearch{}:{}", count, query);
 
-        let output = AsyncCommand::new(&self.ytdlp_path)
-            .args(self.cookies.to_args())
+        let mut cmd = AsyncCommand::new(&self.ytdlp_path);
+        cmd.args(self.cookies.to_args())
             .arg("--dump-json")
             .arg("--no-warnings")
-            .arg(search_query)
-            .output()
-            .await?;
+            .arg(search_query);
+        let output = run_ytdlp_bounded(cmd).await?;
 
         if !output.status.success() {
             let error_msg = String::from_utf8_lossy(&output.stderr);
@@ -162,15 +199,14 @@ impl YtDlpExtractor {
     pub async fn get_direct_url_impl(&self, url: &str, format_id: &str) -> Result<String> {
         debug!("Getting direct URL for format {} from {}", format_id, url);
 
-        let output = AsyncCommand::new(&self.ytdlp_path)
-            .args(self.cookies.to_args())
+        let mut cmd = AsyncCommand::new(&self.ytdlp_path);
+        cmd.args(self.cookies.to_args())
             .arg("-f")
             .arg(format_id)
             .arg("-g")
             .arg("--no-warnings")
-            .arg(url)
-            .output()
-            .await?;
+            .arg(url);
+        let output = run_ytdlp_bounded(cmd).await?;
 
         if !output.status.success() {
             let error_msg = String::from_utf8_lossy(&output.stderr);
@@ -304,6 +340,59 @@ mod tests {
         let result = find_ytdlp();
         println!("yt-dlp found at: {:?}", result);
         // Don't assert - yt-dlp might not be installed in CI
+    }
+
+    // The timeout tests use unix shell tools (`sh`/`sleep`) that aren't present
+    // on the Windows runner. The bounded-run mechanism itself (tokio timeout +
+    // kill_on_drop) is platform-agnostic; these just exercise it on unix.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_bounded_times_out_and_kills_child() {
+        use tokio::time::Duration;
+        // The child would create a marker after 2s; with a 300ms bound it must
+        // be killed first, so the marker is never created (proves no orphan
+        // completed its work) and we return promptly with a timeout error.
+        let marker =
+            std::env::temp_dir().join(format!("rl-timeout-test-{}.marker", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        let mut cmd = AsyncCommand::new("sh");
+        cmd.arg("-c")
+            .arg(format!("sleep 2; : > '{}'", marker.display()));
+
+        let start = std::time::Instant::now();
+        let res = run_bounded(cmd, Duration::from_millis(300)).await;
+        let elapsed = start.elapsed();
+
+        assert!(res.is_err(), "a stalled command must return an error");
+        assert!(
+            res.unwrap_err().to_string().contains("timed out"),
+            "error should say it timed out"
+        );
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "must return promptly, not wait for the child (took {elapsed:?})"
+        );
+        // Allow time for any (wrongly-surviving) child to reach its marker write.
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        assert!(
+            !marker.exists(),
+            "child must have been killed before creating the marker (no orphan)"
+        );
+        let _ = std::fs::remove_file(&marker);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_bounded_returns_fast_command_output() {
+        use tokio::time::Duration;
+        // A quick command completes normally well within the bound.
+        let mut cmd = AsyncCommand::new("echo");
+        cmd.arg("hello");
+        let out = run_bounded(cmd, Duration::from_secs(5))
+            .await
+            .expect("a fast command must succeed within the timeout");
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "hello");
     }
 
     #[test]
