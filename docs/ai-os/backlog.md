@@ -69,6 +69,7 @@ lowering / making it configurable. NOT a bug (it is already bounded).
 | — | Tolerate float `duration` in `VideoInfo` deserialize | PR #21 (`dff16f2`) |
 | — | Robust default yt-dlp format selector (HLS master) | PR #22 (`933b2c0`) |
 | — | Bound yt-dlp **extraction** subprocess with timeout + kill | PR #23 (`1c038e2`) |
+| `B-DOC-001` | README/LICENSE/roadmap claims are inaccurate | `f897872`, 2026-07-01 (PR pending) |
 
 (Pre-`docs/ai-os` work was tracked via GitHub PRs/CHANGELOG; future items use the
 IDs above.)
