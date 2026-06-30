@@ -5,7 +5,7 @@
 
 **As of:** 2026-06-30
 **Released version:** v0.8.1 (first published release, 2026-06-29)
-**main HEAD:** `1c038e2` (merge of PR #23)
+**main HEAD:** `71c463c` (merge of PR #24 — docs/ai-os pack + CLAUDE.md)
 **CI on main:** green (4 jobs × ubuntu/macOS/windows)
 **Open PRs:** #1 (draft, untouched)
 
@@ -39,6 +39,10 @@ reliability** (the two defects the aria2 spike localized):
   yt-dlp-path win) + fix download reliability in the native engine (Shapes
   D1/D2) over adopting aria2 for the native path.
 - **docs/ai-os pack + CLAUDE.md** — this pack (2026-06-30).
+- **`.claude/skills` layer** (2026-07-01) — vendored the audited
+  `leonardomso/rust-skills` skill (MIT) and authored
+  `rustloader-invariants-guard`, which turns `docs/ai-os/invariants.md` into
+  an actionable per-diff checklist. Docs/skills-only; no Rust source touched.
 
 ## Next (ordered)
 
