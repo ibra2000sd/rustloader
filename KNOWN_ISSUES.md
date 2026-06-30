@@ -1,4 +1,4 @@
-# Known Issues - Rustloader v0.1.1
+# Known Issues - Rustloader v0.8.1
 
 This document tracks known issues and limitations in the current release.
 

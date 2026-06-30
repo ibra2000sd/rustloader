@@ -3,9 +3,9 @@
 > Update at the end of any session that lands work. This file — not `ROADMAP.md`
 > or `README.md` — is the live source of truth for "where are we".
 
-**As of:** 2026-06-30
+**As of:** 2026-07-01
 **Released version:** v0.8.1 (first published release, 2026-06-29)
-**main HEAD:** `71c463c` (merge of PR #24 — docs/ai-os pack + CLAUDE.md)
+**main HEAD:** `952dba4` (this PR's base, the #26 merge)
 **CI on main:** green (4 jobs × ubuntu/macOS/windows)
 **Open PRs:** #1 (draft, untouched)
 
@@ -43,12 +43,16 @@ reliability** (the two defects the aria2 spike localized):
   `leonardomso/rust-skills` skill (MIT) and authored
   `rustloader-invariants-guard`, which turns `docs/ai-os/invariants.md` into
   an actionable per-diff checklist. Docs/skills-only; no Rust source touched.
+- **B-DOC-001** (2026-07-01) — added a real `LICENSE` (MIT) + `Cargo.toml
+  license = "MIT"`, enacting `adr/0001` (now Accepted); corrected the README's
+  resume claims to match the verified code (restart-on-resume, no byte-level
+  resume yet); fixed the `ROADMAP.md`/`KNOWN_ISSUES.md` stale version stamps to
+  v0.8.1. Docs/metadata-only; no Rust source touched.
 
 ## Next (ordered)
 
-0. **B-DOC-001** — make the README's license claim real (LICENSE + Cargo.toml) and
-   correct the false resume claims. Gates the GPL decision.
 1. **F-DL-001** — Shape A: `yt-dlp --downloader aria2c` (external aria2c only).
+   Unblocked now that `B-DOC-001` has landed.
 2. **F-DL-002** — segment-failure tolerance (don't abort whole download; fix retry
    truncation). Fixes the throttled-host failure.
 3. **F-DL-003** — byte-level resume + checkpoint (investigate the existing
@@ -59,4 +63,4 @@ reliability** (the two defects the aria2 spike localized):
 - Cross-platform polish for Windows/Linux (CHANGELOG targets v0.9.0).
 - Proxy-capture / browser-extension capture (CHANGELOG targets v1.0.0;
   `F-EXTRACT-001`) — gated on the legitimate-use scope decision.
-- License: adopt MIT as the README already claims? (see `adr/0001`).
+- License: resolved — MIT adopted (`adr/0001`, Accepted).

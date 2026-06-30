@@ -1,7 +1,7 @@
 # RUSTLOADER: MASTER ROADMAP TO v1.0
 
-> **Last Updated**: January 2026  
-> **Current Version**: v0.6.x (internal)  
+> **Last Updated**: July 2026  
+> **Current Version**: v0.8.1  
 > **Status Legend**: ✅ Completed | 🟡 In Progress | 🔴 Not Started | ⚠️ Deferred
 
 This document tracks the evolution of Rustloader from initial release to production-ready v1.0.

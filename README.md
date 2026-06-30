@@ -48,7 +48,7 @@ See [ROADMAP.md](ROADMAP.md) for detailed feature breakdown and implementation s
 |---------|-------------|
 | **Multi-threaded Downloads** | Up to 16 parallel segments for maximum speed |
 | **1000+ Site Support** | Powered by yt-dlp for broad compatibility |
-| **Resume Capability** | Pause and resume downloads without data loss |
+| **Pause/Resume Control** | Pause and resume downloads (currently restarts the transfer; byte-level resume is planned) |
 | **Queue Management** | Handle multiple downloads concurrently (up to 5) |
 | **Quality Organization** | Auto-organize files into High/Standard/Low quality folders |
 | **Simple GUI** | Clean, dark-themed interface focused on functionality |
@@ -233,7 +233,7 @@ small files and servers that don't support range requests.
 | Metric | Rustloader | yt-dlp (vanilla) |
 |--------|------------|------------------|
 | Parallel connections | Up to 16 | 1 |
-| Resume support | ✅ Yes | ✅ Yes |
+| Resume support | 🔴 Planned (restart-only today) | ✅ Yes |
 
 *Performance varies with network conditions and server behavior.*
 
