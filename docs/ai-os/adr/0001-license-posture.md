@@ -1,7 +1,7 @@
 # ADR 0001 — License posture
 
-**Status:** Proposed (awaiting maintainer confirmation)
-**Date:** 2026-06-30
+**Status:** Accepted
+**Date:** 2026-06-30 (accepted 2026-07-01)
 
 ## Context
 The README advertises an MIT license (badge + "see the LICENSE file"), but no
@@ -10,11 +10,11 @@ field. The stated license is therefore unbacked. This must be resolved before an
 decision to depend on a copyleft (GPL) third-party binary such as aria2, because
 the license of the distribution determines what that dependency obligates.
 
-## Decision (proposed)
-Adopt **MIT**, matching the existing README claim (this is the maintainer's call;
-it is his code). Concretely: add a real `LICENSE` file with the MIT text and the
-correct copyright holder/year, and add `license = "MIT"` to `Cargo.toml`. Track as
-backlog `B-DOC-001`.
+## Decision
+Adopted **MIT**, matching the existing README claim (this is the maintainer's call;
+it is his code). Concretely: added a real `LICENSE` file with the MIT text,
+copyright holder "Ibrahim (ibra2000sd)", year 2026, and added `license = "MIT"`
+to `Cargo.toml`. Tracked as backlog `B-DOC-001`.
 
 ## Consequences
 - The README's claim becomes true; downstream users get a clear, permissive
@@ -23,6 +23,6 @@ backlog `B-DOC-001`.
   (external subprocess), never bundled/redistributed under the MIT umbrella — see
   `0002`.
 
-## Open
-- Confirm MIT vs another license. If a different license is chosen, revise this
-  ADR and `0002`'s assumptions accordingly.
+## Resolved
+- MIT confirmed as the license. `LICENSE` and `Cargo.toml` `license = "MIT"`
+  landed in the PR enacting this ADR (`B-DOC-001`).
