@@ -17,6 +17,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 
 use crate::downloader::{build_ytdlp_args, DownloadEngine, DownloadProgress, YtDlpOptions};
+use crate::extractor::ytdlp::find_aria2c;
 use crate::extractor::{HybridExtractor, YtDlpExtractor};
 use crate::utils;
 
@@ -120,6 +121,8 @@ impl Cli {
             end_time: self.end_time.clone(),
             audio_bitrate: self.bitrate.clone(),
             cookies: self.cookie_config(),
+            // No CLI flag yet for F-DL-001's opt-in aria2c downloader.
+            use_aria2c: false,
         }
     }
 
@@ -218,7 +221,15 @@ pub async fn run(cli: &Cli) -> Result<()> {
     // argument builder the engine uses, proving the flags reach A's engine path.
     if cli.dry_run {
         let output_path = cli.output_path("video");
-        let args = build_ytdlp_args(&options, &url, &output_path.to_string_lossy());
+        // Same decision the real download path (`download_via_ytdlp`) makes,
+        // so the printed plan is honest about what will actually run.
+        let aria2c_available = options.use_aria2c && find_aria2c().is_some();
+        let args = build_ytdlp_args(
+            &options,
+            &url,
+            &output_path.to_string_lossy(),
+            aria2c_available,
+        );
         println!("rustloader dry-run plan:");
         println!("  url:    {url}");
         println!("  output: {}", output_path.display());
