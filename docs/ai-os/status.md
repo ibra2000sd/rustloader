@@ -5,10 +5,10 @@
 
 **As of:** 2026-07-01
 **Released version:** v0.8.1 (first published release, 2026-06-29)
-**main HEAD:** `f51dfad` (the #30 merge; previous stamp `c976872`/#29 was stale)
+**main HEAD:** `38ea148` (the #31 merge; previous stamp `f51dfad`/#30 was stale)
 **CI on main:** green (4 jobs × ubuntu/macOS/windows)
-**Open PRs:** #1 (draft, untouched), [#31](https://github.com/ibra2000sd/rustloader/pull/31)
-(F-DL-001 opt-in aria2c downloader, open, branched from `f51dfad`)
+**Open PRs:** #1 (draft, untouched), [#32](https://github.com/ibra2000sd/rustloader/pull/32)
+(B-DOC-002 KNOWN_ISSUES.md refresh, open, branched from `38ea148`)
 
 ## Where the project is
 
@@ -99,7 +99,7 @@ regression for the one case it would have changed anything (see "Done" below).
   byte-correct, not the foreign bytes), and `enable_resume=false` (ignores
   even fully matching parts). All #28/#29 tests still pass.
 - **F-DL-001** (2026-07-01, Shape A, PR
-  [#31](https://github.com/ibra2000sd/rustloader/pull/31), open) — added
+  [#31](https://github.com/ibra2000sd/rustloader/pull/31), merged `38ea148`) — added
   `extractor::ytdlp::find_aria2c` (mirrors `find_ytdlp`/
   `find_in_common_paths`, deliberately without the bundled-binary check — I-9)
   and a `YtDlpOptions::use_aria2c` opt-in (default `false`) that makes
@@ -115,6 +115,20 @@ regression for the one case it would have changed anything (see "Done" below).
   0% for the whole transfer. No CLI/GUI toggle wired up yet (nothing sets
   `use_aria2c: true`), so this PR is a no-op by default — confirmed via
   `cargo run -- <url> --dry-run` producing byte-identical args to before.
+- **B-DOC-002** (2026-07-01, PR
+  [#32](https://github.com/ibra2000sd/rustloader/pull/32), open) —
+  `KNOWN_ISSUES.md`'s body was still written around v0.1.1 (resolved-bugs
+  table from that release, "Rustloader version (v0.1.1)" in the reporting
+  section) and predated the whole download-reliability arc. Rewrote it
+  against verified current-HEAD evidence: resume scope (segmented-only,
+  sidecar-guarded; `download_simple` and the yt-dlp/HLS path still don't
+  resume), orphaned `.partN` files on cancel, aria2c's opt-in/not-yet-exposed
+  status, the real cross-platform CI/release picture, and a re-verified
+  `cargo audit` dependency list. Dropped the stale "82→15-20 compiler
+  warnings" and "limited test coverage" claims (a fresh build shows zero
+  warnings from the crate's own code; 186 tests now pass across
+  unit/integration/persistence/stress suites). Docs-only; no Rust source
+  touched.
 
 ## Next (ordered)
 
