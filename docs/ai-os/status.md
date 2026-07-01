@@ -7,8 +7,8 @@
 **Released version:** v0.8.1 (first published release, 2026-06-29)
 **main HEAD:** `c1c0580` (the #28 merge; previous stamp `3494b3c`/#27 was stale)
 **CI on main:** green (4 jobs × ubuntu/macOS/windows)
-**Open PRs:** #1 (draft, untouched), B-DL-001 branch `fix/segment-resume-require-206`
-(resume-requires-206 fix, open, branched from `c1c0580`)
+**Open PRs:** #1 (draft, untouched), [#29](https://github.com/ibra2000sd/rustloader/pull/29)
+(B-DL-001 resume-requires-206 fix, open, branched from `c1c0580`)
 
 ## Where the project is
 
@@ -57,7 +57,7 @@ reliability** (the two defects the aria2 spike localized):
   connection kept hitting the same point and never completed. The engine's
   `break` on a genuinely-unrecoverable segment is intentionally unchanged.
   Cross-session/true byte-resume (`F-DL-003`) remains not-yet-true.
-- **B-DL-001** (2026-07-01, branch `fix/segment-resume-require-206`, open) —
+- **B-DL-001** (2026-07-01, PR [#29](https://github.com/ibra2000sd/rustloader/pull/29), open) —
   closed a silent-corruption gap in #28's resume path: `segment.rs` now
   requires `206 Partial Content` (not just any 2xx) before appending on a
   resume attempt; a `200 OK` (server/proxy ignoring `Range`) truncates the

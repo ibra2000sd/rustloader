@@ -22,8 +22,9 @@ corrupt part file with no error raised. **Fix:** on resume
 present) before appending; any other status truncates the stale partial and
 returns `Err` so the retry loop restarts the segment fresh. The first-attempt
 (`existing_bytes == 0`) path is unchanged. Regression test added:
-`test_resume_restarts_when_server_ignores_range`. PR opened (not yet merged);
-close this item with the merge SHA once it lands.
+`test_resume_restarts_when_server_ignores_range`. PR
+[#29](https://github.com/ibra2000sd/rustloader/pull/29) (open, not yet
+merged). Close this item with the merge SHA once it lands.
 
 ### F-DL-002 — Segment-failure tolerance: don't abort the whole download · in-progress · MEDIUM
 When any single segment errors, the engine `break`s and fails the **entire**
