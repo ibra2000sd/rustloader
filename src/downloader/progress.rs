@@ -7,6 +7,19 @@ use std::time::{Duration, Instant};
 /// (`STALL_DETECTION_SECONDS` in its `src/downloader.rs`).
 pub const STALL_DETECTION_SECONDS: u64 = 30;
 
+/// How long a native-path HTTP wait may sit with ZERO new bytes (waiting for
+/// response headers, or between body chunks) before the attempt is aborted.
+///
+/// This is the abort-side counterpart of the notify-only stall watchdog
+/// (`STALL_DETECTION_SECONDS`) and is deliberately aligned with it: a
+/// slow-but-progressing transfer keeps resetting this window on every chunk
+/// and runs to completion, while a genuinely dead connection is cut within a
+/// bounded idle window instead of hanging forever (the I-1 bound-the-wait
+/// rule, applied to HTTP reads). Segment attempts aborted by this bound feed
+/// the existing resume-append retry path (#28/#29), so bytes already written
+/// are not re-fetched.
+pub const STALL_ABORT_TIMEOUT: Duration = Duration::from_secs(STALL_DETECTION_SECONDS);
+
 /// Progress tracking structure
 #[derive(Debug, Clone)]
 pub struct DownloadProgress {
