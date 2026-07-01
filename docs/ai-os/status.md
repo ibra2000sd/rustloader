@@ -5,10 +5,12 @@
 
 **As of:** 2026-07-01
 **Released version:** v0.8.1 (first published release, 2026-06-29)
-**main HEAD:** `38ea148` (the #31 merge; previous stamp `f51dfad`/#30 was stale)
+**main HEAD:** `29b3ff1` (the #33 merge; previous stamp `38ea148`/#31 was stale —
+#32 and #33 both merged since)
 **CI on main:** green (4 jobs × ubuntu/macOS/windows)
-**Open PRs:** #1 (draft, untouched), [#32](https://github.com/ibra2000sd/rustloader/pull/32)
-(B-DOC-002 KNOWN_ISSUES.md refresh, open, branched from `38ea148`)
+**Open PRs:** #1 (draft, untouched), [#34](https://github.com/ibra2000sd/rustloader/pull/34)
+(F-HIST-001 Shape-3 PR-1 download-history persistence, open, branched from
+`29b3ff1`)
 
 ## Where the project is
 
@@ -130,7 +132,8 @@ regression for the one case it would have changed anything (see "Done" below).
   unit/integration/persistence/stress suites). Docs-only; no Rust source
   touched.
 - **F-DL-001b** (2026-07-01, PR
-  [#33](https://github.com/ibra2000sd/rustloader/pull/33), open) — wired the
+  [#33](https://github.com/ibra2000sd/rustloader/pull/33), merged `29b3ff1`) —
+  wired the
   actual enable path for #31's dormant `use_aria2c`: a new
   `--experimental-aria2c` CLI flag (default `false`), threaded straight to
   `YtDlpOptions::use_aria2c`. Help text labels it `EXPERIMENTAL` and states
@@ -145,18 +148,40 @@ regression for the one case it would have changed anything (see "Done" below).
   it experimental; dry-run omits `--downloader` by default; dry-run adds it
   when the flag is set and aria2c is actually present, environment-dependent
   like the existing `find_aria2c`/`find_ytdlp` smoke tests).
+- **F-HIST-001** (2026-07-01, Shape-3 PR-1, PR
+  [#34](https://github.com/ibra2000sd/rustloader/pull/34), open) — wired the
+  previously-dead `downloads` table into the download lifecycle as a durable
+  history (`download_segments` stays dead — resume is still the sidecar's
+  job, not this table's). `BackendActor` now holds the SAME `DatabaseManager`
+  Arc `gui/app.rs` already builds for settings; `downloads.id` = the queue
+  task UUID, reconciling 1:1 with `EventLog`/`DownloadTask.id`. A row is
+  inserted (status `Queued`) right after `queue_manager.add_task` succeeds in
+  `handle_start_download`, and updated in place (`INSERT OR REPLACE`) on
+  every subsequent status transition via the existing `monitor_loop` polling
+  diff — no new detection mechanism, `queue/manager.rs` and `queue/events.rs`
+  have zero diff (I-4/I-6 both structurally unaffected). Removing a task from
+  the live queue does not delete its history row. New tests:
+  `download_history_survives_reopening_the_database` (writes rows, opens a
+  brand-new pool against the same file, reads them back correctly — the
+  literal restart-persistence bar) and
+  `status_transitions_update_in_place_not_duplicate` (three transitions of
+  one task id leave exactly one row); plus unit tests for the new
+  `task_status_db_fields` status-mapping helper. Headless — no GUI history
+  list yet (`F-HIST-002`, below); `BackendActor::download_history()` is a
+  plain accessor + a startup log line proving the data is live and durable.
 
 ## Next (ordered)
 
-1. **F-DL-003 spinoffs** — orphaned-`.partN` cleanup on cancel/remove
-   (`queue/manager.rs`); optionally, Shape 3's DB-backed plan persistence as a
-   later enhancement over the filesystem sidecar.
-2. **F-DL-001b follow-up** — decide whether the progress-hook gap for
+1. **F-HIST-002** — render `BackendActor::download_history()` (added by
+   `F-HIST-001`) in the GUI as a history view.
+2. **F-DL-003 spinoffs** — orphaned-`.partN` cleanup on cancel/remove
+   (`queue/manager.rs`).
+3. **F-DL-001b follow-up** — decide whether the progress-hook gap for
    aria2c-driven http/https/ftp transfers is worth addressing (parsing
    aria2c's own progress format), and whether/how to expose
    `--experimental-aria2c` in the GUI once there's an advanced-settings area
    to put it in.
-3. **F-DL-002 (remaining half)** — the engine's `break`-on-segment-failure
+4. **F-DL-002 (remaining half)** — the engine's `break`-on-segment-failure
    still aborts the whole download; the retry-resume half is done (#28), the
    whole-download tolerance half remains open if still wanted.
 

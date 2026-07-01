@@ -229,10 +229,15 @@ impl Application for RustloaderApp {
         let (cmd_tx, cmd_rx) = mpsc::channel(100);
         let (event_tx, event_rx) = mpsc::channel(100);
 
-        // Spawn the actor on the runtime
+        // Spawn the actor on the runtime. Shares the SAME `DatabaseManager`
+        // (and therefore the same sqlite connection pool/file) already
+        // created above for settings — not a second DB instance — so the
+        // actor's download-history writes and the GUI's settings reads/writes
+        // are always looking at the same database.
         let settings_clone = settings.clone();
+        let db_manager_for_actor = Arc::clone(&db_manager);
         rt.spawn(async move {
-            match BackendActor::new(settings_clone, cmd_rx, event_tx).await {
+            match BackendActor::new(settings_clone, cmd_rx, event_tx, db_manager_for_actor).await {
                 Ok(actor) => actor.run().await,
                 Err(e) => error!("Failed to start backend actor: {}", e),
             }

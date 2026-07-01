@@ -147,8 +147,71 @@ gates real behavior instead of being a dead, always-on flag.
 - **Shape 3 / DB-backed persistence** — using `downloads`/`download_segments`
   to store the plan instead of (or in addition to) the filesystem sidecar
   remains a legitimate future direction (would also unlock download history/
-  resume across a moved output path), but is out of scope for this fix.
+  resume across a moved output path), but is out of scope for this fix. The
+  `downloads` half (history, not resume) is now `F-HIST-001` below;
+  `download_segments`-backed resume remains unaddressed and out of scope
+  there too — the sidecar still owns resume.
 Source: internal audit 2026-06-30; F-DL-003 spike 2026-07-01.
+
+### F-HIST-001 — Shape-3 PR-1: persist download history to the `downloads` table · closed (headless) · MEDIUM-LARGE
+The `downloads` table (and its CRUD — `save_download`/`get_download`/
+`get_all_downloads`/`get_downloads_by_status`/`delete_download`) has been dead
+since it was first defined — zero callers anywhere outside
+`database/operations.rs` itself (confirmed by the F-DL-003 spike, re-confirmed
+at this item's own HEAD). This wires it into the live download lifecycle as a
+durable **history** (survives an app restart), separate from — and not a
+replacement for — the sidecar-based resume mechanism (#30) or the EventLog's
+live-queue rehydrate.
+
+**Design decisions (see PR
+[#34](https://github.com/ibra2000sd/rustloader/pull/34) description for full
+detail):**
+- **Injection:** `gui/app.rs` already builds one `DatabaseManager` (used today
+  only for the `settings` table); `BackendActor::new` now takes an
+  `Arc<DatabaseManager>` — the SAME instance, cloned via `Arc::clone`, not a
+  second pool/file — and stores it. `QueueManager` itself is untouched.
+- **Identity:** `downloads.id` = the queue task ID
+  (`Uuid::new_v4().to_string()`, generated in `handle_start_download`) — the
+  same ID `EventLog`/`DownloadTask.id` already use, so a history row and a
+  live queue task reconcile 1:1 by construction.
+- **EventLog coherence:** `QueueManager`/`EventLog` remain the sole runtime
+  authority for a task's live state (I-4 unchanged — `queue/manager.rs` and
+  `queue/events.rs` have zero diff in this PR). The `downloads` table is a
+  best-effort, derived, write-only *projection* of that authority: one row is
+  inserted (status `Queued`) right after a successful `queue_manager.add_task`
+  in `handle_start_download`, and updated (same row, `INSERT OR REPLACE`
+  keyed by id) on every subsequent status transition, detected by the
+  existing `monitor_loop` polling diff (`backend/actor.rs`) that already
+  drove the GUI's `TaskStatusUpdated` event — no new detection mechanism, no
+  second lock/authority. Removing a task from the live queue (cancel/remove)
+  does **not** delete its history row — history is meant to outlive the live
+  queue entry, that's the point of a persistent history.
+- **`download_segments` stays dead** — not wired, not touched. Resume is
+  still exclusively the `.rustloader-resume` sidecar's job.
+
+**Tests:** `database/operations.rs` gained two regression tests —
+`download_history_survives_reopening_the_database` (writes rows, drops the
+pool, opens a brand-new pool against the same file, reads them back via
+`get_all_downloads` with correct status/fields — the literal "survives a
+simulated restart" acceptance bar) and
+`status_transitions_update_in_place_not_duplicate` (three transitions of one
+task id via `save_download` leave exactly one row, not three, with the final
+status/`completed_at` and the original `created_at` preserved). Two pure unit
+tests for the new `task_status_db_fields` mapping helper (in
+`backend/actor.rs`) cover every `TaskStatus` variant, including that only
+terminal states set `completed_at` and that `Failed`'s message carries
+through.
+
+**Headless in this PR — no GUI history list** (that's `F-HIST-002` below);
+`BackendActor::download_history()` is a plain accessor + a startup log line
+proving the data is live and durable, with nothing rendering it yet.
+
+### F-HIST-002 — GUI download-history list (Shape-3 PR-2) · open · MEDIUM
+Render `BackendActor::download_history()` (added by `F-HIST-001`) in the GUI —
+a history view separate from the live queue list, showing past downloads
+(including ones cleared from the active queue) with their final status. Not
+started; this item exists so the headless persistence in `F-HIST-001` has a
+visible consumer eventually.
 
 ### B-DOC-002 — KNOWN_ISSUES.md content is stale · closed · SMALL
 `B-DOC-001` fixed only the title's version stamp (now "v0.8.1"); the body was

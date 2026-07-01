@@ -244,3 +244,137 @@ fn row_into_segment_record(row: sqlx::sqlite::SqliteRow) -> Result<SegmentRecord
         completed: row.get("completed"),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::database::initialize_database;
+
+    /// Opens a fresh sqlite file at a unique temp path, mirroring the
+    /// `sqlite://<path>?mode=rwc` URL format used everywhere else in the app
+    /// (see `gui/app.rs`'s settings persistence).
+    async fn fresh_db_url(name: &str) -> String {
+        let dir =
+            std::env::temp_dir().join(format!("rl-history-test-{}-{}", name, std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let db_path = dir.join("history.db");
+        let _ = std::fs::remove_file(&db_path);
+        format!("sqlite://{}?mode=rwc", db_path.display())
+    }
+
+    fn sample_record(id: &str, status: &str) -> DownloadRecord {
+        DownloadRecord {
+            id: id.to_string(),
+            url: format!("https://example.com/{id}"),
+            title: format!("Video {id}"),
+            output_path: PathBuf::from(format!("/tmp/{id}.mp4")),
+            file_size: Some(1_000_000),
+            status: status.to_string(),
+            created_at: Utc::now(),
+            completed_at: None,
+            error_message: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn download_history_survives_reopening_the_database() {
+        // Shape-3 PR-1 acceptance criterion: history must survive a
+        // simulated app restart, i.e. a brand-new connection pool against
+        // the same on-disk database file, not just the same open connection.
+        let db_url = fresh_db_url("restart").await;
+
+        {
+            let pool = initialize_database(&db_url).await.expect("init db");
+            let db = DatabaseManager::new(pool);
+
+            let mut completed = sample_record("task-a", "Completed");
+            completed.completed_at = Some(Utc::now());
+            db.save_download(&completed).await.expect("save task-a");
+
+            let mut failed = sample_record("task-b", "Failed");
+            failed.file_size = None;
+            failed.completed_at = Some(Utc::now());
+            failed.error_message = Some("network error".to_string());
+            db.save_download(&failed).await.expect("save task-b");
+
+            // `pool`/`db` drop here, simulating the app process exiting.
+        }
+
+        // "Restart": a brand-new pool against the same file.
+        let pool = initialize_database(&db_url).await.expect("reopen db");
+        let db = DatabaseManager::new(pool);
+        let history = db.get_all_downloads().await.expect("get_all_downloads");
+
+        assert_eq!(
+            history.len(),
+            2,
+            "both records must survive reopening the database"
+        );
+        let a = history
+            .iter()
+            .find(|r| r.id == "task-a")
+            .expect("task-a present after reopen");
+        assert_eq!(a.status, "Completed");
+        assert_eq!(a.file_size, Some(1_000_000));
+        assert!(a.completed_at.is_some());
+
+        let b = history
+            .iter()
+            .find(|r| r.id == "task-b")
+            .expect("task-b present after reopen");
+        assert_eq!(b.status, "Failed");
+        assert_eq!(b.error_message.as_deref(), Some("network error"));
+    }
+
+    #[tokio::test]
+    async fn status_transitions_update_in_place_not_duplicate() {
+        // save_download is INSERT OR REPLACE, keyed by id -- this is what
+        // lets the same task id be written on every status transition
+        // (Queued -> Downloading -> Completed) without ever accumulating
+        // duplicate history rows for one download.
+        let db_url = fresh_db_url("transitions").await;
+        let pool = initialize_database(&db_url).await.expect("init db");
+        let db = DatabaseManager::new(pool);
+
+        let id = "task-transition";
+        let created_at = Utc::now();
+
+        let mut record = sample_record(id, "Queued");
+        record.created_at = created_at;
+        db.save_download(&record).await.expect("save queued");
+
+        let row = db
+            .get_download(id)
+            .await
+            .expect("get_download")
+            .expect("row exists after Queued");
+        assert_eq!(row.status, "Queued");
+        assert!(row.completed_at.is_none());
+
+        record.status = "Downloading".to_string();
+        db.save_download(&record).await.expect("save downloading");
+
+        let row = db
+            .get_download(id)
+            .await
+            .expect("get_download")
+            .expect("row exists after Downloading");
+        assert_eq!(row.status, "Downloading");
+
+        record.status = "Completed".to_string();
+        record.completed_at = Some(Utc::now());
+        db.save_download(&record).await.expect("save completed");
+
+        let all = db.get_all_downloads().await.expect("get_all_downloads");
+        assert_eq!(
+            all.len(),
+            1,
+            "three transitions of the same task id must leave exactly one row, not three"
+        );
+        assert_eq!(all[0].status, "Completed");
+        assert!(all[0].completed_at.is_some());
+        // created_at must be preserved across every transition (it's not part
+        // of what a status update should change).
+        assert_eq!(all[0].created_at.timestamp(), created_at.timestamp());
+    }
+}
