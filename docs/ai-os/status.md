@@ -5,12 +5,10 @@
 
 **As of:** 2026-07-01
 **Released version:** v0.8.1 (first published release, 2026-06-29)
-**main HEAD:** `29b3ff1` (the #33 merge; previous stamp `38ea148`/#31 was stale —
-#32 and #33 both merged since)
+**main HEAD:** `04e0148` (the #34 merge; previous stamp `29b3ff1`/#33 was stale)
 **CI on main:** green (4 jobs × ubuntu/macOS/windows)
-**Open PRs:** #1 (draft, untouched), [#34](https://github.com/ibra2000sd/rustloader/pull/34)
-(F-HIST-001 Shape-3 PR-1 download-history persistence, open, branched from
-`29b3ff1`)
+**Open PRs:** #1 (draft, untouched), [#35](https://github.com/ibra2000sd/rustloader/pull/35)
+(F-HIST-002 Shape-3 PR-2 GUI history view, open, branched from `04e0148`)
 
 ## Where the project is
 
@@ -149,7 +147,7 @@ regression for the one case it would have changed anything (see "Done" below).
   when the flag is set and aria2c is actually present, environment-dependent
   like the existing `find_aria2c`/`find_ytdlp` smoke tests).
 - **F-HIST-001** (2026-07-01, Shape-3 PR-1, PR
-  [#34](https://github.com/ibra2000sd/rustloader/pull/34), open) — wired the
+  [#34](https://github.com/ibra2000sd/rustloader/pull/34), merged `04e0148`) — wired the
   previously-dead `downloads` table into the download lifecycle as a durable
   history (`download_segments` stays dead — resume is still the sidecar's
   job, not this table's). `BackendActor` now holds the SAME `DatabaseManager`
@@ -169,11 +167,38 @@ regression for the one case it would have changed anything (see "Done" below).
   `task_status_db_fields` status-mapping helper. Headless — no GUI history
   list yet (`F-HIST-002`, below); `BackendActor::download_history()` is a
   plain accessor + a startup log line proving the data is live and durable.
+- **F-HIST-002** (2026-07-01, Shape-3 PR-2, PR
+  [#35](https://github.com/ibra2000sd/rustloader/pull/35), open) — a visible
+  History view: a third sidebar entry listing persisted downloads
+  newest-first (title/URL fallback, status, output path, size, timestamp),
+  with Remove-from-history (`delete_download` — DB record only, not the
+  file, labelled as such) and Show-in-Folder (reuses the existing
+  `open::that(...)` call already shipped for the live queue, no new
+  dependency). Reads/writes the GUI's existing `Arc<DatabaseManager>`
+  directly via `Command::perform` (the same pattern already used for
+  Settings) rather than adding a `BackendCommand`/`BackendEvent` round-trip —
+  simpler, since the GUI already holds the same database the actor does.
+  Auto-refreshes when a download reaches a terminal state while the History
+  view is open, reusing the existing `monitor_loop` status-diff (no polling
+  added). `src/queue`/`src/downloader` have zero diff; `database/
+  operations.rs` only gained tests (`delete_download_removes_only_the_
+  targeted_record`), no new/changed CRUD. New pure-function tests for the
+  title/size/timestamp row mapping. Manual smoke: launched the real compiled
+  binary — confirmed clean startup (real Metal-backed window, real local
+  database read logging "Loaded 16 historical download record(s)" from
+  actual prior-usage data, no panics/errors, clean shutdown) but could not
+  get a pixel-level screenshot, since the raw dev binary isn't a bundled
+  `.app` macOS's permission system can target — see the PR for the full
+  account, including a safety correction (an initial test-data insert into
+  the real shared local database was caught and cleaned up immediately;
+  a second attempt was correctly blocked).
 
 ## Next (ordered)
 
-1. **F-HIST-002** — render `BackendActor::download_history()` (added by
-   `F-HIST-001`) in the GUI as a history view.
+1. **F-HIST-002 follow-ups** — re-download / open-file directly from
+   history (explicit fast-follows, not done in #35); a real screenshot-based
+   visual pass by the maintainer, since the automated smoke couldn't get one
+   in this environment.
 2. **F-DL-003 spinoffs** — orphaned-`.partN` cleanup on cancel/remove
    (`queue/manager.rs`).
 3. **F-DL-001b follow-up** — decide whether the progress-hook gap for
