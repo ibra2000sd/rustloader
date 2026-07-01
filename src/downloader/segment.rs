@@ -13,11 +13,28 @@ use futures::stream::{self, StreamExt};
 use reqwest::Client;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use tokio::fs::File;
+use tokio::fs::{File, OpenOptions};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
+
+/// Hard safety ceiling on the *total* wall-clock time a single segment may
+/// spend retrying, regardless of how much forward progress it keeps making.
+/// Without this, a host that serves a trickle of bytes and then drops the
+/// connection forever (repeating on every retry) would let a
+/// progress-resets-the-budget retry loop run indefinitely. This bounds it.
+const MAX_SEGMENT_RETRY_WALL_CLOCK: Duration = Duration::from_secs(300);
+
+/// Bytes already written to a segment's part file, or 0 if the file doesn't
+/// exist yet. Used to resume a retry from where the previous attempt left
+/// off instead of re-downloading the segment from `start`.
+async fn part_file_len(path: &Path) -> u64 {
+    tokio::fs::metadata(path)
+        .await
+        .map(|m| m.len())
+        .unwrap_or(0)
+}
 
 /// Segment information
 #[derive(Debug, Clone)]
@@ -38,34 +55,61 @@ pub async fn download_segment(
     retry_attempts: usize,
     retry_delay: Duration,
 ) -> Result<()> {
-    let mut attempts = 0;
+    let mut attempts = 0usize;
+    let overall_start = Instant::now();
+    let mut last_bytes = part_file_len(&segment.path).await;
 
-    while attempts <= retry_attempts {
+    loop {
         match download_segment_attempt(client, url, segment, &progress_tx).await {
             Ok(()) => return Ok(()),
-            Err(e) if attempts < retry_attempts => {
+            Err(e) => {
+                let bytes_now = part_file_len(&segment.path).await;
+                let made_progress = bytes_now > last_bytes;
+                last_bytes = bytes_now;
+
+                if overall_start.elapsed() >= MAX_SEGMENT_RETRY_WALL_CLOCK {
+                    error!(
+                        "Segment {} exceeded the {}s retry wall-clock ceiling ({} bytes written): {}",
+                        segment.id,
+                        MAX_SEGMENT_RETRY_WALL_CLOCK.as_secs(),
+                        bytes_now,
+                        e
+                    );
+                    return Err(e);
+                }
+
+                if made_progress {
+                    // The failed attempt still made forward progress (e.g. a
+                    // throttled connection that was dropped mid-transfer) —
+                    // don't burn it against the retry budget. Still bounded
+                    // overall by MAX_SEGMENT_RETRY_WALL_CLOCK above, so a host
+                    // that trickles bytes and drops forever cannot loop
+                    // indefinitely.
+                    attempts = 0;
+                } else if attempts >= retry_attempts {
+                    error!(
+                        "Segment {} download failed after {} attempts with no forward progress: {}",
+                        segment.id,
+                        attempts + 1,
+                        e
+                    );
+                    return Err(e);
+                } else {
+                    attempts += 1;
+                }
+
                 warn!(
-                    "Segment {} download failed (attempt {}): {}",
+                    "Segment {} download failed (attempt {}, {} bytes written so far, progress={}): {}",
                     segment.id,
-                    attempts + 1,
+                    attempts,
+                    bytes_now,
+                    made_progress,
                     e
                 );
                 sleep(retry_delay).await;
-                attempts += 1;
-            }
-            Err(e) => {
-                error!(
-                    "Segment {} download failed after {} attempts: {}",
-                    segment.id,
-                    retry_attempts + 1,
-                    e
-                );
-                return Err(e);
             }
         }
     }
-
-    Ok(())
 }
 
 /// Single attempt to download a segment
@@ -75,16 +119,48 @@ async fn download_segment_attempt(
     segment: &Segment,
     progress_tx: &mpsc::Sender<SegmentProgress>,
 ) -> Result<()> {
+    let total_size = segment.end - segment.start + 1;
+
+    // Resume from bytes a previous attempt (this run) already wrote to the
+    // part file, instead of truncating and re-downloading from `start`. If
+    // the existing file is larger than the segment span it can't be a valid
+    // partial write for this segment (corruption) — treat it as invalid and
+    // restart the segment from scratch rather than producing a bad file.
+    let existing_bytes = match tokio::fs::metadata(&segment.path).await {
+        Ok(meta) if meta.len() <= total_size => meta.len(),
+        _ => 0,
+    };
+
+    if existing_bytes == total_size {
+        // A prior attempt already wrote the full segment before failing
+        // (e.g. on the final flush) — nothing left to fetch.
+        info!(
+            "Segment {} already complete from a prior attempt ({} bytes)",
+            segment.id, existing_bytes
+        );
+        let _ = progress_tx
+            .send(SegmentProgress {
+                segment_id: segment.id,
+                downloaded_bytes: existing_bytes,
+                total_bytes: total_size,
+                speed: 0.0,
+            })
+            .await;
+        return Ok(());
+    }
+
+    let range_start = segment.start + existing_bytes;
+
     debug!(
-        "Downloading segment {} (bytes {}-{})",
-        segment.id, segment.start, segment.end
+        "Downloading segment {} (bytes {}-{}, {} bytes already written)",
+        segment.id, range_start, segment.end, existing_bytes
     );
 
-    // Create range header for this segment
-    let range = if segment.start == segment.end {
-        format!("bytes={}", segment.start)
+    // Create range header for the remaining span of this segment
+    let range = if range_start == segment.end {
+        format!("bytes={}", range_start)
     } else {
-        format!("bytes={}-{}", segment.start, segment.end)
+        format!("bytes={}-{}", range_start, segment.end)
     };
 
     // Send request with range header
@@ -94,10 +170,15 @@ async fn download_segment_attempt(
         return Err(anyhow::anyhow!("HTTP error: {}", response.status()));
     }
 
-    // Create file for this segment
-    let mut file = File::create(&segment.path).await?;
-    let mut downloaded = 0u64;
-    let total_size = segment.end - segment.start + 1;
+    // Resume by appending to the existing part file; only create/truncate
+    // fresh when there's nothing valid to resume from (first attempt, or a
+    // corrupt/oversized leftover file that was reset above).
+    let mut file = if existing_bytes > 0 {
+        OpenOptions::new().append(true).open(&segment.path).await?
+    } else {
+        File::create(&segment.path).await?
+    };
+    let mut downloaded = existing_bytes;
 
     // Track download speed
     let start_time = Instant::now();
@@ -294,5 +375,249 @@ mod tests {
             assert_eq!(first.start, 0);
             assert!(last.end >= 9_999);
         }
+    }
+}
+
+/// Regression tests for segment-retry resume (F-DL-002): a segment that gets
+/// dropped mid-transfer must resume from its already-written bytes on retry,
+/// not truncate and restart from `start`.
+///
+/// These use a small hand-rolled HTTP/1.1 server over `tokio::net::TcpListener`
+/// rather than a mock-server crate: no new dev-dependency is needed (`tokio`
+/// is already a direct dependency), and it gives precise control over
+/// closing the connection mid-body to simulate a throttled/dropped
+/// connection — something response-template-based mock servers don't model.
+#[cfg(test)]
+mod resume_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use tokio::io::AsyncReadExt;
+    use tokio::net::TcpListener;
+
+    /// Serves ranged GET requests for `body`. The FIRST request received
+    /// sends only `drop_after` bytes of the requested range and then closes
+    /// the connection before `Content-Length` is satisfied (simulating a
+    /// throttled/dropped connection); every subsequent request is served in
+    /// full.
+    async fn spawn_flaky_range_server(
+        body: Vec<u8>,
+        drop_after: usize,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let body = Arc::new(body);
+        let request_count = Arc::new(AtomicUsize::new(0));
+
+        let handle = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = match listener.accept().await {
+                    Ok(x) => x,
+                    Err(_) => break,
+                };
+                let body = Arc::clone(&body);
+                let request_count = Arc::clone(&request_count);
+
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 8192];
+                    let mut req = Vec::new();
+                    loop {
+                        let n = match socket.read(&mut buf).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => n,
+                        };
+                        req.extend_from_slice(&buf[..n]);
+                        if req.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+
+                    let req_str = String::from_utf8_lossy(&req);
+                    let range_start = req_str
+                        .lines()
+                        .find(|l| l.to_ascii_lowercase().starts_with("range:"))
+                        .and_then(|l| l.split('=').nth(1))
+                        .and_then(|r| r.split('-').next())
+                        .and_then(|s| s.trim().parse::<usize>().ok())
+                        .unwrap_or(0)
+                        .min(body.len());
+
+                    let this_request = request_count.fetch_add(1, Ordering::SeqCst);
+                    let remaining = &body[range_start..];
+                    let total_len = remaining.len();
+                    let send_len = if this_request == 0 {
+                        drop_after.min(total_len)
+                    } else {
+                        total_len
+                    };
+
+                    let headers = format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                        total_len
+                    );
+                    if socket.write_all(headers.as_bytes()).await.is_err() {
+                        return;
+                    }
+                    let _ = socket.write_all(&remaining[..send_len]).await;
+                    let _ = socket.flush().await;
+                    // On the first request, the socket is dropped here with
+                    // `send_len < total_len` still outstanding against the
+                    // declared Content-Length — the client sees this as a
+                    // dropped/truncated connection.
+                });
+            }
+        });
+
+        (format!("http://{}", addr), handle)
+    }
+
+    #[tokio::test]
+    async fn test_download_segment_resumes_after_mid_stream_drop() {
+        let body: Vec<u8> = (0..200_000u32).map(|i| (i % 256) as u8).collect();
+        let drop_after = 50_000usize;
+        let (base_url, _server) = spawn_flaky_range_server(body.clone(), drop_after).await;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("out.mp4.part0");
+        let segment = Segment {
+            id: 0,
+            start: 0,
+            end: (body.len() - 1) as u64,
+            size: body.len() as u64,
+            path: path.clone(),
+        };
+
+        let client = Client::new();
+        let (tx, mut rx) = mpsc::channel(100);
+        let rx_task = tokio::spawn(async move {
+            let mut last = None;
+            while let Some(p) = rx.recv().await {
+                last = Some(p);
+            }
+            last
+        });
+
+        let result = download_segment(
+            &client,
+            &base_url,
+            &segment,
+            tx,
+            3,
+            Duration::from_millis(10),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "expected the throttled-then-resumed segment to succeed: {:?}",
+            result
+        );
+
+        let final_bytes = tokio::fs::read(&path).await.expect("read part file");
+        assert_eq!(
+            final_bytes.len(),
+            body.len(),
+            "part file must be byte-complete (no gap/overlap at the resume boundary)"
+        );
+        assert_eq!(
+            final_bytes, body,
+            "part file must be byte-identical to a clean, undropped download"
+        );
+
+        let last_progress = rx_task
+            .await
+            .expect("progress task")
+            .expect("at least one progress update");
+        assert_eq!(
+            last_progress.downloaded_bytes,
+            body.len() as u64,
+            "progress must reach 100% of the segment, not regress or double-count on resume"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_download_segment_happy_path_no_drop() {
+        // drop_after >= body.len() means the first request is already served
+        // in full — proves the resume path doesn't change first-attempt
+        // (fresh-file, full-span) behaviour.
+        let body: Vec<u8> = (0..20_000u32).map(|i| (i % 256) as u8).collect();
+        let (base_url, _server) = spawn_flaky_range_server(body.clone(), body.len()).await;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("out.mp4.part0");
+        let segment = Segment {
+            id: 0,
+            start: 0,
+            end: (body.len() - 1) as u64,
+            size: body.len() as u64,
+            path: path.clone(),
+        };
+
+        let client = Client::new();
+        let (tx, mut rx) = mpsc::channel(100);
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+
+        let result = download_segment(
+            &client,
+            &base_url,
+            &segment,
+            tx,
+            3,
+            Duration::from_millis(10),
+        )
+        .await;
+        assert!(result.is_ok());
+
+        let final_bytes = tokio::fs::read(&path).await.expect("read part file");
+        assert_eq!(
+            final_bytes, body,
+            "happy-path (no drop) output must be unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_download_segment_fails_when_never_makes_progress() {
+        // A listener that accepts and immediately closes every connection:
+        // no bytes are ever written, so every attempt makes zero forward
+        // progress. The retry budget must still exhaust and the segment must
+        // fail — this is the genuine-unrecoverable path the engine's `break`
+        // (which aborts the whole download) still relies on.
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let handle = tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                drop(socket);
+            }
+        });
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("out.mp4.part0");
+        let segment = Segment {
+            id: 0,
+            start: 0,
+            end: 999,
+            size: 1000,
+            path,
+        };
+
+        let client = Client::new();
+        let (tx, mut rx) = mpsc::channel(100);
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+
+        let result = download_segment(
+            &client,
+            &format!("http://{}", addr),
+            &segment,
+            tx,
+            2,
+            Duration::from_millis(5),
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "a segment that never makes any forward progress must still fail after exhausting retries"
+        );
+        handle.abort();
     }
 }
