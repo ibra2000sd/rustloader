@@ -8,6 +8,7 @@
 )]
 
 use super::{EventLog, QueueEvent};
+use crate::downloader::resume_guard::{remove_sidecar, sidecar_path};
 use crate::downloader::{DownloadEngine, DownloadProgress};
 use crate::extractor::{Format, VideoInfo};
 use crate::utils::error::RustloaderError;
@@ -15,7 +16,7 @@ use crate::utils::{ContentType, FileOrganizer, MetadataManager, VideoMetadata};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
@@ -362,6 +363,7 @@ impl QueueManager {
         if let Some(task) = task_opt {
             let was_downloading = task.status == TaskStatus::Downloading;
             task.status = TaskStatus::Cancelled;
+            let output_path = task.output_path.clone();
 
             // LOG EVENT
             self.log_cancellation(task_id).await;
@@ -377,6 +379,14 @@ impl QueueManager {
                     handle.progress_handle.abort();
                 }
             }
+
+            // 3. Orphan hygiene: a cancelled task's `.partN` files and resume
+            // sidecar are litter, not resumable state — drop them. Done after
+            // releasing the locks (filesystem I/O outside the critical
+            // section); pause_task deliberately does NOT do this, so
+            // cross-session resume keeps working.
+            drop(queue);
+            Self::cleanup_task_artifacts(&output_path).await;
 
             info!("Cancelled task {}", task_id);
             return Ok(());
@@ -446,11 +456,16 @@ impl QueueManager {
 
     /// Remove a specific task (for Remove button on individual tasks)
     pub async fn remove_task(&self, task_id: &str) -> Result<()> {
-        // Remove from queue
-        {
+        // Remove from queue, capturing the output path for artifact cleanup
+        let output_path = {
             let mut queue = self.queue.lock().await;
+            let output_path = queue
+                .iter()
+                .find(|task| task.id == task_id)
+                .map(|task| task.output_path.clone());
             queue.retain(|task| task.id != task_id);
-        }
+            output_path
+        };
 
         // Remove from active downloads
         {
@@ -468,7 +483,79 @@ impl QueueManager {
             })
             .await;
 
+        // Orphan hygiene: drop the removed task's `.partN` files and resume
+        // sidecar. A no-op for completed tasks (the engine already cleaned
+        // both at merge time) and for tasks not found in the queue.
+        if let Some(output_path) = output_path {
+            Self::cleanup_task_artifacts(&output_path).await;
+        }
+
         Ok(())
+    }
+
+    /// Best-effort removal of a task's on-disk download litter: the
+    /// `<output>.partN` segment files and the `<output>.rustloader-resume`
+    /// identity sidecar (F-DL-003). Called on cancel/remove ONLY — pause must
+    /// leave both in place so cross-session resume keeps working. Failures
+    /// are logged, never propagated: cleanup must not break cancel/remove.
+    async fn cleanup_task_artifacts(output_path: &Path) {
+        remove_sidecar(&sidecar_path(output_path)).await;
+
+        // The segment count isn't known at this layer (the engine derives it
+        // from the probed file size + config), so match
+        // `<file_name>.part<digits>` in the output's directory instead of
+        // reconstructing the plan `calculate_segments` would produce.
+        let Some(file_name) = output_path.file_name().and_then(|n| n.to_str()) else {
+            return;
+        };
+        let prefix = format!("{file_name}.part");
+        let dir = match output_path.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent,
+            _ => Path::new("."),
+        };
+        let mut entries = match tokio::fs::read_dir(dir).await {
+            Ok(entries) => entries,
+            Err(e) => {
+                warn!(
+                    "Failed to scan {} for orphaned segment parts: {}",
+                    dir.display(),
+                    e
+                );
+                return;
+            }
+        };
+        loop {
+            match entries.next_entry().await {
+                Ok(Some(entry)) => {
+                    let name = entry.file_name();
+                    let is_part = name.to_str().is_some_and(|name| {
+                        name.strip_prefix(&prefix)
+                            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+                    });
+                    if !is_part {
+                        continue;
+                    }
+                    if let Err(e) = tokio::fs::remove_file(entry.path()).await {
+                        warn!(
+                            "Failed to remove orphaned segment part {}: {}",
+                            entry.path().display(),
+                            e
+                        );
+                    } else {
+                        debug!("Removed orphaned segment part: {}", entry.path().display());
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    warn!(
+                        "Failed to scan {} for orphaned segment parts: {}",
+                        dir.display(),
+                        e
+                    );
+                    break;
+                }
+            }
+        }
     }
 
     /// Process the queue

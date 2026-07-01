@@ -142,8 +142,8 @@ gates real behavior instead of being a dead, always-on flag.
   `remove_task` (`queue/manager.rs`) never call `cleanup_segments`, so
   cancelled downloads leave parts on disk indefinitely. The identity guard
   makes this *safe* (a mismatch/foreign check would clean them up on the next
-  attempt at that path), but the litter itself is unaddressed. File as its own
-  small item if wanted.
+  attempt at that path), but the litter itself is unaddressed. **Filed and
+  done as `B-DL-002` below.**
 - **Shape 3 / DB-backed persistence** — using `downloads`/`download_segments`
   to store the plan instead of (or in addition to) the filesystem sidecar
   remains a legitimate future direction (would also unlock download history/
@@ -152,6 +152,27 @@ gates real behavior instead of being a dead, always-on flag.
   `download_segments`-backed resume remains unaddressed and out of scope
   there too — the sidecar still owns resume.
 Source: internal audit 2026-06-30; F-DL-003 spike 2026-07-01.
+
+### B-DL-002 — Orphaned `.partN` + resume sidecar left behind on cancel/remove · closed (PR open) · SMALL
+The F-DL-003 hygiene spinoff (see the "Deliberately NOT done" list above):
+`cleanup_segments` ran only after a successful merge (`engine.rs`), so
+`cancel_task`/`remove_task` left the `.partN` files and the
+`<output>.rustloader-resume` sidecar on disk indefinitely — safe (the sidecar
+identity guard prevents corruption from stale parts) but litter. **Fix (PR
+[#36](https://github.com/ibra2000sd/rustloader/pull/36), open, not yet
+merged):** a private best-effort `cleanup_task_artifacts` helper in
+`queue/manager.rs` removes the sidecar (via `resume_guard`'s
+`sidecar_path`/`remove_sidecar`) and every `<file_name>.part<digits>` file in
+the output's directory (a strict digit-suffix scan — the segment count isn't
+known at the queue layer). Called from `cancel_task` and `remove_task` only,
+after the locks are released; failures are logged, never propagated.
+`pause_task` deliberately does NOT clean up — parts + sidecar must survive
+pause or cross-session resume (F-DL-003/#30) breaks; `clear_completed` needs
+nothing because the engine already removes both at merge time
+(`engine.rs`). Regression tests in `tests/orphan_cleanup_test.rs`: cancel
+and remove delete the artifacts (decoys untouched), and — the load-bearing
+guard — pause keeps them.
+Source: F-DL-003 spinoff, 2026-07-01; implemented 2026-07-02.
 
 ### F-HIST-001 — Shape-3 PR-1: persist download history to the `downloads` table · closed (headless) · MEDIUM-LARGE
 The `downloads` table (and its CRUD — `save_download`/`get_download`/

@@ -3,12 +3,13 @@
 > Update at the end of any session that lands work. This file — not `ROADMAP.md`
 > or `README.md` — is the live source of truth for "where are we".
 
-**As of:** 2026-07-01
+**As of:** 2026-07-02
 **Released version:** v0.8.1 (first published release, 2026-06-29)
-**main HEAD:** `04e0148` (the #34 merge; previous stamp `29b3ff1`/#33 was stale)
+**main HEAD:** `59d96bb` (the #35 merge)
 **CI on main:** green (4 jobs × ubuntu/macOS/windows)
-**Open PRs:** #1 (draft, untouched), [#35](https://github.com/ibra2000sd/rustloader/pull/35)
-(F-HIST-002 Shape-3 PR-2 GUI history view, open, branched from `04e0148`)
+**Open PRs:** #1 (draft, untouched), [#36](https://github.com/ibra2000sd/rustloader/pull/36)
+(B-DL-002 orphaned-`.partN`/sidecar cleanup on cancel/remove, open, branched
+from `59d96bb`)
 
 ## Where the project is
 
@@ -168,7 +169,7 @@ regression for the one case it would have changed anything (see "Done" below).
   list yet (`F-HIST-002`, below); `BackendActor::download_history()` is a
   plain accessor + a startup log line proving the data is live and durable.
 - **F-HIST-002** (2026-07-01, Shape-3 PR-2, PR
-  [#35](https://github.com/ibra2000sd/rustloader/pull/35), open) — a visible
+  [#35](https://github.com/ibra2000sd/rustloader/pull/35), merged `59d96bb`) — a visible
   History view: a third sidebar entry listing persisted downloads
   newest-first (title/URL fallback, status, output path, size, timestamp),
   with Remove-from-history (`delete_download` — DB record only, not the
@@ -192,6 +193,22 @@ regression for the one case it would have changed anything (see "Done" below).
   account, including a safety correction (an initial test-data insert into
   the real shared local database was caught and cleaned up immediately;
   a second attempt was correctly blocked).
+- **B-DL-002** (2026-07-02, PR
+  [#36](https://github.com/ibra2000sd/rustloader/pull/36), open) — the F-DL-003
+  hygiene spinoff: `cancel_task`/`remove_task` (`queue/manager.rs`) now
+  best-effort delete the task's `<output>.partN` files and its
+  `<output>.rustloader-resume` sidecar via a new private
+  `cleanup_task_artifacts` helper (sidecar via `resume_guard`'s
+  `sidecar_path`/`remove_sidecar`; parts via a strict
+  `<file_name>.part<digits>` scan of the output's directory, since the
+  segment count isn't known at the queue layer). Cleanup runs after the
+  queue/active locks are released (I-5 respected); failures are logged, never
+  propagated. `pause_task` deliberately unchanged — parts + sidecar must
+  survive pause or cross-session resume (F-DL-003/#30) breaks;
+  `clear_completed` needs nothing (the engine already removes both at merge
+  time). Engine/resume/sidecar/persistence untouched. New regression tests
+  in `tests/orphan_cleanup_test.rs`: cancel and remove delete the artifacts
+  (decoy files untouched), and — the load-bearing guard — pause keeps them.
 
 ## Next (ordered)
 
@@ -199,14 +216,12 @@ regression for the one case it would have changed anything (see "Done" below).
    history (explicit fast-follows, not done in #35); a real screenshot-based
    visual pass by the maintainer, since the automated smoke couldn't get one
    in this environment.
-2. **F-DL-003 spinoffs** — orphaned-`.partN` cleanup on cancel/remove
-   (`queue/manager.rs`).
-3. **F-DL-001b follow-up** — decide whether the progress-hook gap for
+2. **F-DL-001b follow-up** — decide whether the progress-hook gap for
    aria2c-driven http/https/ftp transfers is worth addressing (parsing
    aria2c's own progress format), and whether/how to expose
    `--experimental-aria2c` in the GUI once there's an advanced-settings area
    to put it in.
-4. **F-DL-002 (remaining half)** — the engine's `break`-on-segment-failure
+3. **F-DL-002 (remaining half)** — the engine's `break`-on-segment-failure
    still aborts the whole download; the retry-resume half is done (#28), the
    whole-download tolerance half remains open if still wanted.
 
