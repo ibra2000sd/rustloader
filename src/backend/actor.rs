@@ -1,4 +1,5 @@
 use super::messages::{BackendCommand, BackendEvent};
+use crate::database::{DatabaseManager, DownloadRecord};
 use crate::downloader::{DownloadConfig, DownloadEngine};
 use crate::extractor::{
     native::youtube::NativeYoutubeExtractor, Extractor, Format, HybridExtractor, VideoInfo,
@@ -9,12 +10,27 @@ use crate::queue::{DownloadTask, EventLog, QueueManager, TaskStatus};
 use crate::utils::config::AppSettings;
 use crate::utils::{get_app_support_dir, FileOrganizer, MetadataManager, OrganizationSettings};
 use anyhow::Result;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::info;
+use tracing::{info, warn};
 use uuid::Uuid;
+
+/// Map a queue `TaskStatus` to the `downloads` table's `(status, completed_at,
+/// error_message)` columns. The single source of truth for that mapping, used
+/// both for the DB history writes and the GUI's `TaskStatusUpdated` event, so
+/// the two never drift apart.
+fn task_status_db_fields(status: &TaskStatus) -> (String, Option<DateTime<Utc>>, Option<String>) {
+    match status {
+        TaskStatus::Queued => ("Queued".to_string(), None, None),
+        TaskStatus::Downloading => ("Downloading".to_string(), None, None),
+        TaskStatus::Paused => ("Paused".to_string(), None, None),
+        TaskStatus::Completed => ("Completed".to_string(), Some(Utc::now()), None),
+        TaskStatus::Failed(e) => ("Failed".to_string(), Some(Utc::now()), Some(e.clone())),
+        TaskStatus::Cancelled => ("Cancelled".to_string(), Some(Utc::now()), None),
+    }
+}
 
 pub struct BackendActor {
     receiver: mpsc::Receiver<BackendCommand>,
@@ -23,6 +39,7 @@ pub struct BackendActor {
     // Components
     extractor: Arc<HybridExtractor>,
     queue_manager: Arc<QueueManager>,
+    db_manager: Arc<DatabaseManager>,
 }
 
 impl BackendActor {
@@ -30,6 +47,7 @@ impl BackendActor {
         settings: AppSettings,
         receiver: mpsc::Receiver<BackendCommand>,
         sender: mpsc::Sender<BackendEvent>,
+        db_manager: Arc<DatabaseManager>,
     ) -> Result<Self> {
         // Cookie source from settings, applied to both extraction and download
         // so authenticated sites (e.g. YouTube) work from the GUI.
@@ -96,7 +114,16 @@ impl BackendActor {
             sender,
             extractor,
             queue_manager,
+            db_manager,
         })
+    }
+
+    /// All persisted download history (all-time, including completed/failed/
+    /// cancelled downloads that may no longer be in the live queue),
+    /// most-recent-first. Nothing renders this yet — the GUI history list is
+    /// a follow-up (Shape-3 PR-2) — but the data is live and durable now.
+    pub async fn download_history(&self) -> Result<Vec<DownloadRecord>> {
+        self.db_manager.get_all_downloads().await
     }
 
     pub async fn run(mut self) {
@@ -105,6 +132,21 @@ impl BackendActor {
         // Rehydrate persistence state
         if let Err(e) = self.queue_manager.rehydrate().await {
             tracing::error!("Failed to rehydrate queue state: {}", e);
+        }
+
+        // Load persisted download history (Shape-3 PR-1). This is separate
+        // from the queue rehydrate above: rehydrate reconstructs the LIVE
+        // queue's runtime state from the EventLog; this reads the `downloads`
+        // table, the durable history of every download ever started,
+        // including ones long since cleared from the live queue. Nothing
+        // consumes it yet (that's the GUI history list, PR-2) — this just
+        // proves it's live and durable across restarts.
+        match self.db_manager.get_all_downloads().await {
+            Ok(history) => info!(
+                "Loaded {} historical download record(s) from the downloads table",
+                history.len()
+            ),
+            Err(e) => warn!("Failed to load download history: {}", e),
         }
 
         // Spawn Queue Processor (independent loop)
@@ -118,8 +160,9 @@ impl BackendActor {
         // For now, we port the polling logic to keep changes scoped.
         let qm_monitor = self.queue_manager.clone();
         let sender_monitor = self.sender.clone();
+        let db_monitor = Arc::clone(&self.db_manager);
         tokio::spawn(async move {
-            Self::monitor_loop(qm_monitor, sender_monitor).await;
+            Self::monitor_loop(qm_monitor, sender_monitor, db_monitor).await;
         });
 
         while let Some(cmd) = self.receiver.recv().await {
@@ -235,6 +278,26 @@ impl BackendActor {
             return;
         }
 
+        // Persist the initial history row now that the task is actually
+        // queued. Best-effort: a write failure here must not fail the
+        // download — the queue (added above) is already the runtime source
+        // of truth for this task; this is a durable log of it, not a second
+        // one.
+        let record = DownloadRecord {
+            id: task_id.clone(),
+            url: video_info.url.clone(),
+            title: video_info.title.clone(),
+            output_path: output_path.clone(),
+            file_size: format.filesize,
+            status: "Queued".to_string(),
+            created_at: Utc::now(),
+            completed_at: None,
+            error_message: None,
+        };
+        if let Err(e) = self.db_manager.save_download(&record).await {
+            warn!("Failed to persist download history for {}: {}", task_id, e);
+        }
+
         let _ = self
             .sender
             .send(BackendEvent::DownloadStarted {
@@ -317,7 +380,11 @@ impl BackendActor {
         }
     }
 
-    async fn monitor_loop(qm: Arc<QueueManager>, sender: mpsc::Sender<BackendEvent>) {
+    async fn monitor_loop(
+        qm: Arc<QueueManager>,
+        sender: mpsc::Sender<BackendEvent>,
+        db_manager: Arc<DatabaseManager>,
+    ) {
         let mut last_statuses = std::collections::HashMap::new();
 
         loop {
@@ -333,15 +400,8 @@ impl BackendActor {
                     .unwrap_or(TaskStatus::Queued);
 
                 if task.status != last_status {
-                    let status_str = match task.status {
-                        TaskStatus::Queued => "Queued",
-                        TaskStatus::Downloading => "Downloading",
-                        TaskStatus::Paused => "Paused",
-                        TaskStatus::Completed => "Completed",
-                        TaskStatus::Failed(_) => "Failed",
-                        TaskStatus::Cancelled => "Cancelled",
-                    }
-                    .to_string();
+                    let (status_str, completed_at, error_message) =
+                        task_status_db_fields(&task.status);
 
                     let _ = sender
                         .send(BackendEvent::TaskStatusUpdated {
@@ -365,6 +425,29 @@ impl BackendActor {
                                 error: e.clone(),
                             })
                             .await;
+                    }
+
+                    // Persist the transition to the `downloads` history table.
+                    // Best-effort: the live queue (via `last_statuses`/`qm`)
+                    // remains the runtime authority for this task's state
+                    // regardless of whether this write succeeds — a failure
+                    // here must never affect the download itself.
+                    let record = DownloadRecord {
+                        id: task.id.clone(),
+                        url: task.video_info.url.clone(),
+                        title: task.video_info.title.clone(),
+                        output_path: task.output_path.clone(),
+                        file_size: task.format.filesize,
+                        status: status_str,
+                        created_at: task.added_at,
+                        completed_at,
+                        error_message,
+                    };
+                    if let Err(e) = db_manager.save_download(&record).await {
+                        warn!(
+                            "Failed to persist download history update for {}: {}",
+                            task.id, e
+                        );
                     }
 
                     last_statuses.insert(task.id.clone(), task.status.clone());
@@ -404,6 +487,43 @@ impl BackendActor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn task_status_db_fields_sets_completed_at_only_for_terminal_states() {
+        let (status, completed_at, error) = task_status_db_fields(&TaskStatus::Queued);
+        assert_eq!(status, "Queued");
+        assert!(completed_at.is_none());
+        assert!(error.is_none());
+
+        let (status, completed_at, error) = task_status_db_fields(&TaskStatus::Downloading);
+        assert_eq!(status, "Downloading");
+        assert!(completed_at.is_none());
+        assert!(error.is_none());
+
+        let (status, completed_at, error) = task_status_db_fields(&TaskStatus::Paused);
+        assert_eq!(status, "Paused");
+        assert!(completed_at.is_none());
+        assert!(error.is_none());
+
+        let (status, completed_at, error) = task_status_db_fields(&TaskStatus::Completed);
+        assert_eq!(status, "Completed");
+        assert!(completed_at.is_some());
+        assert!(error.is_none());
+
+        let (status, completed_at, error) = task_status_db_fields(&TaskStatus::Cancelled);
+        assert_eq!(status, "Cancelled");
+        assert!(completed_at.is_some());
+        assert!(error.is_none());
+    }
+
+    #[test]
+    fn task_status_db_fields_carries_the_failure_message() {
+        let (status, completed_at, error) =
+            task_status_db_fields(&TaskStatus::Failed("boom".to_string()));
+        assert_eq!(status, "Failed");
+        assert!(completed_at.is_some());
+        assert_eq!(error.as_deref(), Some("boom"));
+    }
 
     fn fmt(id: &str, vcodec: Option<&str>, acodec: Option<&str>, w: u32, h: u32) -> Format {
         Format {
