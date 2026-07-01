@@ -9,6 +9,22 @@ download-reliability work.
 
 ## P1 — do first
 
+### B-DL-001 — Segment resume must require HTTP 206, else restart · in-progress · SMALL-MEDIUM
+Follow-up to F-DL-002 / PR #28: the resume branch in `download_segment_attempt`
+(`segment.rs`) checked only `response.status().is_success()` before appending
+to the existing `.partN` file, which accepts a `200 OK` as well as `206`. A
+server/CDN/proxy that ignores the `Range` header and returns `200` with the
+full body (cache miss, range-coalescing proxy, etc.) would get its body
+appended onto the already-written bytes, silently producing an oversized,
+corrupt part file with no error raised. **Fix:** on resume
+(`existing_bytes > 0`), require `reqwest::StatusCode::PARTIAL_CONTENT`
+(optionally cross-checked against the `Content-Range` start offset when
+present) before appending; any other status truncates the stale partial and
+returns `Err` so the retry loop restarts the segment fresh. The first-attempt
+(`existing_bytes == 0`) path is unchanged. Regression test added:
+`test_resume_restarts_when_server_ignores_range`. PR opened (not yet merged);
+close this item with the merge SHA once it lands.
+
 ### F-DL-002 — Segment-failure tolerance: don't abort the whole download · in-progress · MEDIUM
 When any single segment errors, the engine `break`s and fails the **entire**
 download (`engine.rs` result loop), and per-segment retries truncate from byte 0

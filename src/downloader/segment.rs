@@ -36,6 +36,27 @@ async fn part_file_len(path: &Path) -> u64 {
         .unwrap_or(0)
 }
 
+/// If a `206` response carries a `Content-Range` header, confirm its start
+/// offset matches the byte we asked to resume from. Servers aren't required
+/// to send this header on a `206` (the existing test server doesn't), so its
+/// absence is not itself a failure — this only catches a proxy that sends
+/// `206` but actually started the body from a different offset than the one
+/// requested.
+fn content_range_start_ok(response: &reqwest::Response, expected_start: u64) -> bool {
+    let Some(value) = response.headers().get(reqwest::header::CONTENT_RANGE) else {
+        return true;
+    };
+    let Ok(value) = value.to_str() else {
+        return false;
+    };
+    // Format: "bytes <start>-<end>/<total>".
+    value
+        .strip_prefix("bytes ")
+        .and_then(|rest| rest.split('-').next())
+        .and_then(|start| start.trim().parse::<u64>().ok())
+        .is_some_and(|start| start == expected_start)
+}
+
 /// Segment information
 #[derive(Debug, Clone)]
 pub struct Segment {
@@ -166,13 +187,34 @@ async fn download_segment_attempt(
     // Send request with range header
     let response = client.get(url).header("Range", range).send().await?;
 
-    if !response.status().is_success() {
+    if existing_bytes > 0 {
+        // Resuming a partial download is only safe if the server actually
+        // honored the Range request. A server/CDN/proxy that ignores Range
+        // and replies 200 OK with the full body would otherwise get appended
+        // onto the existing partial bytes, silently producing an oversized,
+        // corrupt part file. Require 206 Partial Content; anything else means
+        // the existing partial data can't be trusted, so discard it and let
+        // the retry loop restart this segment from scratch (the next attempt
+        // sees existing_bytes == 0 and issues a full-span request).
+        let honored = response.status() == reqwest::StatusCode::PARTIAL_CONTENT
+            && content_range_start_ok(&response, range_start);
+        if !honored {
+            let status = response.status();
+            File::create(&segment.path).await?;
+            return Err(anyhow::anyhow!(
+                "Range not honored on resume (status {}, expected 206 Partial Content at byte {}); segment restarted",
+                status,
+                range_start
+            ));
+        }
+    } else if !response.status().is_success() {
         return Err(anyhow::anyhow!("HTTP error: {}", response.status()));
     }
 
     // Resume by appending to the existing part file; only create/truncate
     // fresh when there's nothing valid to resume from (first attempt, or a
-    // corrupt/oversized leftover file that was reset above).
+    // corrupt/oversized leftover file that was reset above, or a resume
+    // response whose Range wasn't honored, handled above).
     let mut file = if existing_bytes > 0 {
         OpenOptions::new().append(true).open(&segment.path).await?
     } else {
@@ -471,6 +513,80 @@ mod resume_tests {
         (format!("http://{}", addr), handle)
     }
 
+    /// Serves GET requests for `body`. The FIRST request behaves like
+    /// `spawn_flaky_range_server`: it sends only `drop_after` bytes of the
+    /// requested range and closes the connection before `Content-Length` is
+    /// satisfied (simulating a throttled/dropped connection). Every
+    /// subsequent request IGNORES any `Range` header entirely and replies
+    /// `200 OK` with the full body from byte 0 — simulating a CDN/proxy that
+    /// ignores `Range` and returns the whole resource, which is the scenario
+    /// B-DL-001 guards against.
+    async fn spawn_range_ignoring_server(
+        body: Vec<u8>,
+        drop_after: usize,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let body = Arc::new(body);
+        let request_count = Arc::new(AtomicUsize::new(0));
+
+        let handle = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = match listener.accept().await {
+                    Ok(x) => x,
+                    Err(_) => break,
+                };
+                let body = Arc::clone(&body);
+                let request_count = Arc::clone(&request_count);
+
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 8192];
+                    let mut req = Vec::new();
+                    loop {
+                        let n = match socket.read(&mut buf).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => n,
+                        };
+                        req.extend_from_slice(&buf[..n]);
+                        if req.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+
+                    let this_request = request_count.fetch_add(1, Ordering::SeqCst);
+
+                    if this_request == 0 {
+                        let total_len = body.len();
+                        let send_len = drop_after.min(total_len);
+                        let headers = format!(
+                            "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                            total_len
+                        );
+                        if socket.write_all(headers.as_bytes()).await.is_err() {
+                            return;
+                        }
+                        let _ = socket.write_all(&body[..send_len]).await;
+                        let _ = socket.flush().await;
+                    } else {
+                        // Range header (if any) is ignored: reply 200 with
+                        // the full body, starting at byte 0.
+                        let headers = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        if socket.write_all(headers.as_bytes()).await.is_err() {
+                            return;
+                        }
+                        let _ = socket.write_all(&body).await;
+                        let _ = socket.flush().await;
+                    }
+                });
+            }
+        });
+
+        (format!("http://{}", addr), handle)
+    }
+
     #[tokio::test]
     async fn test_download_segment_resumes_after_mid_stream_drop() {
         let body: Vec<u8> = (0..200_000u32).map(|i| (i % 256) as u8).collect();
@@ -619,5 +735,60 @@ mod resume_tests {
             "a segment that never makes any forward progress must still fail after exhausting retries"
         );
         handle.abort();
+    }
+
+    /// Regression test for B-DL-001: PR #28's resume path appended any 2xx
+    /// response onto the existing part file, including a `200 OK` from a
+    /// server/proxy that ignored the `Range` header. That silently produced
+    /// an oversized, corrupt part file with no error raised. The fix
+    /// requires `206 Partial Content` to resume-append; a non-206 response
+    /// on resume must truncate the stale partial and restart the segment
+    /// fresh instead.
+    #[tokio::test]
+    async fn test_resume_restarts_when_server_ignores_range() {
+        let body: Vec<u8> = (0..200_000u32).map(|i| (i % 256) as u8).collect();
+        let drop_after = 50_000usize;
+        let (base_url, _server) = spawn_range_ignoring_server(body.clone(), drop_after).await;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("out.mp4.part0");
+        let segment = Segment {
+            id: 0,
+            start: 0,
+            end: (body.len() - 1) as u64,
+            size: body.len() as u64,
+            path: path.clone(),
+        };
+
+        let client = Client::new();
+        let (tx, mut rx) = mpsc::channel(100);
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+
+        let result = download_segment(
+            &client,
+            &base_url,
+            &segment,
+            tx,
+            3,
+            Duration::from_millis(10),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "expected the segment to recover by restarting fresh after the range-ignored resume: {:?}",
+            result
+        );
+
+        let final_bytes = tokio::fs::read(&path).await.expect("read part file");
+        assert_eq!(
+            final_bytes.len(),
+            body.len(),
+            "part file must be exactly the segment size, not oversized from an appended full-body response"
+        );
+        assert_eq!(
+            final_bytes, body,
+            "part file must be byte-identical to the source body, not corrupt"
+        );
     }
 }
