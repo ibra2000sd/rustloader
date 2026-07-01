@@ -5,9 +5,9 @@
 
 **As of:** 2026-07-01
 **Released version:** v0.8.1 (first published release, 2026-06-29)
-**main HEAD:** `952dba4` (this PR's base, the #26 merge)
+**main HEAD:** `3494b3c` (the #27 merge; previous stamp `952dba4`/#26 was stale)
 **CI on main:** green (4 jobs × ubuntu/macOS/windows)
-**Open PRs:** #1 (draft, untouched)
+**Open PRs:** #1 (draft, untouched), #28 (F-DL-002 segment-retry resume, open)
 
 ## Where the project is
 
@@ -48,6 +48,14 @@ reliability** (the two defects the aria2 spike localized):
   resume claims to match the verified code (restart-on-resume, no byte-level
   resume yet); fixed the `ROADMAP.md`/`KNOWN_ISSUES.md` stale version stamps to
   v0.8.1. Docs/metadata-only; no Rust source touched.
+- **F-DL-002** (2026-07-01, PR [#28](https://github.com/ibra2000sd/rustloader/pull/28), open) —
+  segment retries in `segment.rs` now resume from already-written bytes
+  (ranged `Range: bytes={start+W}-{end}` + append, cumulative progress,
+  wall-clock-bounded retry budget) instead of `File::create`-truncating on
+  every attempt. Fixes the throttled-host failure mode where a dropped
+  connection kept hitting the same point and never completed. The engine's
+  `break` on a genuinely-unrecoverable segment is intentionally unchanged.
+  Cross-session/true byte-resume (`F-DL-003`) remains not-yet-true.
 
 ## Next (ordered)
 
