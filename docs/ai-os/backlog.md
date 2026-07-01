@@ -9,7 +9,7 @@ download-reliability work.
 
 ## P1 — do first
 
-### F-DL-002 — Segment-failure tolerance: don't abort the whole download · open · MEDIUM
+### F-DL-002 — Segment-failure tolerance: don't abort the whole download · in-progress · MEDIUM
 When any single segment errors, the engine `break`s and fails the **entire**
 download (`engine.rs` result loop), and per-segment retries truncate from byte 0
 (`segment.rs` `File::create`). A single dropped connection to a throttled/capped
@@ -18,6 +18,13 @@ without aborting the whole download, and make segment retry resume from the
 already-written bytes instead of re-downloading from 0. This is the cheaper half
 of audit "Shape D" and independently fixes the throttled-host failure mode.
 Source: internal audit 2026-06-30.
+**Status:** the retry-resume half is done — `segment.rs` retries now resume
+from already-written bytes (Range + append, cumulative progress, wall-clock-
+bounded retry budget) instead of truncating. PR
+[#28](https://github.com/ibra2000sd/rustloader/pull/28) (open, not yet
+merged). The engine's `break` on a genuinely-unrecoverable segment is
+intentionally retained/unchanged — see the PR description. Close this item
+with the merge SHA once #28 lands.
 
 ## P2
 
