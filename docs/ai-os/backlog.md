@@ -133,10 +133,24 @@ gates real behavior instead of being a dead, always-on flag.
   resume across a moved output path), but is out of scope for this fix.
 Source: internal audit 2026-06-30; F-DL-003 spike 2026-07-01.
 
-### B-DOC-002 — KNOWN_ISSUES.md content is stale · open · SMALL
-`B-DOC-001` fixed only the title's version stamp (now "v0.8.1"); the body still
-doesn't reflect the throttle/resume limitations. A full content refresh remains
-open. Source: internal audit 2026-06-30.
+### B-DOC-002 — KNOWN_ISSUES.md content is stale · closed · SMALL
+`B-DOC-001` fixed only the title's version stamp (now "v0.8.1"); the body was
+still written around v0.1.1 and predated the whole download-reliability arc
+(#28/#29/#30/#31). **Fix (PR [#32](https://github.com/ibra2000sd/rustloader/pull/32),
+open, not yet merged):** rewrote the body against verified current-HEAD
+evidence — resume scope (segmented-only, sidecar-guarded per F-DL-003;
+`download_simple` and the yt-dlp/HLS path still don't resume), orphaned
+`.partN` files on cancel (the F-DL-003 spinoff), aria2c's opt-in/not-yet-exposed
+status (F-DL-001), the real cross-platform CI/release picture (builds+tests
+pass on all 3 OSes; Windows/Linux release still "planned" per ROADMAP), and a
+re-verified dependency-warning list (`cargo audit`: `instant`/`paste`/
+`ttf-parser` unmaintained, `lru`/`memmap2` unsound, all transitive via `iced`).
+Dropped two claims that no longer held: "82→15-20 compiler warnings" (a fresh
+`cargo build` shows zero warnings from the crate's own code today) and
+"limited unit test coverage" (186 tests pass across unit/integration/
+persistence/stress suites). Added a "Recently Resolved (v0.8.x)" table for the
+F-DL-002/B-DL-001/F-DL-003 fixes. Docs-only; no Rust source touched.
+Source: internal audit 2026-06-30.
 
 ## P3 / later
 
@@ -164,6 +178,9 @@ lowering / making it configurable. NOT a bug (it is already bounded).
 | `B-DOC-001` | README/LICENSE/roadmap claims are inaccurate | `f897872`, 2026-07-01 (PR pending) |
 | `F-DL-002` | Segment retry resumes from written bytes (retry-resume half) | PR #28, `c1c0580`, 2026-07-01 |
 | `B-DL-001` | Segment resume requires HTTP 206, else restarts | PR #29, `c976872`, 2026-07-01 |
+| `F-DL-003` | Cross-session resume sidecar identity guard | PR #30, `f51dfad`, 2026-07-01 |
+| `F-DL-001` | Opt-in aria2c external downloader for yt-dlp path | PR #31, `38ea148`, 2026-07-01 |
+| `B-DOC-002` | KNOWN_ISSUES.md content refresh | PR #32, 2026-07-01 (PR pending) |
 
 (Pre-`docs/ai-os` work was tracked via GitHub PRs/CHANGELOG; future items use the
 IDs above.)
