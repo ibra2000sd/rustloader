@@ -53,14 +53,15 @@ reliability** (the two defects the aria2 spike localized):
   resume claims to match the verified code (restart-on-resume, no byte-level
   resume yet); fixed the `ROADMAP.md`/`KNOWN_ISSUES.md` stale version stamps to
   v0.8.1. Docs/metadata-only; no Rust source touched.
-- **F-DL-002** (2026-07-01, PR [#28](https://github.com/ibra2000sd/rustloader/pull/28), open) —
+- **F-DL-002** (2026-07-01, PR [#28](https://github.com/ibra2000sd/rustloader/pull/28), merged
+  `c1c0580`) —
   segment retries in `segment.rs` now resume from already-written bytes
   (ranged `Range: bytes={start+W}-{end}` + append, cumulative progress,
   wall-clock-bounded retry budget) instead of `File::create`-truncating on
   every attempt. Fixes the throttled-host failure mode where a dropped
   connection kept hitting the same point and never completed. The engine's
   `break` on a genuinely-unrecoverable segment is intentionally unchanged.
-  Cross-session/true byte-resume (`F-DL-003`) remains not-yet-true.
+  Cross-session resume safety is now tracked by `F-DL-003` (PR #30, below).
 - **B-DL-001** (2026-07-01, PR [#29](https://github.com/ibra2000sd/rustloader/pull/29), merged
   `c976872`) —
   closed a silent-corruption gap in #28's resume path: `segment.rs` now
