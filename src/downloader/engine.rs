@@ -16,6 +16,7 @@ use crate::downloader::resume_guard::{
     read_sidecar, remove_sidecar, sidecar_path, write_sidecar, ResumeIdentity,
 };
 use crate::downloader::segment::{calculate_segments, download_segment, SegmentProgress};
+use crate::extractor::ytdlp::find_aria2c;
 use anyhow::Result;
 use futures::stream::{self, StreamExt};
 use reqwest::Client;
@@ -158,6 +159,17 @@ pub struct YtDlpOptions {
     /// Cookie source for sites that require authentication (e.g. YouTube's
     /// anti-bot check). Default (empty) emits no cookie arguments.
     pub cookies: crate::utils::CookieConfig,
+    /// Opt in to `--downloader aria2c` when an external `aria2c` is detected
+    /// (F-DL-001, Shape A). Defaults to `false`: yt-dlp only delegates to an
+    /// external downloader for plain `http`/`https`/`ftp`/`ftps` transfers —
+    /// HLS/DASH (the primary reason `download_via_ytdlp` exists) always stays
+    /// on yt-dlp's native downloader regardless of this flag, since aria2c
+    /// doesn't support those protocols. For the transfers it does apply to,
+    /// yt-dlp does not forward aria2c's own progress into its usual
+    /// `[download] X%` lines until the transfer completes (verified against
+    /// yt-dlp's `ExternalFD` — see `build_ytdlp_args`'s doc comment), so this
+    /// stays opt-in until that's addressed.
+    pub use_aria2c: bool,
 }
 
 /// Build the yt-dlp argument vector for the given options, URL and output path.
@@ -167,7 +179,28 @@ pub struct YtDlpOptions {
 /// so the GUI download path is unchanged. Extra arguments are only emitted when
 /// the corresponding option is set, which is how the CLI flags become real
 /// behaviour instead of cosmetics.
-pub fn build_ytdlp_args(opts: &YtDlpOptions, url: &str, output: &str) -> Vec<String> {
+///
+/// `aria2c_available` is the caller's already-resolved decision (opt-in
+/// `YtDlpOptions::use_aria2c` AND a live [`find_aria2c`] detection) to add
+/// `--downloader aria2c` (F-DL-001, Shape A) — this function only decides
+/// whether to emit the flag, not whether aria2c should be used at all.
+///
+/// This never bundles or depends on aria2c (I-9 / ADR-0002): `--downloader
+/// aria2c` just tells yt-dlp the *name* of an external downloader to look for
+/// on its own `PATH`, the same way `-f`/`ffmpeg` postprocessing already
+/// relies on an external `ffmpeg`. Confirmed via yt-dlp's own `--help`
+/// (`--downloader [PROTO:]NAME`, alias `--external-downloader`) and its
+/// `downloader/external.py` source: `Aria2cFD.SUPPORTED_PROTOCOLS = ('http',
+/// 'https', 'ftp', 'ftps')` — HLS/DASH transfers silently keep using yt-dlp's
+/// native downloader either way, and `ExternalFD.real_download` only calls
+/// yt-dlp's progress hook once, on completion, for protocols aria2c *does*
+/// take over — hence `YtDlpOptions::use_aria2c` defaulting to `false`.
+pub fn build_ytdlp_args(
+    opts: &YtDlpOptions,
+    url: &str,
+    output: &str,
+    aria2c_available: bool,
+) -> Vec<String> {
     let mut args: Vec<String> = Vec::new();
 
     if opts.audio_only {
@@ -216,6 +249,11 @@ pub fn build_ytdlp_args(opts: &YtDlpOptions, url: &str, output: &str) -> Vec<Str
     // Cookie source (if configured) for authenticated sites. Default config
     // appends nothing, so the historical argument list is unchanged.
     opts.cookies.append_args(&mut args);
+
+    if aria2c_available {
+        args.push("--downloader".to_string());
+        args.push("aria2c".to_string());
+    }
 
     args.push("--newline".to_string());
     args.push("--no-warnings".to_string());
@@ -679,7 +717,12 @@ impl DownloadEngine {
         // historical `-f best --newline --no-warnings --progress -o <out> <url>`.
         debug!("🔧 [YT-DLP] Spawning yt-dlp process...");
         let out = output_path.to_string_lossy().to_string();
-        let args = build_ytdlp_args(&self.ytdlp_options, url, &out);
+        // aria2c is only ever engaged when the caller opted in AND an
+        // external aria2c is actually present (I-9: never bundled, detected
+        // like any other external tool).
+        let aria2c_available = self.ytdlp_options.use_aria2c && find_aria2c().is_some();
+        debug!("🔧 [YT-DLP] aria2c_available={}", aria2c_available);
+        let args = build_ytdlp_args(&self.ytdlp_options, url, &out, aria2c_available);
         debug!("🔧 [YT-DLP] Args: {:?}", args);
         let mut cmd = AsyncCommand::new("yt-dlp");
         cmd.args(&args);
@@ -1283,7 +1326,7 @@ mod tests {
         // HLS/DASH variants — a bare `best` makes yt-dlp reject HLS master
         // playlists ("Requested format is not available").
         let opts = YtDlpOptions::default();
-        let args = build_ytdlp_args(&opts, "https://example.com/v", "/tmp/out.mp4");
+        let args = build_ytdlp_args(&opts, "https://example.com/v", "/tmp/out.mp4", false);
         assert_eq!(
             args,
             vec![
@@ -1308,7 +1351,7 @@ mod tests {
             quality: Some(720),
             ..Default::default()
         };
-        let args = build_ytdlp_args(&opts, "URL", "/out.mp4");
+        let args = build_ytdlp_args(&opts, "URL", "/out.mp4", false);
         assert!(args.iter().any(|a| a == "-f"));
         assert!(
             args.iter().any(|a| a.contains("height<=720")),
@@ -1324,7 +1367,7 @@ mod tests {
             audio_bitrate: Some("128K".to_string()),
             ..Default::default()
         };
-        let args = build_ytdlp_args(&opts, "URL", "/out.mp3");
+        let args = build_ytdlp_args(&opts, "URL", "/out.mp3", false);
         assert!(args.iter().any(|a| a == "-x"));
         assert!(args.windows(2).any(|w| w == ["--audio-format", "mp3"]));
         assert!(args.iter().any(|a| a.contains("ffmpeg:-b:a 128K")));
@@ -1339,7 +1382,7 @@ mod tests {
             playlist: true,
             ..Default::default()
         };
-        let args = build_ytdlp_args(&opts, "URL", "/out.mp4");
+        let args = build_ytdlp_args(&opts, "URL", "/out.mp4", false);
         assert!(args.iter().any(|a| a == "--write-subs"));
         assert!(args.windows(2).any(|w| w == ["--sub-langs", "all"]));
         assert!(args.iter().any(|a| a == "--yes-playlist"));
@@ -1352,10 +1395,56 @@ mod tests {
             end_time: Some("00:00:20".to_string()),
             ..Default::default()
         };
-        let args = build_ytdlp_args(&opts, "URL", "/out.mp4");
+        let args = build_ytdlp_args(&opts, "URL", "/out.mp4", false);
         assert!(args
             .windows(2)
             .any(|w| w == ["--download-sections", "*00:00:10-00:00:20"]));
+    }
+
+    #[test]
+    fn test_build_ytdlp_args_adds_downloader_when_aria2c_available() {
+        // build_ytdlp_args itself just trusts the caller's already-resolved
+        // decision — this doesn't depend on aria2c actually being installed,
+        // so it's safe to run in CI regardless of the runner's environment.
+        let opts = YtDlpOptions::default();
+        let args = build_ytdlp_args(&opts, "URL", "/out.mp4", true);
+        assert!(
+            args.windows(2).any(|w| w == ["--downloader", "aria2c"]),
+            "expected --downloader aria2c when aria2c_available=true: {args:?}"
+        );
+    }
+
+    #[test]
+    fn test_build_ytdlp_args_omits_downloader_when_aria2c_unavailable() {
+        let opts = YtDlpOptions::default();
+        let args = build_ytdlp_args(&opts, "URL", "/out.mp4", false);
+        assert!(
+            !args.iter().any(|a| a == "--downloader"),
+            "must not add --downloader when aria2c_available=false: {args:?}"
+        );
+        // Default options must still produce byte-for-byte the historical
+        // argument list when aria2c isn't available.
+        assert_eq!(
+            args,
+            vec![
+                "-f",
+                "bestvideo*+bestaudio/best",
+                "--newline",
+                "--no-warnings",
+                "--progress",
+                "-o",
+                "/out.mp4",
+                "URL",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_ytdlp_options_default_has_aria2c_disabled() {
+        // enable_resume-style dead-flag mistake avoided: this must default to
+        // false so shipping F-DL-001 changes nothing for anyone who hasn't
+        // explicitly opted in.
+        assert!(!YtDlpOptions::default().use_aria2c);
     }
 
     #[test]

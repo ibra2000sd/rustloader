@@ -327,6 +327,49 @@ pub fn ytdlp_command() -> Option<Command> {
     Some(Command::new(ytdlp_path))
 }
 
+/// Find an externally-installed `aria2c` binary (system `PATH`, then common
+/// install locations). Unlike `find_ytdlp`, this deliberately has **no**
+/// bundled/adjacent-to-executable/app-bundle check — aria2c is GPL-2.0 and
+/// must never be bundled with the distribution (I-9 /
+/// `adr/0002-external-subprocess-no-gpl-bundling.md`). This only ever finds
+/// an aria2c the user installed themselves.
+pub fn find_aria2c() -> Option<PathBuf> {
+    if let Ok(path) = which::which("aria2c") {
+        return Some(path);
+    }
+
+    find_aria2c_in_common_paths()
+}
+
+/// Find aria2c in common installation paths as a last resort, mirroring
+/// [`find_in_common_paths`] for yt-dlp.
+fn find_aria2c_in_common_paths() -> Option<PathBuf> {
+    let common_paths = if cfg!(target_os = "macos") {
+        vec![
+            "/opt/homebrew/bin/aria2c",
+            "/usr/local/bin/aria2c",
+            "/usr/bin/aria2c",
+        ]
+    } else if cfg!(target_os = "linux") {
+        vec![
+            "/usr/bin/aria2c",
+            "/usr/local/bin/aria2c",
+            "/snap/bin/aria2c",
+        ]
+    } else {
+        vec![]
+    };
+
+    for path_str in common_paths {
+        let path = PathBuf::from(path_str);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+
+    None
+}
+
 // ============================================================
 // Tests
 // ============================================================
@@ -399,6 +442,13 @@ mod tests {
     fn test_find_in_common_paths() {
         let result = find_in_common_paths();
         println!("Common path yt-dlp: {:?}", result);
+    }
+
+    #[test]
+    fn test_find_aria2c() {
+        let result = find_aria2c();
+        println!("aria2c found at: {:?}", result);
+        // Don't assert - aria2c might not be installed in CI.
     }
 
     #[test]

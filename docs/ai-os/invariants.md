@@ -67,17 +67,13 @@ correctness invariant for this project, not just etiquette.)
 
 ---
 
-### Known invariant GAP (not yet true, tracked)
-- **Cross-session resume correctness is not fully an invariant yet.**
-  `segment.rs`'s per-attempt resume (F-DL-002/#28) plus the `206`-required
-  guard (B-DL-001/#29) mean segment writes do **not** unconditionally truncate
-  any more, and — as a side effect of `.partN` files surviving pause/cancel/
-  app-close and `calculate_segments` being deterministic — resume does **not**
-  unconditionally restart from zero either; both of those older claims were
-  stale as of the F-DL-003 spike (2026-07-01). What was missing, and what
-  F-DL-003 (Shape 2, PR #30) adds, is the *safety guard*: a sidecar identity
-  check (URL + file_size + segment_count) that must match before any existing
-  part is trusted, so a segment-count change between sessions or a different
-  download reusing the same `output_path` can no longer silently corrupt the
-  output. Until #30 merges, do not assume cross-session resume validates
-  identity — the un-gated version is on `main` today.
+### Formerly-tracked gap, now closed
+- **Cross-session resume correctness** (F-DL-002/#28 → B-DL-001/#29 →
+  F-DL-003/#30, all merged as of `f51dfad`): `segment.rs`'s per-attempt resume
+  requires `206` before appending (not unconditional truncation), and the
+  engine's `resume_guard` sidecar (`{url_hash, file_size, segment_count}`,
+  checked before trusting any existing `.partN`) means a segment-count change
+  between sessions or a different download reusing the same `output_path` no
+  longer silently corrupts the output — either restarts clean instead. This is
+  now a real invariant, not a tracked gap; a regression here would be a bug
+  against `resume_guard`'s identity check, not a missing feature.

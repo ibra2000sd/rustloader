@@ -46,15 +46,54 @@ that never recovers) remains open, tracked separately if pursued.
 
 ## P2
 
-### F-DL-001 — Shape A: use aria2c as yt-dlp's external downloader · open · SMALL (XS)
-Add `--downloader aria2c` (+ `--downloader-args`) to `build_ytdlp_args` when an
-**external** `aria2c` is detected (mirror `find_ytdlp` detection; do NOT bundle —
-aria2 is GPL-2.0, see `adr/0002`). Improves multi-connection + resume on the
-yt-dlp/HLS download path only; no change to the progress contract (yt-dlp still
-drives). Gated on B-DOC-001 (license posture) before any aria2 dependency lands.
+### F-DL-001 — Shape A: use aria2c as yt-dlp's external downloader · closed (opt-in) · SMALL (XS)
+Add `--downloader aria2c` to `build_ytdlp_args` when an **external** `aria2c` is
+detected (mirror `find_ytdlp` detection; do NOT bundle — aria2 is GPL-2.0, see
+`adr/0002`). Gated on B-DOC-001 (license posture); landed after it.
 Source: internal audit 2026-06-30.
 
-### F-DL-003 — Byte-level resume + checkpoint persistence (native engine) · in-progress · MEDIUM-LARGE
+**Correction (2026-07-01 implementation) — the progress-contract assumption
+above was wrong, verified empirically, not assumed:** live-smoke-tested
+`yt-dlp --downloader aria2c` against both an HLS stream and a direct HTTP file,
+and read yt-dlp's own `downloader/external.py` source. Two findings:
+1. **aria2c never engages for HLS/DASH at all** —
+   `Aria2cFD.SUPPORTED_PROTOCOLS = ('http', 'https', 'ftp', 'ftps')` in yt-dlp's
+   source; `m3u8`/`dash` aren't in that list, so yt-dlp silently falls back to
+   its native `hlsnative` downloader regardless of the flag. Confirmed live: a
+   `--downloader aria2c` run against an HLS test stream produced
+   byte-identical `[hlsnative]`-tagged log output to a run without the flag —
+   i.e. **zero benefit for `download_via_ytdlp`'s primary use case** (HLS/DASH
+   fallback).
+2. **Where aria2c *does* engage (plain http/https/ftp), progress breaks.**
+   yt-dlp's `ExternalFD.real_download()` calls its progress hook exactly
+   **once, on completion** — not incrementally during the transfer. Live-smoke
+   confirmed: a direct-HTTP-file run with `--downloader aria2c` printed
+   aria2c's own raw progress format (`[#10ff12 ...]`) throughout the transfer,
+   and only the very last line matched `parse_yt_dlp_progress`'s expected
+   `[download] X% of Y at Z` shape (the 100%-at-completion line). The
+   intermediate aria2c-format lines partially misparse (a coincidental digits-
+   before-`%` match extracts a plausible-looking percentage, but `total_bytes`
+   parses to `0`, which `DownloadProgress::percentage()` clamps to `0%`) — net
+   effect: the progress bar sits frozen at 0% for the whole transfer, then
+   jumps to 100%. This is a real I-3 regression for the one case the flag
+   would actually change anything.
+
+**Fix landed (PR [#31](https://github.com/ibra2000sd/rustloader/pull/31),
+open, not yet merged):** implemented as **opt-in, default off**
+(`YtDlpOptions::use_aria2c: bool`, defaults `false` via `derive(Default)`).
+`find_aria2c()` (`extractor/ytdlp.rs`, mirrors `find_ytdlp`/
+`find_in_common_paths`, deliberately **without** `find_ytdlp`'s
+bundled/adjacent-to-executable check — I-9/ADR-0002) detects an external
+aria2c; `build_ytdlp_args` takes the caller's already-resolved
+`aria2c_available: bool` and only then adds `--downloader aria2c`. No CLI/GUI
+toggle is wired up in this PR (nothing currently sets `use_aria2c: true`), so
+this PR changes nothing by default — verified via `cargo run -- <url>
+--dry-run`, byte-identical args to before. Exposing it as a real opt-in
+(CLI flag or GUI setting) is a follow-up, once/if the progress-hook gap above
+is separately addressed (or accepted as a documented tradeoff for that
+narrow case).
+
+### F-DL-003 — Byte-level resume + checkpoint persistence (native engine) · closed (Shape 2) · MEDIUM-LARGE
 **Correction (2026-07-01 spike):** the previous framing of this item — that the
 `download_segments` SQLite table is "already written/read in
 `database/operations.rs`" and that resume is therefore largely a DB wire-up —
@@ -70,8 +109,8 @@ current plan, which is a latent silent-corruption bug, not a missing feature.
 See the spike report (session transcript, 2026-07-01) for full evidence.
 
 **Fix landed (Shape 2 — sidecar identity guard, PR
-[#30](https://github.com/ibra2000sd/rustloader/pull/30), open, not yet
-merged):** a small `<output>.rustloader-resume` sidecar records
+[#30](https://github.com/ibra2000sd/rustloader/pull/30), merged `f51dfad`,
+2026-07-01):** a small `<output>.rustloader-resume` sidecar records
 `{url_hash, file_size, segment_count}` before segment downloads start. On
 every `download()` call, an existing `.partN` set is only trusted if the
 sidecar matches the current identity *and* `enable_resume` is `true`;
@@ -79,8 +118,7 @@ otherwise (mismatch, missing sidecar with parts present, or resume disabled)
 the parts are discarded and the segment loop starts clean. This closes the
 two corruption paths: a segment-count preference change between sessions, and
 a different download reusing the same `output_path`. `enable_resume` finally
-gates real behavior instead of being a dead, always-on flag. Close this item
-with the merge SHA once #30 lands.
+gates real behavior instead of being a dead, always-on flag.
 
 **Deliberately NOT done here (spinoffs, separate items):**
 - **Orphaned `.partN` cleanup on cancel/remove** — `pause_task`/`cancel_task`/
