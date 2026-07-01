@@ -12,6 +12,9 @@ use crate::downloader::merger::{cleanup_segments, merge_segments, MergeProgress}
 use crate::downloader::progress::{
     DownloadProgress, DownloadStatus, StallDetector, STALL_DETECTION_SECONDS,
 };
+use crate::downloader::resume_guard::{
+    read_sidecar, remove_sidecar, sidecar_path, write_sidecar, ResumeIdentity,
+};
 use crate::downloader::segment::{calculate_segments, download_segment, SegmentProgress};
 use anyhow::Result;
 use futures::stream::{self, StreamExt};
@@ -382,6 +385,38 @@ impl DownloadEngine {
         let segments = calculate_segments(file_size, self.config.segments, output_path);
         progress.total_segments = segments.len();
 
+        // Cross-session resume identity guard (F-DL-003): #28/#29 made a
+        // segment's resume-from-written-bytes safe against a range that's
+        // silently ignored by the server, but say nothing about whether the
+        // `.partN` files on disk actually belong to *this* download's plan —
+        // a segment-count change between sessions, or a different download
+        // reusing this same `output_path`, would otherwise get silently
+        // appended into (wrong offsets, or a foreign file's bytes spliced
+        // in). Require a sidecar identity match (URL + file_size +
+        // segment_count) before trusting any existing part; on any mismatch,
+        // or when resume is disabled, discard this plan's parts so the
+        // segment loop below starts clean instead of corrupting silently.
+        let resume_sidecar = sidecar_path(output_path);
+        if self.config.enable_resume {
+            let current_identity = ResumeIdentity::new(url, file_size, self.config.segments);
+            let trusted = read_sidecar(&resume_sidecar).await.as_ref() == Some(&current_identity);
+            if !trusted {
+                let stale_paths: Vec<PathBuf> = segments.iter().map(|s| s.path.clone()).collect();
+                if let Err(e) = cleanup_segments(&stale_paths).await {
+                    warn!("Failed to discard stale/foreign segment parts: {}", e);
+                }
+            }
+            if let Err(e) = write_sidecar(&resume_sidecar, &current_identity).await {
+                warn!("Failed to write resume identity sidecar: {}", e);
+            }
+        } else {
+            let stale_paths: Vec<PathBuf> = segments.iter().map(|s| s.path.clone()).collect();
+            if let Err(e) = cleanup_segments(&stale_paths).await {
+                warn!("Failed to discard segment parts (resume disabled): {}", e);
+            }
+            remove_sidecar(&resume_sidecar).await;
+        }
+
         // Create channels for segment progress
         let (segment_progress_tx, mut segment_progress_rx) = mpsc::channel::<SegmentProgress>(100);
 
@@ -607,6 +642,7 @@ impl DownloadEngine {
         if let Err(e) = cleanup_segments(&segments_paths).await {
             warn!("Failed to clean up segments: {}", e);
         }
+        remove_sidecar(&resume_sidecar).await;
 
         // Mark as completed
         progress.complete();
@@ -1344,5 +1380,355 @@ mod tests {
         assert_eq!(config.segments, 1);
         assert_eq!(config.chunk_size, 1);
         assert_eq!(config.retry_attempts, 100);
+    }
+
+    // ============================================================
+    // CROSS-SESSION RESUME IDENTITY GUARD TESTS (F-DL-003, Shape 2)
+    // ============================================================
+    //
+    // These exercise `DownloadEngine::download()` end-to-end against a real
+    // hand-rolled `tokio::net::TcpListener` HTTP/1.1 server (same idiom as
+    // #28/#29's `segment.rs` mock server: no new dev-dependency, precise
+    // control over what's served). Unlike the segment-level tests, this one
+    // must correctly honor whatever `Range` it's asked for (not just serve
+    // "from start to end of body"), because the engine's one-byte probe
+    // (`bytes=0-0`) and real per-segment ranges must both be answered
+    // correctly for the segmented path to even be taken.
+
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use tokio::io::AsyncReadExt;
+    use tokio::net::TcpListener;
+
+    /// Serves ranged GET requests for `body`, honoring the requested
+    /// `Range: bytes=X-Y` (or `bytes=X-`) precisely. Tallies the total bytes
+    /// actually served into the returned counter, so a test can prove
+    /// whether a run resumed (served less than the full body) or re-fetched
+    /// everything from scratch (served exactly the full body plus the
+    /// one-byte probe).
+    async fn spawn_ranged_media_server(
+        body: Vec<u8>,
+    ) -> (String, Arc<AtomicU64>, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let body = Arc::new(body);
+        let served = Arc::new(AtomicU64::new(0));
+        let served_for_task = Arc::clone(&served);
+
+        let handle = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = match listener.accept().await {
+                    Ok(x) => x,
+                    Err(_) => break,
+                };
+                let body = Arc::clone(&body);
+                let served = Arc::clone(&served_for_task);
+
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 8192];
+                    let mut req = Vec::new();
+                    loop {
+                        let n = match socket.read(&mut buf).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => n,
+                        };
+                        req.extend_from_slice(&buf[..n]);
+                        if req.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+
+                    let req_str = String::from_utf8_lossy(&req);
+                    let last = body.len().saturating_sub(1);
+                    let (start, end) = req_str
+                        .lines()
+                        .find(|l| l.to_ascii_lowercase().starts_with("range:"))
+                        .and_then(|l| l.split('=').nth(1))
+                        .map(|spec| {
+                            let mut parts = spec.splitn(2, '-');
+                            let start = parts
+                                .next()
+                                .unwrap_or("")
+                                .trim()
+                                .parse::<usize>()
+                                .unwrap_or(0);
+                            let end = parts
+                                .next()
+                                .unwrap_or("")
+                                .trim()
+                                .parse::<usize>()
+                                .unwrap_or(last);
+                            (start.min(last), end.min(last))
+                        })
+                        .unwrap_or((0, last));
+
+                    let slice = &body[start..=end];
+                    let headers = format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {}-{}/{}\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                        start,
+                        end,
+                        body.len(),
+                        slice.len()
+                    );
+                    if socket.write_all(headers.as_bytes()).await.is_err() {
+                        return;
+                    }
+                    let _ = socket.write_all(slice).await;
+                    let _ = socket.flush().await;
+                    served.fetch_add(slice.len() as u64, Ordering::SeqCst);
+                });
+            }
+        });
+
+        (format!("http://{}", addr), served, handle)
+    }
+
+    fn write_stub_part(path: &Path, data: &[u8]) {
+        std::fs::write(path, data).expect("write stub part file");
+    }
+
+    #[tokio::test]
+    async fn test_resume_trusts_matching_identity_and_skips_written_bytes() {
+        let body: Vec<u8> = (0..(12 * 1024 * 1024) as u32)
+            .map(|i| (i % 256) as u8)
+            .collect();
+        let (base_url, served, _server) = spawn_ranged_media_server(body.clone()).await;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let output_path = tmp.path().join("out.mp4");
+
+        // Simulate a prior run that got halfway through every segment
+        // before being interrupted (pause or app-close) — left on disk,
+        // per #28/#29 + F-DL-003's own finding that nothing cleans these up
+        // on interruption.
+        let segments = calculate_segments(body.len() as u64, 4, &output_path);
+        for seg in &segments {
+            let half = (seg.size / 2) as usize;
+            let start = seg.start as usize;
+            write_stub_part(&seg.path, &body[start..start + half]);
+        }
+        let identity = ResumeIdentity::new(&base_url, body.len() as u64, 4);
+        write_sidecar(&sidecar_path(&output_path), &identity)
+            .await
+            .expect("write sidecar");
+
+        let engine = DownloadEngine::new(DownloadConfig {
+            segments: 4,
+            retry_attempts: 2,
+            retry_delay: Duration::from_millis(5),
+            request_delay: Duration::from_millis(1),
+            ..Default::default()
+        });
+
+        let (tx, mut rx) = mpsc::channel(100);
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+
+        let result = engine.download(&base_url, &output_path, tx).await;
+        assert!(result.is_ok(), "expected resume to succeed: {:?}", result);
+
+        let output = tokio::fs::read(&output_path).await.expect("read output");
+        assert_eq!(output, body, "resumed output must be byte-correct");
+
+        let served_bytes = served.load(Ordering::SeqCst);
+        assert!(
+            served_bytes < body.len() as u64,
+            "expected a genuine resume (less than the full body re-fetched): served {} of {} bytes",
+            served_bytes,
+            body.len()
+        );
+
+        assert!(
+            !sidecar_path(&output_path).exists(),
+            "sidecar should be removed on successful completion"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resume_restarts_clean_when_segment_count_changed() {
+        // Large enough to land in calculate_segments' 50MB-500MB bracket,
+        // where the requested segment count (up to 16) is actually honored —
+        // below 50MB it's clamped to at most 4 regardless of config, which
+        // wouldn't let this test exercise an 8-segment vs. 4-segment plan.
+        let body: Vec<u8> = (0..(55 * 1024 * 1024) as u32)
+            .map(|i| (i % 256) as u8)
+            .collect();
+        let (base_url, served, _server) = spawn_ranged_media_server(body.clone()).await;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let output_path = tmp.path().join("out.mp4");
+
+        // Simulate a PRIOR session that left a completed 8-segment plan's
+        // parts on disk (same url/file_size — only segment_count differs)
+        // plus a sidecar recorded for that 8-segment plan.
+        let old_segments = calculate_segments(body.len() as u64, 8, &output_path);
+        for seg in &old_segments {
+            let start = seg.start as usize;
+            let end = seg.end as usize;
+            write_stub_part(&seg.path, &body[start..=end]);
+        }
+        let old_identity = ResumeIdentity::new(&base_url, body.len() as u64, 8);
+        write_sidecar(&sidecar_path(&output_path), &old_identity)
+            .await
+            .expect("write sidecar");
+
+        // THIS session's config uses 4 segments instead — a segment-count
+        // preference change between sessions. Segment 0 always starts at
+        // byte 0 in both plans (coincidentally safe), but segment 1 onward
+        // has different start/end offsets between the two plans, so
+        // trusting the old parts here would silently misalign bytes.
+        let engine = DownloadEngine::new(DownloadConfig {
+            segments: 4,
+            retry_attempts: 2,
+            retry_delay: Duration::from_millis(5),
+            request_delay: Duration::from_millis(1),
+            ..Default::default()
+        });
+
+        let (tx, mut rx) = mpsc::channel(100);
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+
+        let result = engine.download(&base_url, &output_path, tx).await;
+        assert!(
+            result.is_ok(),
+            "expected a clean restart to succeed: {:?}",
+            result
+        );
+
+        let output = tokio::fs::read(&output_path).await.expect("read output");
+        assert_eq!(
+            output, body,
+            "output must be byte-correct despite mismatched leftover parts from the old plan"
+        );
+
+        let served_bytes = served.load(Ordering::SeqCst);
+        assert_eq!(
+            served_bytes,
+            body.len() as u64 + 1,
+            "expected a full fresh fetch (the old plan's parts must be discarded, not trusted): served {} of {} bytes",
+            served_bytes,
+            body.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resume_restarts_clean_when_foreign_download_reuses_output_path() {
+        let body: Vec<u8> = (0..(12 * 1024 * 1024) as u32)
+            .map(|i| (i % 256) as u8)
+            .collect();
+        let (base_url, served, _server) = spawn_ranged_media_server(body.clone()).await;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let output_path = tmp.path().join("out.mp4");
+
+        // Simulate a DIFFERENT, unrelated download that finished writing to
+        // this exact output_path (same size, so it passes the existing
+        // per-segment `existing_bytes <= total_size` guard) but is a
+        // different resource entirely — its bytes must never end up in
+        // this download's output.
+        let foreign_body: Vec<u8> = vec![0xEE; body.len()];
+        let segments = calculate_segments(body.len() as u64, 4, &output_path);
+        for seg in &segments {
+            let start = seg.start as usize;
+            let end = seg.end as usize;
+            write_stub_part(&seg.path, &foreign_body[start..=end]);
+        }
+        let foreign_identity = ResumeIdentity::new(
+            "https://example.com/a-completely-different-video.mp4",
+            body.len() as u64,
+            4,
+        );
+        write_sidecar(&sidecar_path(&output_path), &foreign_identity)
+            .await
+            .expect("write sidecar");
+
+        let engine = DownloadEngine::new(DownloadConfig {
+            segments: 4,
+            retry_attempts: 2,
+            retry_delay: Duration::from_millis(5),
+            request_delay: Duration::from_millis(1),
+            ..Default::default()
+        });
+
+        let (tx, mut rx) = mpsc::channel(100);
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+
+        let result = engine.download(&base_url, &output_path, tx).await;
+        assert!(
+            result.is_ok(),
+            "expected a clean restart to succeed: {:?}",
+            result
+        );
+
+        let output = tokio::fs::read(&output_path).await.expect("read output");
+        assert_eq!(
+            output, body,
+            "output must be the real download's bytes, not the foreign download's leftover parts"
+        );
+        assert_ne!(
+            output, foreign_body,
+            "sanity: output must not be the foreign body"
+        );
+
+        let served_bytes = served.load(Ordering::SeqCst);
+        assert_eq!(
+            served_bytes,
+            body.len() as u64 + 1,
+            "expected a full fresh fetch (the foreign parts must be discarded, not trusted)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_download_ignores_matching_parts_when_resume_disabled() {
+        let body: Vec<u8> = (0..(12 * 1024 * 1024) as u32)
+            .map(|i| (i % 256) as u8)
+            .collect();
+        let (base_url, served, _server) = spawn_ranged_media_server(body.clone()).await;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let output_path = tmp.path().join("out.mp4");
+
+        // Fully-correct, fully-matching parts + sidecar — the "everything
+        // lines up" case that would normally resume for free (see the
+        // matching-identity test above).
+        let segments = calculate_segments(body.len() as u64, 4, &output_path);
+        for seg in &segments {
+            let start = seg.start as usize;
+            let end = seg.end as usize;
+            write_stub_part(&seg.path, &body[start..=end]);
+        }
+        let identity = ResumeIdentity::new(&base_url, body.len() as u64, 4);
+        write_sidecar(&sidecar_path(&output_path), &identity)
+            .await
+            .expect("write sidecar");
+
+        let engine = DownloadEngine::new(DownloadConfig {
+            segments: 4,
+            retry_attempts: 2,
+            retry_delay: Duration::from_millis(5),
+            request_delay: Duration::from_millis(1),
+            enable_resume: false,
+            ..Default::default()
+        });
+
+        let (tx, mut rx) = mpsc::channel(100);
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+
+        let result = engine.download(&base_url, &output_path, tx).await;
+        assert!(
+            result.is_ok(),
+            "expected a full download to succeed: {:?}",
+            result
+        );
+
+        let output = tokio::fs::read(&output_path).await.expect("read output");
+        assert_eq!(output, body, "output must still be byte-correct");
+
+        let served_bytes = served.load(Ordering::SeqCst);
+        assert_eq!(
+            served_bytes,
+            body.len() as u64 + 1,
+            "enable_resume=false must ignore even fully-matching parts and re-fetch everything: served {} of {} bytes",
+            served_bytes,
+            body.len()
+        );
     }
 }

@@ -5,10 +5,10 @@
 
 **As of:** 2026-07-01
 **Released version:** v0.8.1 (first published release, 2026-06-29)
-**main HEAD:** `c1c0580` (the #28 merge; previous stamp `3494b3c`/#27 was stale)
+**main HEAD:** `c976872` (the #29 merge; previous stamp `c1c0580`/#28 was stale)
 **CI on main:** green (4 jobs × ubuntu/macOS/windows)
-**Open PRs:** #1 (draft, untouched), [#29](https://github.com/ibra2000sd/rustloader/pull/29)
-(B-DL-001 resume-requires-206 fix, open, branched from `c1c0580`)
+**Open PRs:** #1 (draft, untouched), [#30](https://github.com/ibra2000sd/rustloader/pull/30)
+(F-DL-003 Shape-2 sidecar resume-identity guard, open, branched from `c976872`)
 
 ## Where the project is
 
@@ -23,8 +23,12 @@ cookie support, and the extraction-timeout fix.
 
 The recent arc has been extraction reliability; the next arc is **download
 reliability** (the two defects the aria2 spike localized):
-1. one failed segment aborting the whole transfer (throttled-host failure), and
-2. no byte-level resume (interrupted downloads restart from zero).
+1. one failed segment aborting the whole transfer (throttled-host failure) —
+   fixed, `F-DL-002`/#28.
+2. cross-session resume — byte-level resume itself works (as a side effect of
+   #28/#29's within-run mechanism surviving pause/cancel/app-close), but until
+   `F-DL-003`/#30 lands it isn't safe: nothing validates that on-disk parts
+   belong to the current plan. See the F-DL-003 spike (2026-07-01).
 
 ## Done (recent)
 
@@ -49,30 +53,58 @@ reliability** (the two defects the aria2 spike localized):
   resume claims to match the verified code (restart-on-resume, no byte-level
   resume yet); fixed the `ROADMAP.md`/`KNOWN_ISSUES.md` stale version stamps to
   v0.8.1. Docs/metadata-only; no Rust source touched.
-- **F-DL-002** (2026-07-01, PR [#28](https://github.com/ibra2000sd/rustloader/pull/28), open) —
+- **F-DL-002** (2026-07-01, PR [#28](https://github.com/ibra2000sd/rustloader/pull/28), merged
+  `c1c0580`) —
   segment retries in `segment.rs` now resume from already-written bytes
   (ranged `Range: bytes={start+W}-{end}` + append, cumulative progress,
   wall-clock-bounded retry budget) instead of `File::create`-truncating on
   every attempt. Fixes the throttled-host failure mode where a dropped
   connection kept hitting the same point and never completed. The engine's
   `break` on a genuinely-unrecoverable segment is intentionally unchanged.
-  Cross-session/true byte-resume (`F-DL-003`) remains not-yet-true.
-- **B-DL-001** (2026-07-01, PR [#29](https://github.com/ibra2000sd/rustloader/pull/29), open) —
+  Cross-session resume safety is now tracked by `F-DL-003` (PR #30, below).
+- **B-DL-001** (2026-07-01, PR [#29](https://github.com/ibra2000sd/rustloader/pull/29), merged
+  `c976872`) —
   closed a silent-corruption gap in #28's resume path: `segment.rs` now
   requires `206 Partial Content` (not just any 2xx) before appending on a
   resume attempt; a `200 OK` (server/proxy ignoring `Range`) truncates the
   stale `.partN` and restarts the segment fresh instead of appending a full
   body onto the partial bytes. New regression test
   `test_resume_restarts_when_server_ignores_range`; all #28 tests still pass.
+- **F-DL-003 spike** (read-only, 2026-07-01) — determined cross-session resume
+  is neither a pure wire-up nor a ground-up build: the `download_segments`/
+  `downloads` DB tables are fully dead (zero callers outside
+  `database/operations.rs`), but #28/#29 already make byte-level resume happen
+  *unintentionally* across pause/cancel/app-close (no `.partN` cleanup on
+  interruption + deterministic `calculate_segments` + preserved `output_path`/
+  URL). The real gap is a missing safety guard, not missing mechanism — two
+  concrete silent-corruption paths identified: a segment-count preference
+  change between sessions, and a different download reusing the same
+  `output_path`. Recommended Shape 2 (filesystem sidecar identity check).
+- **F-DL-003** (2026-07-01, Shape 2, PR
+  [#30](https://github.com/ibra2000sd/rustloader/pull/30), open) — added
+  `downloader::resume_guard`: a `<output>.rustloader-resume` sidecar recording
+  `{url_hash, file_size, segment_count}`, written before segment downloads
+  start and checked on every `download()` call. An existing `.partN` set is
+  trusted only when the sidecar matches (URL + file_size + segment_count) and
+  `enable_resume` is `true`; any mismatch, a missing sidecar with parts
+  present, or resume disabled discards the parts and restarts clean.
+  `enable_resume` now gates real behavior for the first time. Four new
+  regression tests against a real mock HTTP server exercise: matching-identity
+  resume (partial re-fetch), segment-count-changed (clean restart,
+  byte-correct), foreign-download-reuses-path (clean restart, byte-correct,
+  not the foreign bytes), and `enable_resume=false` (ignores even fully
+  matching parts). All #28/#29 tests still pass.
 
 ## Next (ordered)
 
 1. **F-DL-001** — Shape A: `yt-dlp --downloader aria2c` (external aria2c only).
    Unblocked now that `B-DOC-001` has landed.
-2. **F-DL-002** — segment-failure tolerance (don't abort whole download; fix retry
-   truncation). Fixes the throttled-host failure.
-3. **F-DL-003** — byte-level resume + checkpoint (investigate the existing
-   `download_segments` table first — may be wire-up, not build).
+2. **F-DL-003** — merge PR #30 (Shape-2 sidecar resume-identity guard), then
+   pick up the spinoffs it surfaced (orphaned-`.partN` cleanup on cancel;
+   optionally, Shape 3's DB-backed plan persistence as a later enhancement).
+3. **F-DL-002 (remaining half)** — the engine's `break`-on-segment-failure
+   still aborts the whole download; the retry-resume half is done (#28), the
+   whole-download tolerance half remains open if still wanted.
 
 ## Open product directions (maintainer decides)
 

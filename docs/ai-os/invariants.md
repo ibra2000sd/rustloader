@@ -68,7 +68,16 @@ correctness invariant for this project, not just etiquette.)
 ---
 
 ### Known invariant GAP (not yet true, tracked)
-- **Resume is NOT an invariant today.** Despite an `enable_resume` config flag and
-  README claims, there is no byte-level resume: segment writes truncate, pause =
-  abort, resume = restart-from-zero. Establishing real resume is `F-DL-003`. Until
-  then, do not assume interrupted downloads resume.
+- **Cross-session resume correctness is not fully an invariant yet.**
+  `segment.rs`'s per-attempt resume (F-DL-002/#28) plus the `206`-required
+  guard (B-DL-001/#29) mean segment writes do **not** unconditionally truncate
+  any more, and — as a side effect of `.partN` files surviving pause/cancel/
+  app-close and `calculate_segments` being deterministic — resume does **not**
+  unconditionally restart from zero either; both of those older claims were
+  stale as of the F-DL-003 spike (2026-07-01). What was missing, and what
+  F-DL-003 (Shape 2, PR #30) adds, is the *safety guard*: a sidecar identity
+  check (URL + file_size + segment_count) that must match before any existing
+  part is trusted, so a segment-count change between sessions or a different
+  download reusing the same `output_path` can no longer silently corrupt the
+  output. Until #30 merges, do not assume cross-session resume validates
+  identity — the un-gated version is on `main` today.
