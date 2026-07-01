@@ -116,7 +116,7 @@ regression for the one case it would have changed anything (see "Done" below).
   `use_aria2c: true`), so this PR is a no-op by default — confirmed via
   `cargo run -- <url> --dry-run` producing byte-identical args to before.
 - **B-DOC-002** (2026-07-01, PR
-  [#32](https://github.com/ibra2000sd/rustloader/pull/32), open) —
+  [#32](https://github.com/ibra2000sd/rustloader/pull/32), merged `d3f0035`) —
   `KNOWN_ISSUES.md`'s body was still written around v0.1.1 (resolved-bugs
   table from that release, "Rustloader version (v0.1.1)" in the reporting
   section) and predated the whole download-reliability arc. Rewrote it
@@ -129,17 +129,33 @@ regression for the one case it would have changed anything (see "Done" below).
   warnings from the crate's own code; 186 tests now pass across
   unit/integration/persistence/stress suites). Docs-only; no Rust source
   touched.
+- **F-DL-001b** (2026-07-01, PR
+  [#33](https://github.com/ibra2000sd/rustloader/pull/33), open) — wired the
+  actual enable path for #31's dormant `use_aria2c`: a new
+  `--experimental-aria2c` CLI flag (default `false`), threaded straight to
+  `YtDlpOptions::use_aria2c`. Help text labels it `EXPERIMENTAL` and states
+  the progress-freeze caveat up front. No GUI checkbox added (no existing
+  settings-UI widgets to attach an advanced/experimental option to without
+  substantially more work than this task's scope). Verified both directions
+  with real `cargo run -- <url> --dry-run` calls: absent the flag, args are
+  byte-identical to before (no `--downloader`); with the flag and a real
+  `aria2c` installed, args include `--downloader aria2c`. New tests: two unit
+  tests in `cli.rs` (flag → `use_aria2c` mapping, default-off), three
+  binary-level tests in `tests/cli_test.rs` (help mentions the flag and labels
+  it experimental; dry-run omits `--downloader` by default; dry-run adds it
+  when the flag is set and aria2c is actually present, environment-dependent
+  like the existing `find_aria2c`/`find_ytdlp` smoke tests).
 
 ## Next (ordered)
 
 1. **F-DL-003 spinoffs** — orphaned-`.partN` cleanup on cancel/remove
    (`queue/manager.rs`); optionally, Shape 3's DB-backed plan persistence as a
    later enhancement over the filesystem sidecar.
-2. **F-DL-001 follow-up** — decide whether/how to expose `use_aria2c` as a
-   real opt-in (CLI flag or GUI setting), and whether the progress-hook gap
-   for aria2c-driven http/https/ftp transfers is worth addressing (parsing
-   aria2c's own progress format, or accepting frozen-then-jump progress for
-   that narrow case) before doing so.
+2. **F-DL-001b follow-up** — decide whether the progress-hook gap for
+   aria2c-driven http/https/ftp transfers is worth addressing (parsing
+   aria2c's own progress format), and whether/how to expose
+   `--experimental-aria2c` in the GUI once there's an advanced-settings area
+   to put it in.
 3. **F-DL-002 (remaining half)** — the engine's `break`-on-segment-failure
    still aborts the whole download; the retry-resume half is done (#28), the
    whole-download tolerance half remains open if still wanted.

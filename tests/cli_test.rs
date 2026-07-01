@@ -79,12 +79,28 @@ fn help_succeeds_and_lists_surface() {
         "--subs",
         "--playlist",
         "--output-dir",
+        "--experimental-aria2c",
     ] {
         assert!(
             stdout.contains(flag),
             "help should mention {flag}:\n{stdout}"
         );
     }
+}
+
+#[test]
+fn help_labels_aria2c_flag_experimental() {
+    // The flag must read as a clearly-labelled experimental opt-in with its
+    // progress caveat, not a plain performance toggle.
+    let out = std::process::Command::new(BIN)
+        .arg("--help")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("EXPERIMENTAL"),
+        "help should label --experimental-aria2c as experimental:\n{stdout}"
+    );
 }
 
 #[test]
@@ -128,4 +144,57 @@ fn dry_run_flows_flags_into_engine_plan() {
         stdout.contains("height<=720"),
         "quality flag must reach the yt-dlp args:\n{stdout}"
     );
+}
+
+#[test]
+fn dry_run_omits_downloader_flag_by_default() {
+    // F-DL-001b: absent --experimental-aria2c, the resolved args must be
+    // byte-identical to before that flag existed -- no --downloader at all.
+    let out = std::process::Command::new(BIN)
+        .args(["https://example.com/video", "--dry-run"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("--downloader"),
+        "must not add --downloader without --experimental-aria2c:\n{stdout}"
+    );
+}
+
+#[test]
+fn dry_run_experimental_aria2c_adds_downloader_flag_when_aria2c_present() {
+    // Environment-dependent (aria2c may not be installed on this machine or
+    // CI runner) -- mirrors the existing find_aria2c/find_ytdlp smoke-test
+    // idiom rather than requiring aria2c in CI.
+    let aria2c_installed = std::process::Command::new("aria2c")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    let out = std::process::Command::new(BIN)
+        .args([
+            "https://example.com/video",
+            "--experimental-aria2c",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    if aria2c_installed {
+        assert!(
+            stdout.contains("--downloader aria2c"),
+            "expected --downloader aria2c when aria2c is installed and the flag is set:\n{stdout}"
+        );
+    } else {
+        // No aria2c reachable -- the flag must stay a safe no-op, never
+        // fabricating a downloader that isn't actually there.
+        assert!(
+            !stdout.contains("--downloader"),
+            "must not claim --downloader when aria2c isn't actually present:\n{stdout}"
+        );
+    }
 }
