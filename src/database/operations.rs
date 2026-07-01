@@ -377,4 +377,43 @@ mod tests {
         // of what a status update should change).
         assert_eq!(all[0].created_at.timestamp(), created_at.timestamp());
     }
+
+    #[tokio::test]
+    async fn delete_download_removes_only_the_targeted_record() {
+        // Shape-3 PR-2's "Remove from history" action calls this directly —
+        // must delete exactly the targeted row (the DB record only; the GUI
+        // layer is responsible for not touching the downloaded file) and
+        // leave unrelated history untouched.
+        let db_url = fresh_db_url("delete").await;
+        let pool = initialize_database(&db_url).await.expect("init db");
+        let db = DatabaseManager::new(pool);
+
+        db.save_download(&sample_record("task-keep", "Completed"))
+            .await
+            .expect("save task-keep");
+        db.save_download(&sample_record("task-remove", "Completed"))
+            .await
+            .expect("save task-remove");
+
+        db.delete_download("task-remove")
+            .await
+            .expect("delete_download");
+
+        assert!(
+            db.get_download("task-remove")
+                .await
+                .expect("get_download")
+                .is_none(),
+            "deleted record must no longer be fetchable"
+        );
+        let remaining = db.get_all_downloads().await.expect("get_all_downloads");
+        assert_eq!(remaining.len(), 1, "the untargeted record must survive");
+        assert_eq!(remaining[0].id, "task-keep");
+
+        // Deleting an id that was never there is a no-op, not an error --
+        // the GUI's optimistic-removal path can race a manual refresh.
+        db.delete_download("never-existed")
+            .await
+            .expect("delete_download on a missing id must not error");
+    }
 }

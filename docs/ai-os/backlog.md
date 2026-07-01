@@ -206,12 +206,49 @@ through.
 `BackendActor::download_history()` is a plain accessor + a startup log line
 proving the data is live and durable, with nothing rendering it yet.
 
-### F-HIST-002 — GUI download-history list (Shape-3 PR-2) · open · MEDIUM
-Render `BackendActor::download_history()` (added by `F-HIST-001`) in the GUI —
-a history view separate from the live queue list, showing past downloads
-(including ones cleared from the active queue) with their final status. Not
-started; this item exists so the headless persistence in `F-HIST-001` has a
-visible consumer eventually.
+### F-HIST-002 — GUI download-history list (Shape-3 PR-2) · closed · MEDIUM
+Render download history (`get_all_downloads()`/`delete_download()`, added by
+`F-HIST-001`) in the GUI — a history view separate from the live queue list,
+showing past downloads (including ones cleared from the active queue) with
+their final status.
+
+**Fix (PR [#35](https://github.com/ibra2000sd/rustloader/pull/35), open, not
+yet merged):**
+- **New `View::History`** — a third sidebar entry (alongside Downloads/
+  Settings), matching the existing `settings_view`-style free-function view
+  pattern (`src/gui/views/history_view.rs`, `src/gui/components/
+  history_item.rs`). Lists persisted downloads newest-first (title, falling
+  back to URL when empty; status; output path; file size or an explicit
+  "Unknown size"; the completed/created timestamp), with a distinct
+  loading/error/empty state.
+- **Data access — direct, not routed through `BackendActor`:** `gui/app.rs`
+  already holds the exact same `Arc<DatabaseManager>` the actor uses (#34);
+  the History view reads/writes it directly via `Command::perform`, the same
+  async pattern already established for Settings save/load. A
+  `BackendCommand::GetHistory`/`BackendEvent::History` round-trip through the
+  actor's channel would only add indirection with no benefit, since the GUI
+  can already reach the same database the actor does.
+- **Remove from history** deletes the DB record only (`delete_download`) —
+  never the downloaded file — with an explicit label to that effect; optimistic
+  local removal, reconciled by a reload on failure.
+- **Show in Folder** reuses the exact `open::that(...)` call already shipped
+  for the live queue's `OpenDownloadFolder` (`open` crate, already a
+  dependency — no new one added); same detached, non-blocking, fire-and-forget
+  behavior, just pointed at a `DownloadRecord`'s `output_path` instead of an
+  active `DownloadTaskUI`'s.
+- **Auto-refresh:** the existing status-diff logic in `BackendActor`'s
+  `monitor_loop` already emits `DownloadCompleted`/`DownloadFailed`/
+  `TaskStatusUpdated`; when one of those signals a terminal state AND the
+  History view is the one currently open, the GUI reloads history — so a
+  visible history list doesn't go stale while the user is looking at it,
+  without polling.
+- Re-download / open-file from history are explicit fast-follows, not in this
+  PR.
+
+No persistence/engine/queue/sidecar changes — `src/queue`/`src/downloader`
+have zero diff; `database/operations.rs`'s only change is new tests (no new
+or modified CRUD methods — `get_all_downloads`/`delete_download` already
+existed from `F-HIST-001`). `download_segments` remains untouched/dead.
 
 ### B-DOC-002 — KNOWN_ISSUES.md content is stale · closed · SMALL
 `B-DOC-001` fixed only the title's version stamp (now "v0.8.1"); the body was

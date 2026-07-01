@@ -2,7 +2,7 @@
 #![allow(dead_code, unused_imports, unused_variables, unused_mut)]
 
 use crate::backend::{BackendActor, BackendCommand, BackendEvent};
-use crate::database::{initialize_database, DatabaseManager};
+use crate::database::{initialize_database, DatabaseManager, DownloadRecord};
 use crate::extractor::VideoInfo;
 use crate::gui::clipboard;
 use std::time::Instant;
@@ -36,6 +36,13 @@ pub struct RustloaderApp {
     // Download tasks
     active_downloads: Vec<DownloadTaskUI>,
 
+    // Download history (Shape-3 PR-2): a read/delete-only projection of the
+    // persisted `downloads` table (#34). Never a second authority over live
+    // task state — the queue above remains authoritative for in-flight work.
+    history: Vec<DownloadRecord>,
+    history_loading: bool,
+    history_error: Option<String>,
+
     // Settings
     download_location: String,
     max_concurrent: usize,
@@ -57,6 +64,7 @@ pub struct RustloaderApp {
 pub enum View {
     Main,
     Settings,
+    History,
 }
 
 /// v0.7.0: Failure category for UI display and recovery hints
@@ -183,6 +191,14 @@ pub enum Message {
     // View navigation
     SwitchToMain,
     SwitchToSettings,
+    SwitchToHistory,
+
+    // Download history (Shape-3 PR-2)
+    RefreshHistory,
+    HistoryLoaded(Result<Vec<DownloadRecord>, String>),
+    RemoveFromHistory(String),
+    HistoryRecordRemoved(Result<String, String>),
+    OpenHistoryFolder(String),
 
     // Settings
     DownloadLocationChanged(String),
@@ -257,6 +273,9 @@ impl Application for RustloaderApp {
                 .map(|w| format!("⚠️  {w}"))
                 .unwrap_or_else(|| "Ready".to_string()),
             active_downloads: Vec::new(),
+            history: Vec::new(),
+            history_loading: false,
+            history_error: None,
             download_location: settings.download_location.to_string_lossy().to_string(),
             max_concurrent: settings.max_concurrent,
             segments_per_download: settings.segments,
@@ -317,6 +336,12 @@ impl Application for RustloaderApp {
 
             // Backend Events Handling
             Message::BackendEventReceived(event) => {
+                // Set by the terminal-state arms below (Completed/Failed/
+                // Cancelled); if the history view is currently open, its list
+                // is refreshed so it doesn't go stale while visible. History
+                // itself is never mutated directly here — only reloaded from
+                // the `downloads` table (#34 remains the sole writer).
+                let mut should_refresh_history = false;
                 match *event {
                     BackendEvent::ExtractionStarted => {
                         self.is_extracting = true;
@@ -403,6 +428,7 @@ impl Application for RustloaderApp {
                             }
                         }
                         self.status_message = "Download completed".to_string();
+                        should_refresh_history = true;
                     }
                     BackendEvent::DownloadFailed { task_id, error } => {
                         if let Some(task) =
@@ -412,8 +438,12 @@ impl Application for RustloaderApp {
                             task.error_message = Some(error.clone());
                         }
                         self.status_message = format!("Failed: {}", error);
+                        should_refresh_history = true;
                     }
                     BackendEvent::TaskStatusUpdated { task_id, status } => {
+                        if status == "Cancelled" {
+                            should_refresh_history = true;
+                        }
                         if let Some(task) =
                             self.active_downloads.iter_mut().find(|t| t.id == task_id)
                         {
@@ -424,7 +454,12 @@ impl Application for RustloaderApp {
                         self.status_message = format!("Error: {}", e);
                     }
                 }
-                Command::none()
+                if should_refresh_history && self.current_view == View::History {
+                    self.history_loading = true;
+                    reload_history_command(&self.db_manager)
+                } else {
+                    Command::none()
+                }
             }
 
             // Queue control
@@ -579,6 +614,74 @@ impl Application for RustloaderApp {
 
             Message::SwitchToSettings => {
                 self.current_view = View::Settings;
+                Command::none()
+            }
+
+            Message::SwitchToHistory => {
+                self.current_view = View::History;
+                self.history_loading = true;
+                self.history_error = None;
+                reload_history_command(&self.db_manager)
+            }
+
+            // Download history (Shape-3 PR-2)
+            Message::RefreshHistory => {
+                self.history_loading = true;
+                self.history_error = None;
+                reload_history_command(&self.db_manager)
+            }
+
+            Message::HistoryLoaded(result) => {
+                self.history_loading = false;
+                match result {
+                    Ok(records) => {
+                        self.history = records;
+                        self.history_error = None;
+                    }
+                    Err(e) => {
+                        self.history_error = Some(e);
+                    }
+                }
+                Command::none()
+            }
+
+            Message::RemoveFromHistory(id) => {
+                // Optimistic UI update, mirroring RemoveCompleted/CancelDownload
+                // above. This deletes the DB record only — not the downloaded
+                // file.
+                self.history.retain(|r| r.id != id);
+                let db_manager = Arc::clone(&self.db_manager);
+                Command::perform(
+                    async move {
+                        db_manager
+                            .delete_download(&id)
+                            .await
+                            .map(|_| id.clone())
+                            .map_err(|e| e.to_string())
+                    },
+                    Message::HistoryRecordRemoved,
+                )
+            }
+
+            Message::HistoryRecordRemoved(result) => {
+                if let Err(e) = result {
+                    // The optimistic removal above may now disagree with the
+                    // database; reload to reconcile and surface the failure.
+                    self.status_message = format!("Failed to remove history record: {e}");
+                    return reload_history_command(&self.db_manager);
+                }
+                Command::none()
+            }
+
+            Message::OpenHistoryFolder(id) => {
+                if let Some(record) = self.history.iter().find(|r| r.id == id) {
+                    let folder = record
+                        .output_path
+                        .parent()
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| PathBuf::from(&self.download_location));
+                    let _ = open::that(&folder);
+                }
                 Command::none()
             }
 
@@ -756,6 +859,17 @@ impl Application for RustloaderApp {
                     .width(Length::Fill)
                     .padding(12)
                     .on_press(Message::SwitchToMain),
+                button(text("History").size(16))
+                    .style(iced::theme::Button::Custom(Box::new(
+                        if self.current_view == View::History {
+                            theme::SidebarButtonStyle::Active
+                        } else {
+                            theme::SidebarButtonStyle::Inactive
+                        }
+                    )))
+                    .width(Length::Fill)
+                    .padding(12)
+                    .on_press(Message::SwitchToHistory),
                 button(text("Settings").size(16))
                     .style(iced::theme::Button::Custom(Box::new(
                         if self.current_view == View::Settings {
@@ -806,6 +920,14 @@ impl Application for RustloaderApp {
                     &self.cookie_browser_options,
                 )
             }
+            View::History => {
+                use crate::gui::views::history_view;
+                history_view(
+                    &self.history,
+                    self.history_loading,
+                    self.history_error.as_deref(),
+                )
+            }
         };
 
         // Combine Sidebar and Content
@@ -836,6 +958,23 @@ fn sanitize_filename(name: &str) -> String {
             _ => c,
         })
         .collect()
+}
+
+/// Build the `Command` that (re)loads download history from the `downloads`
+/// table. Shared by `SwitchToHistory`, `RefreshHistory`, and the
+/// terminal-event auto-refresh in `BackendEventReceived` below, so all three
+/// paths stay in sync.
+fn reload_history_command(db_manager: &Arc<DatabaseManager>) -> Command<Message> {
+    let db_manager = Arc::clone(db_manager);
+    Command::perform(
+        async move {
+            db_manager
+                .get_all_downloads()
+                .await
+                .map_err(|e| e.to_string())
+        },
+        Message::HistoryLoaded,
+    )
 }
 
 /// Load settings from database
