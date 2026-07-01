@@ -3,6 +3,7 @@
 pub mod engine;
 pub mod merger;
 pub mod progress;
+pub mod resume_guard;
 pub mod segment;
 
 // Re-export for convenience
