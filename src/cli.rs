@@ -83,6 +83,18 @@ pub struct Cli {
     /// `--cookies`.
     #[arg(long = "cookies", value_name = "FILE")]
     pub cookies_file: Option<PathBuf>,
+
+    /// EXPERIMENTAL: let yt-dlp delegate to an external `aria2c` (if one is
+    /// found on your system) for its download path. Only ever takes effect
+    /// for plain http/https/ftp transfers routed through yt-dlp — it has no
+    /// effect on HLS/DASH streams, which always use yt-dlp's own downloader
+    /// regardless of this flag. When it does take effect, the progress bar
+    /// will not update incrementally: yt-dlp only reports aria2c's progress
+    /// once the transfer completes, so it will appear frozen until then.
+    /// Off by default; requires `aria2c` to be installed separately (never
+    /// bundled with Rustloader).
+    #[arg(long = "experimental-aria2c")]
+    pub experimental_aria2c: bool,
 }
 
 impl Cli {
@@ -121,8 +133,11 @@ impl Cli {
             end_time: self.end_time.clone(),
             audio_bitrate: self.bitrate.clone(),
             cookies: self.cookie_config(),
-            // No CLI flag yet for F-DL-001's opt-in aria2c downloader.
-            use_aria2c: false,
+            // F-DL-001b: --experimental-aria2c is the explicit, labelled
+            // opt-in for F-DL-001's dormant aria2c support. Absent the flag
+            // this is `false`, so the resolved args are unchanged from
+            // before this option existed.
+            use_aria2c: self.experimental_aria2c,
         }
     }
 
@@ -364,6 +379,20 @@ mod tests {
         assert_eq!(opts.start_time.as_deref(), Some("00:00:10"));
         assert_eq!(opts.end_time.as_deref(), Some("00:00:20"));
         assert_eq!(opts.audio_bitrate.as_deref(), Some("128K"));
+    }
+
+    #[test]
+    fn use_aria2c_defaults_false_without_the_flag() {
+        let cli = Cli::try_parse_from(["rustloader", "URL"]).unwrap();
+        assert!(!cli.experimental_aria2c);
+        assert!(!cli.to_ytdlp_options().use_aria2c);
+    }
+
+    #[test]
+    fn experimental_aria2c_flag_maps_to_use_aria2c() {
+        let cli = Cli::try_parse_from(["rustloader", "URL", "--experimental-aria2c"]).unwrap();
+        assert!(cli.experimental_aria2c);
+        assert!(cli.to_ytdlp_options().use_aria2c);
     }
 
     #[test]

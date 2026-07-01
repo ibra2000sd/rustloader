@@ -93,6 +93,23 @@ this PR changes nothing by default — verified via `cargo run -- <url>
 is separately addressed (or accepted as a documented tradeoff for that
 narrow case).
 
+**F-DL-001b — enable path (PR
+[#33](https://github.com/ibra2000sd/rustloader/pull/33), open, not yet
+merged):** added the actual opt-in: `Cli::experimental_aria2c` (CLI flag
+`--experimental-aria2c`, default `false`), threaded to
+`YtDlpOptions::use_aria2c` in `to_ytdlp_options()`. Help text labels it
+`EXPERIMENTAL` up front and states the progress-freeze caveat from the
+correction above verbatim, so turning it on is a conscious, informed choice,
+not a casual toggle. No GUI checkbox added — `gui/app.rs` has no existing
+settings-UI widgets (checkboxes/toggles) to attach a "advanced/experimental"
+option to today, and the task explicitly discouraged a prominent toggle;
+adding one properly (its own advanced-settings area, non-prominent, labelled)
+would be a materially larger change than "wire the CLI flag." Left as an
+explicit follow-up. Absent the flag, `build_ytdlp_args`'s output is verified
+byte-identical to before (`cargo run -- <url> --dry-run`, no `--downloader`
+in the args); with the flag and a real `aria2c` installed, the same command
+shows `--downloader aria2c`.
+
 ### F-DL-003 — Byte-level resume + checkpoint persistence (native engine) · closed (Shape 2) · MEDIUM-LARGE
 **Correction (2026-07-01 spike):** the previous framing of this item — that the
 `download_segments` SQLite table is "already written/read in
