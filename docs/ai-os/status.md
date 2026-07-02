@@ -5,13 +5,13 @@
 
 **As of:** 2026-07-02
 **Released version:** v0.8.1 (first published release, 2026-06-29); **v0.9.0
-staged** — version bump + docs landed via the release-prep PR (branched from
-`e6cd092`), tag/release execution still pending (maintainer action)
-**main HEAD:** `e6cd092` (the #40 merge, quick-xml audit-ignore; supersedes the
-earlier `81d4dad`/#38 stamp — #39 and #40 have since merged)
-**CI on main:** green (4 jobs × ubuntu/macOS/windows)
-**Open PRs:** #1 (draft, untouched), plus this v0.9.0 release-prep PR
-(docs + version only, branched from `e6cd092`)
+staged** — version bump + docs merged to main (#41), tag/release execution
+still pending (maintainer action)
+**main HEAD:** `e8ebbe1` (the #42 merge, release-workflow pre-release fix;
+supersedes the earlier `e6cd092`/#40 stamp — #41 and #42 have since merged)
+**CI on main:** green at `e8ebbe1` (run 28605062669, 2026-07-02)
+**Open PRs:** #1 (draft, untouched), plus the F-GUI-001 clipboard-monitoring
+PR this entry describes
 
 ## Where the project is
 
@@ -39,6 +39,19 @@ regression for the one case it would have changed anything (see "Done" below).
 
 ## Done (recent)
 
+- **F-GUI-001 — opt-in clipboard monitoring** (2026-07-02, base `e8ebbe1`, PR
+  pending) — GUI-only feature: a plainly-labelled Settings toggle (**default
+  OFF**) adds a 2s `iced::time::every` poll subscription batched with the
+  existing backend listener. A newly copied single-token http(s) URL surfaces
+  a confirm/dismiss banner on the Downloads view; **confirming** queues it via
+  the existing `BackendCommand::ExtractInfo` add path (I-2) — never
+  auto-downloads. Pure detection + de-dup helpers (`ClipboardWatch`: first
+  observation only seeds; the same value never re-prompts; the app's own
+  Paste marks content seen) live in `src/gui/clipboard_monitor.rs` with unit
+  tests. Non-URL content is ignored silently; clipboard text is never stored,
+  logged, or transmitted. The flag persists as a `clipboard_monitoring`
+  settings row (absent ⇒ OFF). No engine/queue/persistence-schema change;
+  I-3 untouched.
 - **v0.9.0 release prep** (2026-07-02, base `e6cd092`, PR pending) — staged
   the release the read-only audit recommended, docs + version only (no `src/`
   changes): `Cargo.toml` 0.8.1 → 0.9.0 (+ lockfile), a dated 0.9.0

@@ -1,7 +1,7 @@
 //! Settings view implementation
 
 use iced::widget::{
-    button, column, container, pick_list, row, scrollable, slider, text, text_input, Space,
+    button, column, container, pick_list, row, scrollable, slider, text, text_input, toggler, Space,
 };
 use iced::{Alignment, Element, Length};
 
@@ -12,6 +12,7 @@ pub fn settings_view(
     segments: usize,
     cookies_from_browser: &str,
     detected_browsers: &[String],
+    clipboard_monitoring: bool,
 ) -> Element<'static, crate::gui::app::Message> {
     // Header with back button
     let header = row![
@@ -157,6 +158,33 @@ pub fn settings_view(
     ]
     .spacing(10);
 
+    // Clipboard monitoring section — explicit opt-in (default OFF) because it
+    // reads everything the user copies. The plain-language label spells out
+    // exactly what it does and what it never does.
+    let clipboard_section = column![
+        text("Clipboard Monitoring")
+            .size(16)
+            .style(iced::theme::Text::Color(crate::gui::theme::TEXT_PRIMARY)),
+        text(
+            "Watch the clipboard while Rustloader is running. When you copy a web link \
+             (http/https), you'll be asked whether to download it — nothing downloads \
+             automatically, and clipboard contents are never stored or sent anywhere."
+        )
+        .size(13)
+        .style(iced::theme::Text::Color(crate::gui::theme::TEXT_SECONDARY)),
+        toggler(
+            Some("Detect copied URLs".to_string()),
+            clipboard_monitoring,
+            crate::gui::app::Message::ClipboardMonitoringToggled,
+        )
+        .width(Length::Shrink)
+        .spacing(8),
+        text("Takes effect immediately; Save Settings keeps it for next launch.")
+            .size(11)
+            .style(iced::theme::Text::Color(crate::gui::theme::TEXT_SECONDARY)),
+    ]
+    .spacing(10);
+
     // Save button
     let save_button = button(text("Save Settings").size(16))
         .on_press(crate::gui::app::Message::SaveSettings)
@@ -178,6 +206,7 @@ pub fn settings_view(
                     performance_section,
                     quality_section,
                     cookies_section,
+                    clipboard_section,
                 ]
                 .spacing(24)
             )

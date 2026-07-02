@@ -6,6 +6,7 @@ use iced::widget::{button, column, container, pick_list, row, scrollable, slider
 use iced::{Alignment, Element, Length};
 
 /// Create the main view
+#[allow(clippy::too_many_arguments)] // Mirrors the app-state fields it renders
 pub fn main_view(
     url_value: &str,
     downloads: &[DownloadTaskUI],
@@ -14,6 +15,7 @@ pub fn main_view(
     url_error: Option<&str>,
     quality: &str,
     segments: usize,
+    detected_url: Option<&str>,
 ) -> Element<'static, Message> {
     use crate::gui::theme;
 
@@ -174,13 +176,57 @@ pub fn main_view(
             .into()
     };
 
+    // Clipboard-detected URL banner (only while clipboard monitoring has a
+    // pending candidate): a non-intrusive confirm/dismiss row — downloading
+    // only ever starts from the explicit "Download" press.
+    let clipboard_banner = detected_url.map(|url| {
+        container(
+            row![
+                column![
+                    text("Copied link detected — download it?")
+                        .size(14)
+                        .style(iced::theme::Text::Color(theme::GRAY_800)),
+                    text(url.to_string())
+                        .size(12)
+                        .style(iced::theme::Text::Color(theme::GRAY_500)),
+                ]
+                .spacing(4)
+                .width(Length::Fill),
+                button(text("Download").size(14))
+                    .on_press_maybe(if is_extracting {
+                        None
+                    } else {
+                        Some(Message::ConfirmDetectedUrl)
+                    })
+                    .padding([8, 16])
+                    .style(iced::theme::Button::Custom(Box::new(theme::PrimaryButton))),
+                button(text("Dismiss").size(14))
+                    .on_press(Message::DismissDetectedUrl)
+                    .padding([8, 16])
+                    .style(iced::theme::Button::Custom(Box::new(
+                        theme::SecondaryButton
+                    ))),
+            ]
+            .spacing(12)
+            .align_items(Alignment::Center),
+        )
+        .padding(16)
+        .width(Length::Fill)
+        .style(iced::theme::Container::Custom(Box::new(
+            theme::GlassContainer,
+        )))
+    });
+
     // Main content
-    column![hero_section, downloads_section,]
+    let mut content = column![hero_section]
         .spacing(32)
         .width(Length::Fill)
         .height(Length::Fill)
-        .padding([32, 32, 32, 32])
-        .into()
+        .padding([32, 32, 32, 32]);
+    if let Some(banner) = clipboard_banner {
+        content = content.push(banner);
+    }
+    content.push(downloads_section).into()
 }
 
 // Info tag style

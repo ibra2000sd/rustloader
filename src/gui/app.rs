@@ -5,6 +5,7 @@ use crate::backend::{BackendActor, BackendCommand, BackendEvent};
 use crate::database::{initialize_database, DatabaseManager, DownloadRecord};
 use crate::extractor::VideoInfo;
 use crate::gui::clipboard;
+use crate::gui::clipboard_monitor::ClipboardWatch;
 use std::time::Instant;
 // DownloadProgressData defined below
 use crate::queue::TaskStatus;
@@ -53,6 +54,15 @@ pub struct RustloaderApp {
     cookies_from_browser: String,
     /// Browsers detected on this machine (for the Settings cookies dropdown).
     cookie_browser_options: Vec<String>,
+
+    // Clipboard monitoring (opt-in, default OFF). While enabled, a timer
+    // subscription polls the clipboard; a newly copied http(s) URL is surfaced
+    // as `detected_url` for the user to confirm — never auto-downloaded.
+    // Clipboard content is only held in memory for de-dup, never persisted or
+    // logged.
+    clipboard_monitoring: bool,
+    clipboard_watch: ClipboardWatch,
+    detected_url: Option<String>,
 
     // Flags
     is_extracting: bool,
@@ -207,8 +217,14 @@ pub enum Message {
     SegmentsChanged(usize),
     QualityChanged(String),
     CookiesFromBrowserChanged(String),
+    ClipboardMonitoringToggled(bool),
     SaveSettings,
     SettingsSaved(Result<(), String>),
+
+    // Clipboard monitoring (opt-in)
+    ClipboardTick,      // Poll timer fired; check the clipboard for a new URL
+    ConfirmDetectedUrl, // User accepted the detected URL — queue it
+    DismissDetectedUrl, // User declined the detected URL
 
     // System
     Tick, // For periodic UI updates
@@ -282,6 +298,9 @@ impl Application for RustloaderApp {
             quality: settings.quality,
             cookies_from_browser: settings.cookies_from_browser.clone().unwrap_or_default(),
             cookie_browser_options: crate::utils::cookies::detect_browsers(),
+            clipboard_monitoring: settings.clipboard_monitoring,
+            clipboard_watch: ClipboardWatch::new(),
+            detected_url: None,
             is_extracting: false,
             url_error: None,
         };
@@ -319,6 +338,9 @@ impl Application for RustloaderApp {
             Message::PasteFromClipboard => {
                 match clipboard::get_clipboard_content() {
                     Ok(content) => {
+                        // The user handled this content themselves; the
+                        // monitor must not re-offer it on the next tick.
+                        self.clipboard_watch.mark_seen(&content);
                         self.url_input = content;
                         self.status_message = "URL pasted from clipboard".to_string();
                     }
@@ -725,6 +747,57 @@ impl Application for RustloaderApp {
                 Command::none()
             }
 
+            Message::ClipboardMonitoringToggled(enabled) => {
+                self.clipboard_monitoring = enabled;
+                if enabled {
+                    // Fresh watch: the first poll tick only seeds it with
+                    // whatever is already on the clipboard, so stale content
+                    // copied before opting in never prompts.
+                    self.clipboard_watch = ClipboardWatch::new();
+                } else {
+                    // OFF disables monitoring fully: drop any pending prompt.
+                    self.detected_url = None;
+                }
+                Command::none()
+            }
+
+            Message::ClipboardTick => {
+                if self.clipboard_monitoring {
+                    // Read errors are ignored silently: a transient clipboard
+                    // failure is not actionable, and logging could leak
+                    // clipboard-adjacent details.
+                    if let Ok(content) = clipboard::get_clipboard_content() {
+                        if let Some(url) = self.clipboard_watch.observe(&content) {
+                            // Don't re-offer what's already in the URL input
+                            // (e.g. the user copied it out of the app).
+                            if url != self.url_input {
+                                self.detected_url = Some(url);
+                            }
+                        }
+                    }
+                }
+                Command::none()
+            }
+
+            Message::ConfirmDetectedUrl => {
+                if let Some(url) = self.detected_url.take() {
+                    // Same add path as DownloadButtonPressed: extraction via
+                    // the backend actor, which then auto-starts the download
+                    // (I-2: GUI never drives the engine directly).
+                    self.is_extracting = true;
+                    self.status_message = "Extracting video information...".to_string();
+                    let _ = self
+                        .backend_sender
+                        .try_send(BackendCommand::ExtractInfo { url });
+                }
+                Command::none()
+            }
+
+            Message::DismissDetectedUrl => {
+                self.detected_url = None;
+                Command::none()
+            }
+
             Message::SaveSettings => {
                 let settings = AppSettings {
                     download_location: PathBuf::from(&self.download_location),
@@ -743,6 +816,7 @@ impl Application for RustloaderApp {
                         }
                     },
                     cookies_file: None,
+                    clipboard_monitoring: self.clipboard_monitoring,
                 };
 
                 // Save settings to database. The result is surfaced (see
@@ -799,7 +873,7 @@ impl Application for RustloaderApp {
 
         let listener = BackendListener(self.backend_receiver.clone());
 
-        iced::subscription::unfold(
+        let backend_events = iced::subscription::unfold(
             "backend-listener",
             State::Starting(listener),
             |state| async move {
@@ -829,7 +903,21 @@ impl Application for RustloaderApp {
                     State::Empty => std::future::pending().await,
                 }
             },
-        )
+        );
+
+        // Clipboard monitoring is a second, opt-in subscription: while the
+        // toggle is ON, poll the clipboard every 2s (`iced::time::every`,
+        // tokio backend). Turning the toggle OFF removes the subscription
+        // entirely — no timer runs and the clipboard is never read.
+        if self.clipboard_monitoring {
+            Subscription::batch([
+                backend_events,
+                iced::time::every(std::time::Duration::from_secs(2))
+                    .map(|_| Message::ClipboardTick),
+            ])
+        } else {
+            backend_events
+        }
     }
 
     fn theme(&self) -> Self::Theme {
@@ -908,6 +996,7 @@ impl Application for RustloaderApp {
                     self.url_error.as_deref(),
                     quality_str,
                     self.segments_per_download,
+                    self.detected_url.as_deref(),
                 )
             }
             View::Settings => {
@@ -918,6 +1007,7 @@ impl Application for RustloaderApp {
                     self.segments_per_download,
                     &self.cookies_from_browser,
                     &self.cookie_browser_options,
+                    self.clipboard_monitoring,
                 )
             }
             View::History => {
@@ -1017,6 +1107,13 @@ async fn load_settings_from_db(db_manager: &DatabaseManager) -> Result<AppSettin
         }
     }
 
+    // Load clipboard monitoring (absent/unparsable => default OFF)
+    if let Some(value) = db_manager.get_setting("clipboard_monitoring").await? {
+        if let Ok(val) = value.parse::<bool>() {
+            settings.clipboard_monitoring = val;
+        }
+    }
+
     Ok(settings)
 }
 
@@ -1046,6 +1143,13 @@ async fn save_settings_to_db(db_manager: &DatabaseManager, settings: &AppSetting
         .save_setting(
             "cookies_from_browser",
             settings.cookies_from_browser.as_deref().unwrap_or(""),
+        )
+        .await?;
+
+    db_manager
+        .save_setting(
+            "clipboard_monitoring",
+            &settings.clipboard_monitoring.to_string(),
         )
         .await?;
 
@@ -1080,6 +1184,7 @@ mod settings_tests {
             max_concurrent: 7,
             segments: 12,
             cookies_from_browser: Some("firefox".to_string()),
+            clipboard_monitoring: true,
             ..AppSettings::default()
         };
 
@@ -1098,6 +1203,7 @@ mod settings_tests {
         assert_eq!(loaded.cookies_from_browser.as_deref(), Some("firefox"));
         assert_eq!(loaded.max_concurrent, 7);
         assert_eq!(loaded.segments, 12);
+        assert!(loaded.clipboard_monitoring);
 
         std::fs::remove_file(&db_path).ok();
     }
