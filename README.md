@@ -1,8 +1,8 @@
 # 🚀 Rustloader - High-Performance Video Downloader
 
-[![Version](https://img.shields.io/badge/version-0.7.0--dev-blue.svg)](https://github.com/ibra2000sd/rustloader/releases)
+[![Version](https://img.shields.io/badge/version-0.9.0-blue.svg)](https://github.com/ibra2000sd/rustloader/releases)
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
-[![Platform](https://img.shields.io/badge/platform-macOS-lightgrey.svg)](https://github.com/ibra2000sd/rustloader)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey.svg)](https://github.com/ibra2000sd/rustloader)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/tests-passing-success.svg)](tests/)
 
@@ -21,8 +21,8 @@ Rustloader is a cross-platform video downloader that combines the extraction cap
 | **v0.5.x** | ✅ Complete | Concurrency hardening (atomic pre-registration, zombie defense) |
 | **v0.6.x** | ✅ Complete | UX reliability (stall detection, error classification, recovery hints) |
 | **v0.7.x** | 🟡 Partial | Enhanced error surfacing (core features done) |
-| **v0.8.x** | 🔴 Planned | Resume semantics and partial file recovery |
-| **v0.9.x** | 🔴 Planned | Windows & Linux support |
+| **v0.8.x** | ✅ Complete | First published release; byte-level segmented resume, download reliability, cookies support |
+| **v0.9.x** | ✅ Complete | Official Windows & Linux support, download history, orphan cleanup, engine timeout fixes |
 | **v1.0.0** | 🔴 Planned | Production release with full test coverage |
 
 See [ROADMAP.md](ROADMAP.md) for detailed feature breakdown and implementation status.
@@ -31,14 +31,16 @@ See [ROADMAP.md](ROADMAP.md) for detailed feature breakdown and implementation s
 
 ## ✨ What's New
 
-### Recent Improvements (v0.5.x - v0.6.x)
+### v0.9.0 Highlights
 
-- 🛡️ **Concurrency Hardening**: Atomic pre-registration eliminates race conditions when scheduling downloads
-- 🧟 **Zombie Defense**: Automatic detection and recovery of orphaned download tasks  
-- ⏱️ **Stall Detection**: Downloads stuck for 30+ seconds are flagged with recovery options
-- 💡 **Smart Error Recovery**: Errors are classified with user-friendly guidance
-- 🔄 **Task Reset**: One-click to cancel, remove, and re-add failed downloads
-- ✅ **Stress Testing**: 470+ lines of invariant verification tests
+- 🖥️ **Official Windows & Linux support**: pre-built, checksummed binaries for macOS (arm64 + x86_64), Windows x86_64, and Linux x86_64
+- ⏯️ **Byte-level resume**: interrupted segmented downloads resume from the bytes already on disk, guarded by an identity sidecar so stale/foreign partials are never merged
+- 📜 **Download history**: downloads persist to the database and are browsable in a new History view
+- 🧹 **Orphan cleanup**: cancelling/removing a download removes its `.partN` files and resume sidecar
+- ⏱️ **Smarter timeouts**: slow-but-progressing transfers complete; dead connections still abort within a bounded window
+- 🏷️ **Correct file extensions**: the saved extension is derived from the actual content, not the requested mode
+
+See the [CHANGELOG](CHANGELOG.md) for the full list.
 
 ---
 
@@ -48,7 +50,7 @@ See [ROADMAP.md](ROADMAP.md) for detailed feature breakdown and implementation s
 |---------|-------------|
 | **Multi-threaded Downloads** | Up to 16 parallel segments for maximum speed |
 | **1000+ Site Support** | Powered by yt-dlp for broad compatibility |
-| **Pause/Resume Control** | Pause and resume downloads (currently restarts the transfer; byte-level resume is planned) |
+| **Pause/Resume Control** | Byte-level resume for segmented direct downloads (identity-guarded, works across app restarts); other paths restart the transfer — see [KNOWN_ISSUES.md](KNOWN_ISSUES.md#issue-001-resume-scope-is-limited-to-segmented-direct-media-downloads) |
 | **Queue Management** | Handle multiple downloads concurrently (up to 5) |
 | **Quality Organization** | Auto-organize files into High/Standard/Low quality folders |
 | **Simple GUI** | Clean, dark-themed interface focused on functionality |
@@ -62,31 +64,97 @@ See [ROADMAP.md](ROADMAP.md) for detailed feature breakdown and implementation s
 
 | Requirement | Minimum |
 |-------------|---------|
-| **Operating System** | macOS 10.15+ (Catalina or later) |
+| **Operating System** | macOS 10.15+, Windows 10+, or Linux x86_64 (Ubuntu 22.04+, Fedora 38+) |
 | **Rust** | 1.70+ (for building from source) |
-| **Disk Space** | ~100 MB for application |
-| **Dependencies** | yt-dlp (required) |
-
-> ⚠️ **Note**: Windows and Linux support is planned for v0.9.0
+| **Disk Space** | ~10 MB for the application (~6.9 MB binary) |
+| **Dependencies** | yt-dlp (required); ffmpeg (required for mp3 extraction and yt-dlp postprocessing); a JavaScript runtime — deno or node — (needed by modern yt-dlp for YouTube) |
 
 ---
 
 ## 🔧 Installation
 
+### Download from Releases (recommended)
+
+Pre-built binaries for every supported platform are published on
+[GitHub Releases](https://github.com/ibra2000sd/rustloader/releases), with a
+`SHA256SUMS.txt` for verification.
+
+**macOS (Apple Silicon)**
+```bash
+curl -LO https://github.com/ibra2000sd/rustloader/releases/latest/download/rustloader-macos-arm64.tar.gz
+tar xzf rustloader-macos-arm64.tar.gz
+./rustloader
+```
+
+**macOS (Intel)**
+```bash
+curl -LO https://github.com/ibra2000sd/rustloader/releases/latest/download/rustloader-macos-x86_64.tar.gz
+tar xzf rustloader-macos-x86_64.tar.gz
+./rustloader
+```
+
+**Windows (x64)** — download
+`rustloader-windows-x86_64.zip` from the
+[Releases page](https://github.com/ibra2000sd/rustloader/releases), extract
+it, and run `rustloader.exe`.
+
+**Linux (x64)**
+```bash
+curl -LO https://github.com/ibra2000sd/rustloader/releases/latest/download/rustloader-linux-x86_64.tar.gz
+tar xzf rustloader-linux-x86_64.tar.gz
+./rustloader
+```
+
+To verify a download, compare `shasum -a 256 <file>` (or `sha256sum` on
+Linux, `certutil -hashfile <file> SHA256` on Windows) against
+`SHA256SUMS.txt` from the same release.
+
+### First run on macOS / Windows (unsigned binaries)
+
+Release binaries are **not code-signed**, so the OS will warn on first launch:
+
+- **macOS (Gatekeeper)**: "cannot be opened because it is from an
+  unidentified developer." Either right-click the binary → **Open** → **Open**
+  (once is enough), or clear the quarantine attribute:
+  ```bash
+  xattr -d com.apple.quarantine ./rustloader
+  ```
+- **Windows (SmartScreen)**: "Windows protected your PC." Click
+  **More info** → **Run anyway**.
+
+Verifying the SHA256 checksum first (above) is recommended.
+
 ### Prerequisites
 
-1. **Install Rust** (if building from source):
+1. **Install yt-dlp** (required):
    ```bash
-   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+   # macOS (Homebrew)
+   brew install yt-dlp
+
+   # Or using pip (any platform)
+   pip install yt-dlp
    ```
 
-2. **Install yt-dlp** (required):
+2. **Install ffmpeg** (required for mp3 extraction and yt-dlp
+   postprocessing/merging):
    ```bash
-   # Using Homebrew (recommended)
-   brew install yt-dlp
-   
-   # Or using pip
-   pip install yt-dlp
+   # macOS
+   brew install ffmpeg
+
+   # Debian/Ubuntu
+   sudo apt install ffmpeg
+   ```
+
+3. **Install a JavaScript runtime** — modern yt-dlp needs `deno` or `node`
+   on your PATH to solve YouTube's JS challenges (Rustloader's startup
+   dependency check warns if one is missing):
+   ```bash
+   curl -fsSL https://deno.land/install.sh | sh
+   ```
+
+4. **Install Rust** (only if building from source):
+   ```bash
+   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
    ```
 
 ### Building from Source
@@ -137,12 +205,13 @@ Or run the compiled binary:
 4. Monitor progress in the download list
 5. Find your files in `~/Downloads/Rustloader/`
 
-### Command Line Testing
+### Command Line Mode
 
-Test a download without GUI:
+Pass a URL to download without the GUI (see `rustloader --help` for quality,
+format, clip, subtitle, playlist, and cookie flags):
 
 ```bash
-cargo run --release -- --test-download "https://www.youtube.com/watch?v=VIDEO_ID"
+cargo run --release -- "https://www.youtube.com/watch?v=VIDEO_ID"
 ```
 
 ---
@@ -233,7 +302,7 @@ small files and servers that don't support range requests.
 | Metric | Rustloader | yt-dlp (vanilla) |
 |--------|------------|------------------|
 | Parallel connections | Up to 16 | 1 |
-| Resume support | 🔴 Planned (restart-only today) | ✅ Yes |
+| Resume support | ✅ Byte-level for segmented direct downloads (identity-guarded, survives app restarts); restart-only for small files and the yt-dlp/HLS path | ✅ Yes |
 
 *Performance varies with network conditions and server behavior.*
 
@@ -278,9 +347,9 @@ Test coverage includes:
 See [KNOWN_ISSUES.md](KNOWN_ISSUES.md) for current limitations.
 
 **Quick summary:**
-- macOS only (Windows/Linux planned for v0.9.0)
-- Some compiler warnings remain (no user impact)
-- Large binary size (~90 MB) due to GUI framework
+- Resume is byte-level only for segmented direct downloads; small files and the yt-dlp/HLS path restart on interruption
+- No disk-space pre-check before starting a download
+- Release binaries are unsigned (see "First run on macOS / Windows" above)
 
 ---
 
