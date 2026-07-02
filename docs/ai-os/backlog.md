@@ -337,6 +337,15 @@ Reference upstream `putyy/res-downloader` is Apache-2.0 (Go+Wails — port the
 approach, not the code). Relates to the CHANGELOG's "Browser extension
 integration (v1.0.0)" plan. Decision needed from maintainer before drafting.
 
+**Phase-0 (desk) — COMPLETE, 2026-07-02 (base `9eaee55`):** MITM base = `hudsucker`
+(MIT/Apache); `slinger-mitm` **rejected** (GPL-3.0-only, ADR 0002 / I-9); `rcgen`
+(MIT/Apache, ECDSA P-256) for the per-install CA. Machine-level prototype (root-CA
+install + system-proxy + real-site pinning) **pending a supervised session** — not
+run unattended, not fabricated. Findings:
+[`docs/ai-os/spikes/F-EXTRACT-001-phase0-findings.md`](spikes/F-EXTRACT-001-phase0-findings.md);
+decision record: [`adr/0004-proxy-capture-mitm.md`](adr/0004-proxy-capture-mitm.md)
+(Proposed, gated). Entry stays **open** — Phase-0 records go/no-go only.
+
 ### B-DL-003 (optional) — Reconsider the 1800s yt-dlp download timeout · open · SMALL
 `download_via_ytdlp` is correctly bounded but 30 min is generous; consider
 lowering / making it configurable. NOT a bug (it is already bounded).
