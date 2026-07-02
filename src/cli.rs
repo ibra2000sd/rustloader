@@ -432,19 +432,27 @@ mod tests {
         // `test_segmented_download_adopts_url_extension_for_octet_stream`,
         // and `test_ytdlp_output_template_swaps_extension` for the
         // content-derived assertions.
+        // Expected values are built with the same `join` the code uses, so
+        // the assertions hold under Windows' `\` separator too.
         let cli = Cli::try_parse_from(["rustloader", "URL", "-o", "/tmp", "-f", "mp3"]).unwrap();
         assert_eq!(
             cli.output_path("My Song"),
-            PathBuf::from("/tmp/My Song.mp3")
+            PathBuf::from("/tmp").join("My Song.mp3")
         );
         let cli = Cli::try_parse_from(["rustloader", "URL", "-o", "/tmp"]).unwrap();
-        assert_eq!(cli.output_path("My Vid"), PathBuf::from("/tmp/My Vid.mp4"));
+        assert_eq!(
+            cli.output_path("My Vid"),
+            PathBuf::from("/tmp").join("My Vid.mp4")
+        );
         // The yt-dlp path never receives that provisional extension as a
         // literal filename: it is swapped for %(ext)s so yt-dlp names the
         // file by the container it actually produces.
         assert_eq!(
             ytdlp_output_template(&cli.output_path("My Vid")),
-            "/tmp/My Vid.%(ext)s"
+            PathBuf::from("/tmp")
+                .join("My Vid.%(ext)s")
+                .to_string_lossy()
+                .into_owned()
         );
     }
 

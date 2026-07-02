@@ -2453,42 +2453,50 @@ mod tests {
 
     #[test]
     fn test_content_derived_output_path_priority() {
-        let provided = Path::new("/tmp/song.mp4");
+        // Paths are built with `join` (not `/`-literals) so the assertions
+        // hold under Windows' `\` separator too.
+        let provided = PathBuf::from("/tmp").join("song.mp4");
         // Content-Type wins.
         assert_eq!(
-            content_derived_output_path(provided, Some("audio/mpeg"), Some("https://h/x.bin")),
-            PathBuf::from("/tmp/song.mp3")
+            content_derived_output_path(&provided, Some("audio/mpeg"), Some("https://h/x.bin")),
+            PathBuf::from("/tmp").join("song.mp3")
         );
         // octet-stream falls through to the URL path's extension.
         assert_eq!(
             content_derived_output_path(
-                provided,
+                &provided,
                 Some("application/octet-stream"),
                 Some("https://h/a/7z2408-x64.exe")
             ),
-            PathBuf::from("/tmp/song.exe")
+            PathBuf::from("/tmp").join("song.exe")
         );
         // Neither source knows better → the caller's extension stands.
         assert_eq!(
             content_derived_output_path(
-                provided,
+                &provided,
                 Some("application/octet-stream"),
                 Some("https://h/download")
             ),
-            PathBuf::from("/tmp/song.mp4")
+            PathBuf::from("/tmp").join("song.mp4")
         );
     }
 
     #[test]
     fn test_ytdlp_output_template_swaps_extension() {
+        // Built with `join` so the expected string carries the platform's
+        // own separator (Windows CI runs this with `\`).
         assert_eq!(
-            ytdlp_output_template(Path::new("/tmp/My Song.mp4")),
-            "/tmp/My Song.%(ext)s"
+            ytdlp_output_template(&PathBuf::from("/tmp").join("My Song.mp4")),
+            PathBuf::from("/tmp")
+                .join("My Song.%(ext)s")
+                .to_string_lossy()
+                .into_owned()
         );
         // A playlist template already delegates naming to yt-dlp — untouched.
+        let playlist = PathBuf::from("/tmp").join("%(title)s.%(ext)s");
         assert_eq!(
-            ytdlp_output_template(Path::new("/tmp/%(title)s.%(ext)s")),
-            "/tmp/%(title)s.%(ext)s"
+            ytdlp_output_template(&playlist),
+            playlist.to_string_lossy().into_owned()
         );
     }
 
