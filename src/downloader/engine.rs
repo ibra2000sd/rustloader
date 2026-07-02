@@ -367,6 +367,14 @@ impl DownloadEngine {
         debug!("    URL: {}", url);
         debug!("    Output: {:?}", output_path);
 
+        // Ensure the destination directory exists before any writer (the segmented
+        // `.partN` files, the simple `.part0`, or yt-dlp's own output) touches it.
+        // A missing `-o` directory otherwise surfaced as a per-segment
+        // "No such file or directory (os error 2)" that the friendly-error mapper
+        // then reported as the misleading "Unable to process this URL" — a
+        // filesystem problem masquerading as a bad URL (B-DL-007).
+        ensure_output_dir(output_path)?;
+
         // Send a conservative initial progress so GUI can show a task entry immediately
         debug!("📤 [ENGINE] Sending initial progress (Initializing)...");
         let mut initial = DownloadProgress::new(0, 1);
@@ -435,6 +443,7 @@ impl DownloadEngine {
             output_path,
             probe.content_type.as_deref(),
             probe.final_url.as_deref(),
+            probe.content_disposition.as_deref(),
         );
 
         // Initialize progress
@@ -1151,6 +1160,12 @@ impl DownloadEngine {
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
 
+        // Capture a server-suggested filename for generic-binary naming.
+        let content_disposition = headers
+            .get(reqwest::header::CONTENT_DISPOSITION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(parse_content_disposition_filename);
+
         if status == reqwest::StatusCode::PARTIAL_CONTENT {
             // 206: ranges supported. Parse the total from `bytes 0-0/<total>`.
             let total = headers
@@ -1168,6 +1183,7 @@ impl DownloadEngine {
                 size: total,
                 content_type,
                 final_url,
+                content_disposition,
             })
         } else if status.is_success() {
             // 200: server ignored Range. Read the header directly.
@@ -1185,6 +1201,7 @@ impl DownloadEngine {
                 size,
                 content_type,
                 final_url,
+                content_disposition,
             })
         } else {
             Err(anyhow::anyhow!("probe got unexpected status {}", status))
@@ -1203,6 +1220,10 @@ struct ProbeResult {
     /// The URL the response actually came from (after redirects); its path
     /// extension is the fallback for `application/octet-stream` responses.
     final_url: Option<String>,
+    /// The filename the server suggested via `Content-Disposition`, if any. For a
+    /// generic `application/octet-stream` response this is the best source of a
+    /// correct name + extension (better than the mode-default provisional name).
+    content_disposition: Option<String>,
 }
 
 /// Decide whether a `Content-Type` denotes a directly-downloadable media stream
@@ -1293,25 +1314,160 @@ fn extension_from_url(url: &str) -> Option<String> {
     }
 }
 
-/// The final on-disk path for a native-path download: the caller's path with
-/// its provisional (mode/UI-derived) extension replaced by one derived from
-/// what was actually fetched — the probe's `Content-Type` first, the
-/// redirect-resolved URL path's extension for generic binaries
-/// (`application/octet-stream`), and the caller's own extension when neither
-/// source knows better.
+/// Create the parent directory of `output_path` if it does not already exist,
+/// so downloads into a not-yet-existing `-o` directory succeed instead of
+/// failing per-segment with a bare `No such file or directory` (B-DL-007). A
+/// filesystem failure is surfaced truthfully (the directory path + io error),
+/// not flattened into a "bad URL" message.
+fn ensure_output_dir(output_path: &Path) -> Result<()> {
+    if let Some(parent) = output_path.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                anyhow::anyhow!(
+                    "could not create output directory {}: {e}",
+                    parent.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+/// The final on-disk path for a native-path download, derived from what was
+/// actually fetched rather than the caller's provisional (mode/UI-derived)
+/// guess. In priority order:
+/// 1. A media `Content-Type` → keep the caller's name, swap to the correct
+///    container extension (the #39 media behaviour, unchanged).
+/// 2. A sane extension on the redirect-resolved URL path → keep the caller's
+///    name with that extension (the prior generic-binary behaviour).
+/// 3. A `Content-Disposition` filename → use it verbatim (the server's own name,
+///    which usually carries the correct name and extension).
+/// 4. The URL's basename → use it, appending `.bin` when it has no extension.
+/// 5. Nothing better → keep the caller's stem but force `.bin`.
+///
+/// Steps 3–5 only run for a genuinely unknown binary (an `application/octet-stream`
+/// or typeless response whose URL also lacks an extension). This is what stops an
+/// arbitrary binary — e.g. a checksum file from a release asset — being saved as
+/// `<uuid>.mp4`: the media/`.mp3` mode default is reserved for real media paths,
+/// and a truly-unknown binary falls back to `.bin`, never a video extension.
 fn content_derived_output_path(
     output_path: &Path,
     content_type: Option<&str>,
     final_url: Option<&str>,
+    cd_filename: Option<&str>,
 ) -> PathBuf {
-    let derived = content_type
-        .and_then(extension_for_content_type)
-        .map(str::to_string)
-        .or_else(|| final_url.and_then(extension_from_url));
-    match derived {
-        Some(ext) => output_path.with_extension(ext),
-        None => output_path.to_path_buf(),
+    // 1. Real media container from the Content-Type: keep the caller's name.
+    if let Some(ext) = content_type.and_then(extension_for_content_type) {
+        return output_path.with_extension(ext);
     }
+    // 2. A sane extension on the URL path: keep the caller's name with it.
+    if let Some(ext) = final_url.and_then(extension_from_url) {
+        return output_path.with_extension(ext);
+    }
+
+    // --- Generic binary with no extension hint from type or URL. ---
+    let dir = output_path.parent().unwrap_or_else(|| Path::new("."));
+
+    // 3. Server-suggested filename (Content-Disposition), used verbatim.
+    if let Some(name) = cd_filename.and_then(safe_file_component) {
+        return dir.join(name);
+    }
+    // 4. URL basename, with a `.bin` extension when it carries none.
+    if let Some(name) = final_url
+        .and_then(url_basename)
+        .as_deref()
+        .and_then(safe_file_component)
+    {
+        return dir.join(with_bin_extension(&name));
+    }
+    // 5. Last resort: keep the caller's stem but force `.bin` (never `.mp4`).
+    output_path.with_extension("bin")
+}
+
+/// The last path segment of a URL, percent-decoded, as a candidate filename.
+/// Query string and fragment are dropped because the URL is actually parsed.
+fn url_basename(url: &str) -> Option<String> {
+    let parsed = reqwest::Url::parse(url).ok()?;
+    let last = parsed.path_segments()?.next_back()?;
+    if last.is_empty() {
+        return None;
+    }
+    // `path_segments` yields percent-encoded segments; decode for the on-disk name.
+    Some(percent_decode_lossy(last))
+}
+
+/// Minimal `%XX` percent-decoder (dependency-free): decodes hex escapes into
+/// bytes and interprets the result as UTF-8 (lossily). Non-escape bytes pass
+/// through unchanged.
+fn percent_decode_lossy(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                out.push((hi * 16 + lo) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Reduce an untrusted filename (from a header or URL) to a single, safe path
+/// component: strip any directory parts (defends against `../` traversal and
+/// absolute paths) and reject empty / `.` / `..` results.
+fn safe_file_component(name: &str) -> Option<String> {
+    let base = Path::new(name.trim()).file_name()?.to_str()?.trim();
+    if base.is_empty() || base == "." || base == ".." {
+        return None;
+    }
+    Some(base.to_string())
+}
+
+/// Append `.bin` unless the name already has a sane (1–5 char alphanumeric)
+/// extension.
+fn with_bin_extension(name: &str) -> String {
+    let has_ext = Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| (1..=5).contains(&e.len()) && e.chars().all(|c| c.is_ascii_alphanumeric()))
+        .unwrap_or(false);
+    if has_ext {
+        name.to_string()
+    } else {
+        format!("{name}.bin")
+    }
+}
+
+/// Parse a `filename` out of a `Content-Disposition` header value. Handles the
+/// RFC 5987 extended form (`filename*=UTF-8''foo%20bar.bin`, preferred when
+/// present) and the plain form (`filename="foo.bin"` / `filename=foo.bin`).
+/// Returns only a safe single path component.
+fn parse_content_disposition_filename(value: &str) -> Option<String> {
+    // Prefer the extended `filename*=charset'lang'pct-encoded` form.
+    if let Some(idx) = value.to_ascii_lowercase().find("filename*=") {
+        let raw = &value[idx + "filename*=".len()..];
+        let raw = raw.split(';').next().unwrap_or("").trim();
+        // Strip the `charset'lang'` prefix if present, then percent-decode.
+        let encoded = raw.rsplit('\'').next().unwrap_or(raw);
+        let decoded = percent_decode_lossy(encoded);
+        if let Some(name) = safe_file_component(&decoded) {
+            return Some(name);
+        }
+    }
+    // Plain `filename=` (optionally quoted).
+    let lower = value.to_ascii_lowercase();
+    let idx = lower.find("filename=")?;
+    let raw = &value[idx + "filename=".len()..];
+    let raw = raw.split(';').next().unwrap_or("").trim();
+    let unquoted = raw.trim_matches('"');
+    safe_file_component(unquoted)
 }
 
 /// yt-dlp `-o` template for a single-file download: the caller's path with
@@ -1896,7 +2052,11 @@ mod tests {
         let result = engine.download(&base_url, &output_path, tx).await;
         assert!(result.is_ok(), "expected resume to succeed: {:?}", result);
 
-        let output = tokio::fs::read(&output_path).await.expect("read output");
+        // Read the engine's RETURNED final path, not the provisional `output_path`:
+        // the saved name/extension is content-derived (B-DL-007), so a generic
+        // `application/octet-stream` body is finalized as e.g. `out.bin`, not `out.mp4`.
+        let final_path = result.as_ref().expect("download produced a final path");
+        let output = tokio::fs::read(final_path).await.expect("read output");
         assert_eq!(output, body, "resumed output must be byte-correct");
 
         let served_bytes = served.load(Ordering::SeqCst);
@@ -1964,7 +2124,11 @@ mod tests {
             result
         );
 
-        let output = tokio::fs::read(&output_path).await.expect("read output");
+        // Read the engine's RETURNED final path, not the provisional `output_path`:
+        // the saved name/extension is content-derived (B-DL-007), so a generic
+        // `application/octet-stream` body is finalized as e.g. `out.bin`, not `out.mp4`.
+        let final_path = result.as_ref().expect("download produced a final path");
+        let output = tokio::fs::read(final_path).await.expect("read output");
         assert_eq!(
             output, body,
             "output must be byte-correct despite mismatched leftover parts from the old plan"
@@ -2029,7 +2193,11 @@ mod tests {
             result
         );
 
-        let output = tokio::fs::read(&output_path).await.expect("read output");
+        // Read the engine's RETURNED final path, not the provisional `output_path`:
+        // the saved name/extension is content-derived (B-DL-007), so a generic
+        // `application/octet-stream` body is finalized as e.g. `out.bin`, not `out.mp4`.
+        let final_path = result.as_ref().expect("download produced a final path");
+        let output = tokio::fs::read(final_path).await.expect("read output");
         assert_eq!(
             output, body,
             "output must be the real download's bytes, not the foreign download's leftover parts"
@@ -2090,7 +2258,11 @@ mod tests {
             result
         );
 
-        let output = tokio::fs::read(&output_path).await.expect("read output");
+        // Read the engine's RETURNED final path, not the provisional `output_path`:
+        // the saved name/extension is content-derived (B-DL-007), so a generic
+        // `application/octet-stream` body is finalized as e.g. `out.bin`, not `out.mp4`.
+        let final_path = result.as_ref().expect("download produced a final path");
+        let output = tokio::fs::read(final_path).await.expect("read output");
         assert_eq!(output, body, "output must still be byte-correct");
 
         let served_bytes = served.load(Ordering::SeqCst);
@@ -2298,7 +2470,11 @@ mod tests {
             result
         );
 
-        let output = tokio::fs::read(&output_path).await.expect("read output");
+        // Read the engine's RETURNED final path, not the provisional `output_path`:
+        // the saved name/extension is content-derived (B-DL-007), so a generic
+        // `application/octet-stream` body is finalized as e.g. `out.bin`, not `out.mp4`.
+        let final_path = result.as_ref().expect("download produced a final path");
+        let output = tokio::fs::read(final_path).await.expect("read output");
         assert_eq!(output, body, "output must be byte-correct");
         assert!(
             !simple_temp_path(&output_path).exists(),
@@ -2398,7 +2574,11 @@ mod tests {
         let result = engine.download(&base_url, &output_path, tx).await;
         assert!(result.is_ok(), "download should succeed: {:?}", result);
 
-        let output = tokio::fs::read(&output_path).await.expect("read output");
+        // Read the engine's RETURNED final path, not the provisional `output_path`:
+        // the saved name/extension is content-derived (B-DL-007), so a generic
+        // `application/octet-stream` body is finalized as e.g. `out.bin`, not `out.mp4`.
+        let final_path = result.as_ref().expect("download produced a final path");
+        let output = tokio::fs::read(final_path).await.expect("read output");
         assert_eq!(output, body, "output must be byte-correct");
         assert!(
             !simple_temp_path(&output_path).exists(),
@@ -2456,29 +2636,149 @@ mod tests {
         // Paths are built with `join` (not `/`-literals) so the assertions
         // hold under Windows' `\` separator too.
         let provided = PathBuf::from("/tmp").join("song.mp4");
-        // Content-Type wins.
+        // 1. Content-Type wins — real media keeps the caller's name (#39).
         assert_eq!(
-            content_derived_output_path(&provided, Some("audio/mpeg"), Some("https://h/x.bin")),
+            content_derived_output_path(
+                &provided,
+                Some("audio/mpeg"),
+                Some("https://h/x.bin"),
+                None
+            ),
             PathBuf::from("/tmp").join("song.mp3")
         );
-        // octet-stream falls through to the URL path's extension.
+        // 2. octet-stream falls through to the URL path's extension, name kept.
         assert_eq!(
             content_derived_output_path(
                 &provided,
                 Some("application/octet-stream"),
-                Some("https://h/a/7z2408-x64.exe")
+                Some("https://h/a/7z2408-x64.exe"),
+                None
             ),
             PathBuf::from("/tmp").join("song.exe")
         );
-        // Neither source knows better → the caller's extension stands.
+        // 3. B-DL-007: a truly-unknown binary (no type/URL extension) no longer
+        //    keeps the `.mp4` mode default. With a URL basename it becomes
+        //    `<basename>.bin`, NOT `song.mp4`.
         assert_eq!(
             content_derived_output_path(
                 &provided,
                 Some("application/octet-stream"),
-                Some("https://h/download")
+                Some("https://h/download"),
+                None
             ),
-            PathBuf::from("/tmp").join("song.mp4")
+            PathBuf::from("/tmp").join("download.bin")
         );
+    }
+
+    #[test]
+    fn test_content_derived_output_path_bdl007() {
+        let provided = PathBuf::from("/dl").join("da100079.mp4"); // caller's uuid.mp4
+
+        // (a) Content-Disposition filename is honored verbatim (name + no ext).
+        assert_eq!(
+            content_derived_output_path(
+                &provided,
+                Some("application/octet-stream"),
+                Some("https://objects.example/x?token=1"),
+                Some("SHA2-256SUMS"),
+            ),
+            PathBuf::from("/dl").join("SHA2-256SUMS"),
+        );
+        // (b) Content-Disposition with an extension is used as-is.
+        assert_eq!(
+            content_derived_output_path(
+                &provided,
+                Some("application/octet-stream"),
+                None,
+                Some("installer.pkg"),
+            ),
+            PathBuf::from("/dl").join("installer.pkg"),
+        );
+        // (c) No CD, no URL basename, no extension hint → `.bin`, never `.mp4`.
+        assert_eq!(
+            content_derived_output_path(
+                &provided,
+                Some("application/octet-stream"),
+                Some("https://h/"),
+                None,
+            ),
+            PathBuf::from("/dl").join("da100079.bin"),
+        );
+        // (d) Real media is completely unaffected by the new branches.
+        assert_eq!(
+            content_derived_output_path(&provided, Some("video/webm"), None, None),
+            PathBuf::from("/dl").join("da100079.webm"),
+        );
+        // (e) A traversal attempt in the CD name is reduced to a bare component.
+        assert_eq!(
+            content_derived_output_path(
+                &provided,
+                Some("application/octet-stream"),
+                None,
+                Some("../../etc/passwd"),
+            ),
+            PathBuf::from("/dl").join("passwd"),
+        );
+    }
+
+    #[test]
+    fn test_parse_content_disposition_filename() {
+        assert_eq!(
+            parse_content_disposition_filename("attachment; filename=\"foo.bin\"").as_deref(),
+            Some("foo.bin")
+        );
+        assert_eq!(
+            parse_content_disposition_filename("attachment; filename=SHA2-256SUMS").as_deref(),
+            Some("SHA2-256SUMS")
+        );
+        // RFC 5987 extended form is preferred and percent-decoded.
+        assert_eq!(
+            parse_content_disposition_filename(
+                "attachment; filename=\"fallback.bin\"; filename*=UTF-8''na%C3%AFve%20file.bin"
+            )
+            .as_deref(),
+            Some("naïve file.bin")
+        );
+        // Path components are stripped (no traversal).
+        assert_eq!(
+            parse_content_disposition_filename("attachment; filename=\"../../secret\"").as_deref(),
+            Some("secret")
+        );
+        assert_eq!(
+            parse_content_disposition_filename("inline").as_deref(),
+            None
+        );
+    }
+
+    #[test]
+    fn test_url_basename_and_bin_extension() {
+        assert_eq!(
+            url_basename("https://h/a/b/file.tar.gz").as_deref(),
+            Some("file.tar.gz")
+        );
+        assert_eq!(
+            url_basename("https://h/na%C3%AFve").as_deref(),
+            Some("naïve")
+        );
+        assert_eq!(url_basename("https://h/").as_deref(), None);
+        assert_eq!(with_bin_extension("report"), "report.bin");
+        assert_eq!(with_bin_extension("report.csv"), "report.csv");
+    }
+
+    #[test]
+    fn test_ensure_output_dir_creates_missing_parent() {
+        // B-DL-007: a not-yet-existing `-o` directory is created, so writers
+        // don't fail with a bare "No such file or directory".
+        let base = std::env::temp_dir().join(format!("rl-bdl007-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let nested = base.join("a").join("b");
+        let output = nested.join("video.mp4");
+        assert!(!nested.exists());
+        ensure_output_dir(&output).expect("create dir");
+        assert!(nested.is_dir(), "missing parent directory must be created");
+        // Idempotent: a second call on an existing dir is fine.
+        ensure_output_dir(&output).expect("idempotent");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
