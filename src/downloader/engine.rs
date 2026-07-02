@@ -345,13 +345,24 @@ impl DownloadEngine {
         self
     }
 
-    /// Download file with progress tracking
+    /// Download file with progress tracking.
+    ///
+    /// `output_path`'s extension is treated as **provisional** (callers derive
+    /// it from the requested mode/UI before anything is fetched): the engine
+    /// finalizes the extension from what is actually downloaded — the probe's
+    /// `Content-Type` (falling back to the redirect-resolved URL path's
+    /// extension) on the native path, and yt-dlp's own chosen container on
+    /// the yt-dlp path — and returns the path the file was really saved
+    /// under. In-flight artifacts (`.partN`, the resume sidecar) stay keyed
+    /// to the caller's `output_path`, so cancel/remove cleanup and the
+    /// cross-session resume identity guard are unaffected; only the final
+    /// rename adopts the corrected name.
     pub async fn download(
         &self,
         url: &str,
         output_path: &Path,
         progress_tx: mpsc::Sender<DownloadProgress>,
-    ) -> Result<()> {
+    ) -> Result<PathBuf> {
         debug!("🚀🚀🚀 [ENGINE-ENTRY] download() ENTERED - First line executed!");
         debug!("    URL: {}", url);
         debug!("    Output: {:?}", output_path);
@@ -416,6 +427,16 @@ impl DownloadEngine {
         );
         let (supports_ranges, file_size) = (probe.supports_ranges, probe.size);
 
+        // Finding 3: the probe just told us what this URL actually serves, so
+        // derive the real extension now (Content-Type → URL path → keep the
+        // caller's). Only the completed file is renamed to this — everything
+        // in flight stays on the caller's provisional name.
+        let final_path = content_derived_output_path(
+            output_path,
+            probe.content_type.as_deref(),
+            probe.final_url.as_deref(),
+        );
+
         // Initialize progress
         info!(
             "📊 [ENGINE] Initializing progress with file_size={} and segments={}",
@@ -438,7 +459,9 @@ impl DownloadEngine {
             // < 1MB or no range support
             info!("🔀 [ENGINE] Taking path: simple download (no ranges or small file). supports_ranges={}, file_size={}", supports_ranges, file_size);
             info!("📥 [ENGINE] Using simple download (no ranges or small file). supports_ranges={}, file_size={}", supports_ranges, file_size);
-            return self.download_simple(url, output_path, progress_tx).await;
+            return self
+                .download_simple(url, output_path, &final_path, progress_tx)
+                .await;
         }
 
         info!("📦 [ENGINE] Using segmented download path (ranges supported and file large enough)");
@@ -706,22 +729,46 @@ impl DownloadEngine {
         }
         remove_sidecar(&resume_sidecar).await;
 
+        // Publish under the content-derived name (finding 3). Best-effort:
+        // if the rename fails, the download is still complete under the
+        // caller's provisional name, so degrade to that rather than failing
+        // a finished transfer.
+        let final_path = if final_path != output_path {
+            match tokio::fs::rename(output_path, &final_path).await {
+                Ok(()) => final_path,
+                Err(e) => {
+                    warn!(
+                        "Failed to rename {:?} to content-derived {:?}: {}",
+                        output_path, final_path, e
+                    );
+                    output_path.to_path_buf()
+                }
+            }
+        } else {
+            final_path
+        };
+
         // Mark as completed
         progress.complete();
         if let Err(e) = progress_tx.send(progress).await {
             warn!("Failed to send completed progress: {}", e);
         }
 
-        Ok(())
+        Ok(final_path)
     }
 
-    /// Fallback downloader using yt-dlp for HLS / complex streams
+    /// Fallback downloader using yt-dlp for HLS / complex streams.
+    ///
+    /// The caller's `output_path` extension is provisional: yt-dlp gets a
+    /// `%(ext)s` output template so it names the file by the container it
+    /// actually produces (finding 3), and the path of the file it wrote is
+    /// what's returned.
     async fn download_via_ytdlp(
         &self,
         url: &str,
         output_path: &Path,
         progress_tx: mpsc::Sender<DownloadProgress>,
-    ) -> Result<()> {
+    ) -> Result<PathBuf> {
         debug!("download_via_ytdlp called for URL: {}", url);
 
         // Clone the sender before spawning any background tasks and
@@ -740,7 +787,7 @@ impl DownloadEngine {
         // built from the configured options; with default options this is the
         // historical `-f best --newline --no-warnings --progress -o <out> <url>`.
         debug!("🔧 [YT-DLP] Spawning yt-dlp process...");
-        let out = output_path.to_string_lossy().to_string();
+        let out = ytdlp_output_template(output_path);
         // aria2c is only ever engaged when the caller opted in AND an
         // external aria2c is actually present (I-9: never bundled, detected
         // like any other external tool).
@@ -886,7 +933,14 @@ impl DownloadEngine {
             done.speed = 0.0;
             done.complete();
             let _ = progress_tx.send(done).await;
-            Ok(())
+            // Adopt the file yt-dlp actually wrote (its real container may
+            // differ from the caller's provisional extension). Best-effort:
+            // fall back to the caller's path if discovery finds nothing
+            // (e.g. playlist templates, where yt-dlp names each entry).
+            let final_path = find_ytdlp_output(output_path)
+                .await
+                .unwrap_or_else(|| output_path.to_path_buf());
+            Ok(final_path)
         } else {
             error!("❌ [YT-DLP] Download failed");
             let mut failed = DownloadProgress::new(0, 1);
@@ -896,13 +950,17 @@ impl DownloadEngine {
         }
     }
 
-    /// Simple download without segments (for servers that don't support range requests)
+    /// Simple download without segments (for servers that don't support range
+    /// requests). The temp part stays keyed to `output_path` (the #36/#37
+    /// cleanup contract); the success rename targets `final_path`, the
+    /// content-derived name `download()` resolved from the probe (finding 3).
     async fn download_simple(
         &self,
         url: &str,
         output_path: &Path,
+        final_path: &Path,
         progress_tx: mpsc::Sender<DownloadProgress>,
-    ) -> Result<()> {
+    ) -> Result<PathBuf> {
         debug!("Using simple download for URL: {}", url);
 
         // Send request. The connect is bounded by `CONNECT_TIMEOUT`; the wait
@@ -1034,8 +1092,10 @@ impl DownloadEngine {
             return Err(e);
         }
 
-        // Atomically publish the completed file under the final name.
-        tokio::fs::rename(&temp_path, output_path).await?;
+        // Atomically publish the completed file under the final
+        // (content-derived) name — the #37 temp→rename is exactly where the
+        // corrected extension takes effect.
+        tokio::fs::rename(&temp_path, final_path).await?;
 
         // Final progress update
         let elapsed = start_time.elapsed().as_secs_f64();
@@ -1053,7 +1113,7 @@ impl DownloadEngine {
             warn!("Failed to send final progress: {}", e);
         }
 
-        Ok(())
+        Ok(final_path.to_path_buf())
     }
 
     /// Probe a URL for range support and total size in a single request.
@@ -1080,6 +1140,9 @@ impl DownloadEngine {
         .map_err(|e| anyhow::anyhow!("probe request failed: {}", e))?;
 
         let status = response.status();
+        // The redirect-resolved URL: its path extension is the extension
+        // fallback for `application/octet-stream` responses (finding 3).
+        let final_url = Some(response.url().to_string());
         let headers = response.headers();
 
         // Capture the Content-Type for routing (independent of range support).
@@ -1104,6 +1167,7 @@ impl DownloadEngine {
                 supports_ranges: true,
                 size: total,
                 content_type,
+                final_url,
             })
         } else if status.is_success() {
             // 200: server ignored Range. Read the header directly.
@@ -1120,6 +1184,7 @@ impl DownloadEngine {
                 supports_ranges: false,
                 size,
                 content_type,
+                final_url,
             })
         } else {
             Err(anyhow::anyhow!("probe got unexpected status {}", status))
@@ -1135,6 +1200,9 @@ struct ProbeResult {
     supports_ranges: bool,
     size: u64,
     content_type: Option<String>,
+    /// The URL the response actually came from (after redirects); its path
+    /// extension is the fallback for `application/octet-stream` responses.
+    final_url: Option<String>,
 }
 
 /// Decide whether a `Content-Type` denotes a directly-downloadable media stream
@@ -1170,6 +1238,144 @@ fn is_direct_media(content_type: Option<&str>) -> bool {
         }
         None => false,
     }
+}
+
+/// Map a media `Content-Type` to the canonical file extension for that
+/// container (finding 3: the saved extension must reflect the fetched
+/// content, not the requested mode). Returns `None` for
+/// `application/octet-stream` — a generic binary says nothing about the
+/// container, so the caller falls back to the URL path's extension — and for
+/// any type not in the map.
+fn extension_for_content_type(content_type: &str) -> Option<&'static str> {
+    let main = content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let ext = match main.as_str() {
+        "audio/mpeg" | "audio/mp3" => "mp3",
+        "audio/mp4" | "audio/x-m4a" => "m4a",
+        "audio/aac" | "audio/aacp" => "aac",
+        "audio/ogg" | "application/ogg" => "ogg",
+        "audio/opus" => "opus",
+        "audio/wav" | "audio/x-wav" | "audio/wave" => "wav",
+        "audio/flac" | "audio/x-flac" => "flac",
+        "audio/webm" => "webm",
+        "video/mp4" => "mp4",
+        "video/webm" => "webm",
+        "video/x-matroska" => "mkv",
+        "video/quicktime" => "mov",
+        "video/x-msvideo" => "avi",
+        "video/x-flv" => "flv",
+        "video/mpeg" => "mpg",
+        "video/3gpp" => "3gp",
+        "video/ogg" => "ogv",
+        _ => return None,
+    };
+    Some(ext)
+}
+
+/// Extension of the (redirect-resolved) URL's path, when it has a sane one:
+/// 1–5 ASCII alphanumeric characters after the last dot of the last path
+/// segment. Query string and fragment never leak in because the URL is
+/// actually parsed, not string-split.
+fn extension_from_url(url: &str) -> Option<String> {
+    let parsed = reqwest::Url::parse(url).ok()?;
+    // A trailing-slash URL yields an empty last segment, which has no dot and
+    // so correctly produces no extension below.
+    let file = parsed.path_segments()?.next_back()?;
+    let (_, ext) = file.rsplit_once('.')?;
+    if (1..=5).contains(&ext.len()) && ext.chars().all(|c| c.is_ascii_alphanumeric()) {
+        Some(ext.to_ascii_lowercase())
+    } else {
+        None
+    }
+}
+
+/// The final on-disk path for a native-path download: the caller's path with
+/// its provisional (mode/UI-derived) extension replaced by one derived from
+/// what was actually fetched — the probe's `Content-Type` first, the
+/// redirect-resolved URL path's extension for generic binaries
+/// (`application/octet-stream`), and the caller's own extension when neither
+/// source knows better.
+fn content_derived_output_path(
+    output_path: &Path,
+    content_type: Option<&str>,
+    final_url: Option<&str>,
+) -> PathBuf {
+    let derived = content_type
+        .and_then(extension_for_content_type)
+        .map(str::to_string)
+        .or_else(|| final_url.and_then(extension_from_url));
+    match derived {
+        Some(ext) => output_path.with_extension(ext),
+        None => output_path.to_path_buf(),
+    }
+}
+
+/// yt-dlp `-o` template for a single-file download: the caller's path with
+/// the provisional extension swapped for `%(ext)s`, so yt-dlp names the file
+/// by the container it actually produces (finding 3 — a forced literal
+/// `.mp4` mislabels audio extractions and every non-mp4 container, including
+/// non-media files fetched through the yt-dlp fallback). A path that already
+/// contains a yt-dlp template field (the playlist case) passes through
+/// untouched.
+pub fn ytdlp_output_template(output_path: &Path) -> String {
+    let raw = output_path.to_string_lossy();
+    if raw.contains("%(") {
+        return raw.into_owned();
+    }
+    output_path
+        .with_extension("%(ext)s")
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Locate the file yt-dlp actually produced for a single-file download: the
+/// regular file in the output directory whose stem matches the requested
+/// stem, newest first, skipping yt-dlp's own in-flight artifacts
+/// (`.part`/`.ytdl`/temp files). Returns `None` for playlist templates
+/// (yt-dlp names each entry itself) or when nothing matches.
+async fn find_ytdlp_output(output_path: &Path) -> Option<PathBuf> {
+    let name = output_path.file_name()?.to_str()?;
+    if name.contains("%(") {
+        return None;
+    }
+    let stem = output_path.file_stem()?.to_str()?.to_string();
+    let dir = match output_path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    let mut entries = tokio::fs::read_dir(&dir).await.ok()?;
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        if path.file_stem().and_then(|s| s.to_str()) != Some(stem.as_str()) {
+            continue;
+        }
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if matches!(ext.as_str(), "part" | "ytdl" | "temp" | "tmp") {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata().await else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        let modified = metadata
+            .modified()
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        if best.as_ref().is_none_or(|(t, _)| modified >= *t) {
+            best = Some((modified, path));
+        }
+    }
+    best.map(|(_, path)| path)
 }
 
 impl Default for DownloadEngine {
@@ -1905,13 +2111,14 @@ mod tests {
     // ============================================================
 
     /// Serves `body` as a plain `200 OK` (Range ignored, no `Accept-Ranges`)
-    /// with a media content-type, trickling `chunk_size` bytes every `gap` —
-    /// slow but always progressing. Routing: probe sees 200 → no range
+    /// with the given content-type, trickling `chunk_size` bytes every `gap`
+    /// — slow but always progressing. Routing: probe sees 200 → no range
     /// support → `download_simple`.
     async fn spawn_trickle_no_range_server(
         body: Vec<u8>,
         chunk_size: usize,
         gap: Duration,
+        content_type: &'static str,
     ) -> (String, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("local_addr");
@@ -1939,8 +2146,9 @@ mod tests {
                     }
 
                     let headers = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: video/mp4\r\nConnection: close\r\n\r\n",
-                        body.len()
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: {}\r\nConnection: close\r\n\r\n",
+                        body.len(),
+                        content_type
                     );
                     if socket.write_all(headers.as_bytes()).await.is_err() {
                         return;
@@ -2068,8 +2276,13 @@ mod tests {
         // 132KB at 2KB per 500ms ≈ 33s of body time — beyond the old 30s
         // total timeout, while each individual gap stays far below
         // STALL_ABORT_TIMEOUT.
-        let (base_url, _server) =
-            spawn_trickle_no_range_server(body.clone(), 2 * 1024, Duration::from_millis(500)).await;
+        let (base_url, _server) = spawn_trickle_no_range_server(
+            body.clone(),
+            2 * 1024,
+            Duration::from_millis(500),
+            "video/mp4",
+        )
+        .await;
 
         let tmp = tempfile::tempdir().expect("tempdir");
         let output_path = tmp.path().join("slow.mp4");
@@ -2167,8 +2380,13 @@ mod tests {
     #[tokio::test]
     async fn test_simple_download_success_renames_temp_to_final() {
         let body: Vec<u8> = (0..64 * 1024_u32).map(|i| (i % 256) as u8).collect();
-        let (base_url, _server) =
-            spawn_trickle_no_range_server(body.clone(), 16 * 1024, Duration::from_millis(1)).await;
+        let (base_url, _server) = spawn_trickle_no_range_server(
+            body.clone(),
+            16 * 1024,
+            Duration::from_millis(1),
+            "video/mp4",
+        )
+        .await;
 
         let tmp = tempfile::tempdir().expect("tempdir");
         let output_path = tmp.path().join("ok.mp4");
@@ -2185,6 +2403,231 @@ mod tests {
         assert!(
             !simple_temp_path(&output_path).exists(),
             "temp part must be renamed away on success"
+        );
+    }
+
+    // ============================================================
+    // CONTENT-DERIVED EXTENSION TESTS (master-audit finding 3:
+    // the saved extension must reflect what was actually fetched,
+    // not the pre-download mode guess)
+    // ============================================================
+
+    #[test]
+    fn test_extension_for_content_type_maps_common_media() {
+        assert_eq!(extension_for_content_type("audio/mpeg"), Some("mp3"));
+        assert_eq!(extension_for_content_type("audio/mp4"), Some("m4a"));
+        assert_eq!(extension_for_content_type("video/mp4"), Some("mp4"));
+        assert_eq!(extension_for_content_type("video/webm"), Some("webm"));
+        assert_eq!(extension_for_content_type("video/x-matroska"), Some("mkv"));
+        assert_eq!(extension_for_content_type("audio/flac"), Some("flac"));
+        // Parameters and casing must not defeat the match.
+        assert_eq!(
+            extension_for_content_type("Audio/MPEG; charset=binary"),
+            Some("mp3")
+        );
+        // A generic binary says nothing about the container.
+        assert_eq!(extension_for_content_type("application/octet-stream"), None);
+        assert_eq!(extension_for_content_type("text/html"), None);
+    }
+
+    #[test]
+    fn test_extension_from_url_takes_path_extension_only() {
+        assert_eq!(
+            extension_from_url("https://h/a/7z2408-x64.exe").as_deref(),
+            Some("exe")
+        );
+        assert_eq!(
+            extension_from_url("https://h/t-rex-roar.mp3?token=1.2#frag").as_deref(),
+            Some("mp3")
+        );
+        // Uppercase is normalised; no extension / no path yields None.
+        assert_eq!(
+            extension_from_url("https://h/CLIP.MP4").as_deref(),
+            Some("mp4")
+        );
+        assert_eq!(extension_from_url("https://h/download"), None);
+        assert_eq!(extension_from_url("https://h/"), None);
+        // Junk "extensions" (too long / non-alphanumeric) are rejected.
+        assert_eq!(extension_from_url("https://h/file.tarball-x"), None);
+    }
+
+    #[test]
+    fn test_content_derived_output_path_priority() {
+        // Paths are built with `join` (not `/`-literals) so the assertions
+        // hold under Windows' `\` separator too.
+        let provided = PathBuf::from("/tmp").join("song.mp4");
+        // Content-Type wins.
+        assert_eq!(
+            content_derived_output_path(&provided, Some("audio/mpeg"), Some("https://h/x.bin")),
+            PathBuf::from("/tmp").join("song.mp3")
+        );
+        // octet-stream falls through to the URL path's extension.
+        assert_eq!(
+            content_derived_output_path(
+                &provided,
+                Some("application/octet-stream"),
+                Some("https://h/a/7z2408-x64.exe")
+            ),
+            PathBuf::from("/tmp").join("song.exe")
+        );
+        // Neither source knows better → the caller's extension stands.
+        assert_eq!(
+            content_derived_output_path(
+                &provided,
+                Some("application/octet-stream"),
+                Some("https://h/download")
+            ),
+            PathBuf::from("/tmp").join("song.mp4")
+        );
+    }
+
+    #[test]
+    fn test_ytdlp_output_template_swaps_extension() {
+        // Built with `join` so the expected string carries the platform's
+        // own separator (Windows CI runs this with `\`).
+        assert_eq!(
+            ytdlp_output_template(&PathBuf::from("/tmp").join("My Song.mp4")),
+            PathBuf::from("/tmp")
+                .join("My Song.%(ext)s")
+                .to_string_lossy()
+                .into_owned()
+        );
+        // A playlist template already delegates naming to yt-dlp — untouched.
+        let playlist = PathBuf::from("/tmp").join("%(title)s.%(ext)s");
+        assert_eq!(
+            ytdlp_output_template(&playlist),
+            playlist.to_string_lossy().into_owned()
+        );
+    }
+
+    /// Finding 3, audit case 1: a direct `audio/mpeg` file requested with a
+    /// provisional `.mp4` name must be saved as `.mp3` (the audit's real
+    /// repro saved a genuine MP3 as `t-rex-roar.mp4`).
+    #[tokio::test]
+    async fn test_simple_download_audio_mpeg_saves_as_mp3() {
+        let body: Vec<u8> = (0..64 * 1024_u32).map(|i| (i % 256) as u8).collect();
+        let (base_url, _server) = spawn_trickle_no_range_server(
+            body.clone(),
+            16 * 1024,
+            Duration::from_millis(1),
+            "audio/mpeg",
+        )
+        .await;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let output_path = tmp.path().join("t-rex-roar.mp4");
+
+        let engine = DownloadEngine::default();
+        let (tx, mut rx) = mpsc::channel(100);
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+
+        let saved = engine
+            .download(&base_url, &output_path, tx)
+            .await
+            .expect("download should succeed");
+
+        assert_eq!(
+            saved,
+            tmp.path().join("t-rex-roar.mp3"),
+            "audio/mpeg content must be saved with a .mp3 extension"
+        );
+        let output = tokio::fs::read(&saved).await.expect("read output");
+        assert_eq!(output, body, "output must be byte-correct");
+        assert!(
+            !output_path.exists(),
+            "nothing may remain under the wrong provisional .mp4 name"
+        );
+        assert!(
+            !simple_temp_path(&output_path).exists(),
+            "temp part must be renamed away on success"
+        );
+    }
+
+    /// Finding 3, audit case 2: an `application/octet-stream` response gives
+    /// no container, so the (redirect-resolved) URL path's extension decides
+    /// — the audit's real repro saved a Windows installer as `7z2408.mp4`.
+    #[tokio::test]
+    async fn test_simple_download_octet_stream_uses_url_extension() {
+        let body: Vec<u8> = (0..64 * 1024_u32).map(|i| (i % 256) as u8).collect();
+        let (base_url, _server) = spawn_trickle_no_range_server(
+            body.clone(),
+            16 * 1024,
+            Duration::from_millis(1),
+            "application/octet-stream",
+        )
+        .await;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let output_path = tmp.path().join("7z2408.mp4");
+
+        let engine = DownloadEngine::default();
+        let (tx, mut rx) = mpsc::channel(100);
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+
+        let saved = engine
+            .download(&format!("{base_url}/7z2408-x64.exe"), &output_path, tx)
+            .await
+            .expect("download should succeed");
+
+        assert_eq!(
+            saved,
+            tmp.path().join("7z2408.exe"),
+            "octet-stream + .exe URL must be saved with a .exe extension"
+        );
+        let output = tokio::fs::read(&saved).await.expect("read output");
+        assert_eq!(output, body, "output must be byte-correct");
+        assert!(
+            !output_path.exists(),
+            "nothing may remain under the wrong provisional .mp4 name"
+        );
+    }
+
+    /// Finding 3 on the segmented path: parts and the resume sidecar stay on
+    /// the provisional name for the whole transfer (the #36 cleanup and
+    /// F-DL-003 identity contracts), and only the completed merge is renamed
+    /// to the content-derived name.
+    #[tokio::test]
+    async fn test_segmented_download_adopts_url_extension_for_octet_stream() {
+        let body: Vec<u8> = (0..(12 * 1024 * 1024) as u32)
+            .map(|i| (i % 256) as u8)
+            .collect();
+        let (base_url, _served, _server) = spawn_ranged_media_server(body.clone()).await;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let output_path = tmp.path().join("out.mp4");
+
+        let engine = DownloadEngine::new(DownloadConfig {
+            segments: 4,
+            retry_attempts: 2,
+            retry_delay: Duration::from_millis(5),
+            request_delay: Duration::from_millis(1),
+            ..Default::default()
+        });
+
+        let (tx, mut rx) = mpsc::channel(100);
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+
+        // The ranged server serves application/octet-stream regardless of
+        // path, so the URL extension is the deciding source here.
+        let saved = engine
+            .download(&format!("{base_url}/track.mp3"), &output_path, tx)
+            .await
+            .expect("download should succeed");
+
+        assert_eq!(
+            saved,
+            tmp.path().join("out.mp3"),
+            "segmented download must adopt the URL's real extension"
+        );
+        let output = tokio::fs::read(&saved).await.expect("read output");
+        assert_eq!(output, body, "output must be byte-correct");
+        assert!(
+            !output_path.exists(),
+            "nothing may remain under the wrong provisional .mp4 name"
+        );
+        assert!(
+            !sidecar_path(&output_path).exists(),
+            "resume sidecar (keyed to the provisional name) must be cleaned up"
         );
     }
 }

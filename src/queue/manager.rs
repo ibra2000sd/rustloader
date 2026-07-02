@@ -830,7 +830,11 @@ impl QueueManager {
             tokio::select! {
                 result = download_task => {
                     match result {
-                        Ok(()) => {
+                        // The engine returns the path the file was really
+                        // saved under: its extension is derived from the
+                        // actual content, so it can differ from the
+                        // provisional `output_path` the task was created with.
+                        Ok(saved_path) => {
                             info!("✅ [ENGINE] Task {} download completed successfully", task_id_for_closure);
 
                             // Organize the downloaded file
@@ -838,10 +842,10 @@ impl QueueManager {
 
                             // ✅ DEBUG BUG-007: Log pre-organization state
                             debug!("🔍 [ORGANIZE DEBUG] Pre-organization checks:");
-                            debug!("   - File exists: {}", output_path.exists());
-                            debug!("   - File path: {:?}", output_path);
+                            debug!("   - File exists: {}", saved_path.exists());
+                            debug!("   - File path: {:?}", saved_path);
                             debug!("   - File size: {} bytes",
-                                     std::fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0));
+                                     std::fs::metadata(&saved_path).map(|m| m.len()).unwrap_or(0));
                             debug!("   - Video title: {}", task.video_info.title);
                             debug!("   - Base dir: {:?}", file_organizer.base_dir);
 
@@ -849,7 +853,7 @@ impl QueueManager {
                                 file_organizer.clone(),
                                 metadata_manager.clone(),
                                 &task,
-                                &output_path,
+                                &saved_path,
                             ).await {
                                 Ok(final_path) => {
                                     info!("✅ [ORGANIZE] File organized at: {:?}", final_path);
@@ -868,16 +872,16 @@ impl QueueManager {
                                     // ✅ DEBUG BUG-007: Enhanced error logging
                                     error!("❌ [ORGANIZE] Organization failed: {}", e);
                                     error!("❌ [ORGANIZE] Error details: {:?}", e);
-                                    error!("❌ [ORGANIZE] File remains at: {:?}", output_path);
+                                    error!("❌ [ORGANIZE] File remains at: {:?}", saved_path);
                                     error!("❌ [ORGANIZE] File size: {} bytes",
-                                             std::fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0));
+                                             std::fs::metadata(&saved_path).map(|m| m.len()).unwrap_or(0));
 
                                     // Don't fail the task, file is still downloaded
                                     task.status = TaskStatus::Completed;
-                                    task.output_path = output_path.clone();  // Keep original path
+                                    task.output_path = saved_path.clone();  // Keep the engine's saved path
 
                                     warn!("Task {} completed but organization failed: {}. File at: {:?}",
-                                          task_id_for_closure, e, output_path);
+                                          task_id_for_closure, e, saved_path);
                                 }
                             }
                         }

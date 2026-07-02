@@ -16,7 +16,9 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::Parser;
 
-use crate::downloader::{build_ytdlp_args, DownloadEngine, DownloadProgress, YtDlpOptions};
+use crate::downloader::{
+    build_ytdlp_args, ytdlp_output_template, DownloadEngine, DownloadProgress, YtDlpOptions,
+};
 use crate::extractor::ytdlp::find_aria2c;
 use crate::extractor::{HybridExtractor, YtDlpExtractor};
 use crate::utils;
@@ -145,6 +147,13 @@ impl Cli {
     ///
     /// Playlists are handed a yt-dlp output template so each entry is named by
     /// yt-dlp; single videos get a sanitized `<title>.<ext>` file.
+    ///
+    /// The extension here is **provisional** — a mode-derived guess made
+    /// before anything is fetched. The engine finalizes it from the actual
+    /// content (probe `Content-Type` / URL extension on the native path,
+    /// yt-dlp's real container on the yt-dlp path) and
+    /// [`DownloadEngine::download`] returns the path the file was really
+    /// saved under.
     pub fn output_path(&self, title: &str) -> PathBuf {
         let dir = self
             .output_dir
@@ -236,18 +245,16 @@ pub async fn run(cli: &Cli) -> Result<()> {
     // argument builder the engine uses, proving the flags reach A's engine path.
     if cli.dry_run {
         let output_path = cli.output_path("video");
-        // Same decision the real download path (`download_via_ytdlp`) makes,
-        // so the printed plan is honest about what will actually run.
+        // Same decisions the real download path (`download_via_ytdlp`) makes
+        // — including the `%(ext)s` output template that lets yt-dlp name the
+        // file by its real container — so the printed plan is honest about
+        // what will actually run.
         let aria2c_available = options.use_aria2c && find_aria2c().is_some();
-        let args = build_ytdlp_args(
-            &options,
-            &url,
-            &output_path.to_string_lossy(),
-            aria2c_available,
-        );
+        let output_template = ytdlp_output_template(&output_path);
+        let args = build_ytdlp_args(&options, &url, &output_template, aria2c_available);
         println!("rustloader dry-run plan:");
         println!("  url:    {url}");
-        println!("  output: {}", output_path.display());
+        println!("  output: {output_template}");
         println!("  engine: DownloadEngine::download (yt-dlp path)");
         println!("  yt-dlp: yt-dlp {}", args.join(" "));
         return Ok(());
@@ -300,7 +307,7 @@ pub async fn run(cli: &Cli) -> Result<()> {
     });
 
     println!("Downloading {url} -> {}", output_path.display());
-    engine
+    let final_path = engine
         .download(&url, &output_path, progress_tx)
         .await
         .map_err(|e| {
@@ -308,7 +315,9 @@ pub async fn run(cli: &Cli) -> Result<()> {
             tracing::debug!("download failed (raw): {e:#}");
             anyhow::anyhow!("{}", crate::utils::make_error_user_friendly(&e.to_string()))
         })?;
-    println!("Done.");
+    // The engine finalizes the extension from the actual content, so the
+    // saved path can differ from the provisional one printed above.
+    println!("Done. Saved to {}", final_path.display());
     Ok(())
 }
 
@@ -412,14 +421,39 @@ mod tests {
     }
 
     #[test]
-    fn output_path_uses_extension_for_format() {
+    fn output_path_extension_is_provisional_only() {
+        // Replaces `output_path_uses_extension_for_format`, which locked in
+        // the audit's finding-3 bug (extension chosen from the mode flag
+        // before anything is fetched). The mode-derived extension is now a
+        // provisional guess only: the engine finalizes it from the actual
+        // content and returns the real saved path — see engine.rs's
+        // `test_simple_download_audio_mpeg_saves_as_mp3`,
+        // `test_simple_download_octet_stream_uses_url_extension`,
+        // `test_segmented_download_adopts_url_extension_for_octet_stream`,
+        // and `test_ytdlp_output_template_swaps_extension` for the
+        // content-derived assertions.
+        // Expected values are built with the same `join` the code uses, so
+        // the assertions hold under Windows' `\` separator too.
         let cli = Cli::try_parse_from(["rustloader", "URL", "-o", "/tmp", "-f", "mp3"]).unwrap();
         assert_eq!(
             cli.output_path("My Song"),
-            PathBuf::from("/tmp/My Song.mp3")
+            PathBuf::from("/tmp").join("My Song.mp3")
         );
         let cli = Cli::try_parse_from(["rustloader", "URL", "-o", "/tmp"]).unwrap();
-        assert_eq!(cli.output_path("My Vid"), PathBuf::from("/tmp/My Vid.mp4"));
+        assert_eq!(
+            cli.output_path("My Vid"),
+            PathBuf::from("/tmp").join("My Vid.mp4")
+        );
+        // The yt-dlp path never receives that provisional extension as a
+        // literal filename: it is swapped for %(ext)s so yt-dlp names the
+        // file by the container it actually produces.
+        assert_eq!(
+            ytdlp_output_template(&cli.output_path("My Vid")),
+            PathBuf::from("/tmp")
+                .join("My Vid.%(ext)s")
+                .to_string_lossy()
+                .into_owned()
+        );
     }
 
     #[test]

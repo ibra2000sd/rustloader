@@ -79,6 +79,33 @@ nothing under the final name. Regression tests:
 2026-07-01/02, finding 2. PR
 [#37](https://github.com/ibra2000sd/rustloader/pull/37).
 
+### B-DL-006 — Saved extension came from the mode flag, not the actual content · closed · MEDIUM
+`cli.rs::output_path` picked the extension from the mode flag (`.mp3` if
+`-f mp3`, else `.mp4`) **before** the download, and the GUI hardcoded `.mp4`
+for every task — so a real MP3 (`audio/mpeg`) saved as `t-rex-roar.mp4` and
+a Windows installer (via the yt-dlp fallback) saved as `7z2408.mp4` (audit's
+live repros). The old test `output_path_uses_extension_for_format` locked
+the bug in. **Fix:** the caller's extension is now provisional; the engine
+finalizes it from the actual content and `DownloadEngine::download` returns
+the real saved path. Native path: probe `Content-Type` → mapped extension
+(`audio/mpeg`→`mp3`, `audio/mp4`→`m4a`, `video/webm`→`webm`, …), falling
+back to the redirect-resolved URL path's extension for
+`application/octet-stream`, else the caller's extension stands. yt-dlp path:
+the literal `-o <title>.mp4` became `-o <title>.%(ext)s` so yt-dlp names the
+file by its real container, and the file it actually wrote is adopted.
+In-flight artifacts (`.partN`, resume sidecar) stay keyed to the provisional
+name — #36 cleanup and the F-DL-003 identity guard are untouched; only the
+final rename (the #37 temp→rename on the simple path, a post-merge rename on
+the segmented path, best-effort) adopts the corrected name. I-8's non-media
+guard is unchanged. Regression tests:
+`test_simple_download_audio_mpeg_saves_as_mp3`,
+`test_simple_download_octet_stream_uses_url_extension`,
+`test_segmented_download_adopts_url_extension_for_octet_stream`,
+`test_content_derived_output_path_priority`,
+`test_ytdlp_output_template_swaps_extension`, and the upgraded
+`output_path_extension_is_provisional_only`. Source: master audit
+2026-07-01/02, finding 3.
+
 ## P2
 
 ### F-DL-001 — Shape A: use aria2c as yt-dlp's external downloader · closed (opt-in) · SMALL (XS)
@@ -363,6 +390,7 @@ lowering / making it configurable. NOT a bug (it is already bounded).
 | `F-DL-003` | Cross-session resume sidecar identity guard | PR #30, `f51dfad`, 2026-07-01 |
 | `F-DL-001` | Opt-in aria2c external downloader for yt-dlp path | PR #31, `38ea148`, 2026-07-01 |
 | `B-DOC-002` | KNOWN_ISSUES.md content refresh | PR #32, 2026-07-01 (PR pending) |
+| `B-DL-006` | Saved extension reflects actual content, not the mode flag | 2026-07-02 (PR pending) |
 
 (Pre-`docs/ai-os` work was tracked via GitHub PRs/CHANGELOG; future items use the
 IDs above.)
