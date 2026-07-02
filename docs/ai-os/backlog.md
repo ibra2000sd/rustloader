@@ -377,6 +377,23 @@ decision record: [`adr/0004-proxy-capture-mitm.md`](adr/0004-proxy-capture-mitm.
 `download_via_ytdlp` is correctly bounded but 30 min is generous; consider
 lowering / making it configurable. NOT a bug (it is already bounded).
 
+### F-GUI-001 — Opt-in clipboard monitoring (detect copied URLs) · closed (PR open) · SMALL-MEDIUM
+The cheap, in-app half of "capture what you copy" (the browser extension +
+receiving endpoint is a separate track). A Settings toggle (**default OFF**,
+plainly labelled — monitoring the clipboard is privacy-sensitive) enables a
+2-second `iced::time::every` poll subscription; a newly copied single-token
+http(s) URL surfaces a confirm/dismiss banner on the Downloads view, and
+**confirming** queues it through the existing `ExtractInfo` add path (I-2) —
+nothing ever auto-downloads. De-dup via a `ClipboardWatch` last-seen tracker
+(same value never re-prompts; first observation after enabling only seeds, so
+pre-existing clipboard content is ignored; the app's own Paste marks content
+seen so it isn't re-offered). Non-URL clipboard content is ignored silently;
+clipboard text is never stored, logged, or transmitted. Pure detection/de-dup
+helpers live in `src/gui/clipboard_monitor.rs` with unit tests; the
+`clipboard_monitoring` flag persists via the existing settings table. GUI-only
+— no engine/resume/persistence change (I-3 untouched). 2026-07-02, base
+`e8ebbe1`, PR pending.
+
 ## Recently closed
 
 | ID | Title | Closed by |
@@ -391,6 +408,7 @@ lowering / making it configurable. NOT a bug (it is already bounded).
 | `F-DL-001` | Opt-in aria2c external downloader for yt-dlp path | PR #31, `38ea148`, 2026-07-01 |
 | `B-DOC-002` | KNOWN_ISSUES.md content refresh | PR #32, 2026-07-01 (PR pending) |
 | `B-DL-006` | Saved extension reflects actual content, not the mode flag | 2026-07-02 (PR pending) |
+| `F-GUI-001` | Opt-in clipboard monitoring (detect copied URLs, confirm to queue) | 2026-07-02 (PR pending) |
 
 (Pre-`docs/ai-os` work was tracked via GitHub PRs/CHANGELOG; future items use the
 IDs above.)

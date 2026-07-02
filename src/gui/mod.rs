@@ -3,6 +3,7 @@
 
 pub mod app;
 pub mod clipboard;
+pub mod clipboard_monitor;
 pub mod components;
 pub mod icon;
 pub mod theme;

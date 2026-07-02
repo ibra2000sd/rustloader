@@ -38,6 +38,12 @@ pub struct AppSettings {
     /// no cookies file.
     #[serde(default)]
     pub cookies_file: Option<PathBuf>,
+
+    /// Opt-in clipboard monitoring: when true, the GUI watches the clipboard
+    /// for newly copied http(s) URLs and offers to download them (with
+    /// confirmation). Privacy-sensitive, so it defaults to OFF.
+    #[serde(default)]
+    pub clipboard_monitoring: bool,
 }
 
 impl Default for AppSettings {
@@ -55,6 +61,7 @@ impl Default for AppSettings {
             enable_resume: true,
             cookies_from_browser: None,
             cookies_file: None,
+            clipboard_monitoring: false,
         }
     }
 }
