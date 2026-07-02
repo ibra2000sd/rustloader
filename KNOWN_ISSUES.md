@@ -1,4 +1,4 @@
-# Known Issues - Rustloader v0.8.1
+# Known Issues - Rustloader v0.9.0
 
 This document tracks known issues and limitations in the current release.
 
@@ -30,73 +30,123 @@ other two cases, an interrupted download needs to be restarted manually.
 mode (throttled/dropped connections on large direct-media transfers) the
 download-reliability work targeted.
 
-#### ISSUE-002: Windows/Linux are CI-validated but not yet officially released
-**Status**: In progress
-**Impact**: Users on Windows/Linux have no official downloadable build yet.
-**Description**: CI (`ci.yml`) builds and runs the full test suite on
-ubuntu-latest, macos-latest, and windows-latest for every change, and the
-release workflow (`release.yml`) is already configured to produce
-Windows/Linux/macOS artifacts. However, macOS is still the only platform
-that's been through manual QA and is distributed as a supported release —
-Windows/Linux support remains the ROADMAP's next milestone (v0.9.0), not yet
-promoted to a released, supported target.
-**Workaround**: Build from source with `cargo build --release` on your
-platform; expect rough edges (untested manually) outside macOS.
-**Target Fix**: v0.9.0
-
-#### ISSUE-003: Orphaned `.partN` files after cancelling a segmented download
+#### ISSUE-007: No disk-space pre-check before starting a download
 **Status**: Known limitation
-**Impact**: Cancelled downloads can leave partial `.partN` files in the
-output directory, taking up disk space.
-**Description**: Segment part files are cleaned up automatically after a
-successful merge, but cancelling or removing an in-progress task
-(`QueueManager::cancel_task` / `remove_task`) doesn't clean them up. This is
-disk hygiene, not a correctness risk: the resume-identity guard (ISSUE-001)
-means a later download can never silently pick up a stale/foreign `.partN`
-by mistake — worst case it's discarded and refetched.
-**Workaround**: Manually delete `.partN` files (and any
-`.rustloader-resume` sidecar) left in the download directory after
-cancelling.
+**Impact**: A download larger than the free space on the target volume fails
+mid-transfer with a write error instead of being rejected up front; a large
+HLS/stream download (whose final size isn't known in advance) can fill the
+disk.
+**Description**: Neither the native engine nor the yt-dlp path checks
+available disk space before or during a download. For direct downloads the
+total size is usually known from the server's headers, so a pre-check is
+feasible; for HLS/DASH streams the final size is genuinely unknown ahead of
+time.
+**Workaround**: Make sure the download volume has enough free space,
+especially for long streams.
+**Target Fix**: Not currently planned.
+
+#### ISSUE-008: Resume progress can be under-reported right after a restart
+**Status**: Known limitation (cosmetic)
+**Impact**: After resuming an interrupted segmented download, the progress
+bar can briefly show less progress than is actually on disk.
+**Description**: A resumed segment counts its already-written bytes
+(`download_segment_attempt` starts its counter at `existing_bytes`), but
+those bytes only show up in the aggregate once that segment has started and
+sent its first progress update — segments still waiting to start contribute
+nothing yet. Cosmetic only; the resume itself is byte-correct (see ISSUE-001
+for scope and the sidecar identity guard).
+**Workaround**: None needed; the display converges as segments start
+reporting.
 **Target Fix**: Not currently planned.
 
 ### 🟢 Low Priority
 
-#### ISSUE-004: Optional aria2c downloader is experimental and not yet exposed
-**Status**: Landed, opt-in only
+#### ISSUE-004: Optional aria2c downloader is experimental (CLI-only, progress gap)
+**Status**: Landed, opt-in via CLI flag
 **Impact**: None by default — the feature does nothing unless explicitly
-enabled programmatically; there's no CLI flag or GUI setting for it yet.
+enabled with `--experimental-aria2c`; there is no GUI setting for it.
 **Description**: The yt-dlp download path can delegate to an external
-`aria2c` (`--downloader aria2c`) via `YtDlpOptions::use_aria2c`, which
-defaults to `false` and isn't currently set to `true` anywhere in the CLI or
-GUI. Even when enabled by a future integration, be aware: aria2c doesn't
-support HLS/DASH at all (yt-dlp silently keeps using its own native
-downloader for those), so it only ever applies to plain http/https/ftp
-transfers routed through yt-dlp — and for those, yt-dlp only reports
-progress once the transfer completes, so the progress bar would appear
-frozen at 0% until it jumps to 100%.
-**Workaround**: N/A — not user-reachable in this release.
-**Target Fix**: Undecided; needs a CLI/GUI toggle and, ideally, a fix for
-the progress gap before it's worth exposing.
+`aria2c` (`--downloader aria2c`) via `YtDlpOptions::use_aria2c` (default
+`false`), exposed since v0.9.0 as the `--experimental-aria2c` CLI flag
+(PR #33). Caveats when enabled: aria2c doesn't support HLS/DASH at all
+(yt-dlp silently keeps using its own native downloader for those), so it
+only ever applies to plain http/https/ftp transfers routed through yt-dlp —
+and for those, yt-dlp only reports progress once the transfer completes, so
+the progress bar appears frozen at 0% until it jumps to 100%. Requires
+`aria2c` to be installed separately (never bundled).
+**Workaround**: N/A — opt-in and clearly labelled experimental.
+**Target Fix**: Undecided; needs a GUI toggle and, ideally, a fix for the
+progress gap before wider exposure.
 
-#### ISSUE-005: Large Binary Size
-**Status**: Accepted
-**Impact**: Minor (longer download time)
-**Description**: Release binary is ~90 MB due to GUI framework dependencies.
-**Workaround**: None - this is expected for Iced-based applications.
+#### ISSUE-009: Release binaries are unsigned
+**Status**: Known limitation
+**Impact**: First launch on macOS and Windows shows a security warning.
+**Description**: Release binaries are not code-signed or notarized. macOS
+Gatekeeper reports an app from an "unidentified developer" and Windows
+SmartScreen shows a "Windows protected your PC" warning. See the README's
+"First run on macOS / Windows" section for the standard steps
+(right-click → Open or clearing the quarantine attribute on macOS;
+"More info" → "Run anyway" on Windows).
+**Workaround**: Follow the README first-run steps, and verify the download
+against the published `SHA256SUMS.txt` before running it.
+**Target Fix**: Not currently planned (signing requires paid developer
+certificates).
 
 #### ISSUE-006: Unmaintained/unsound transitive dependencies
 **Status**: Monitoring
 **Impact**: None currently — no known exploitable vulnerability, only
 maintenance-status and soundness advisories from `cargo audit`.
 **Description**: Five transitive dependencies pulled in by the Iced GUI
-framework are currently flagged: `instant` and `paste` (unmaintained),
-`ttf-parser` (unmaintained), and `lru` and `memmap2` (unsound advisories in
-code paths this project doesn't exercise the way the advisory describes).
+framework are currently flagged as **allowed warnings** (7 warnings total):
+`instant` and `paste` (unmaintained), `ttf-parser` (unmaintained, flagged on
+three dependency paths), and `lru` and `memmap2` (unsound advisories in code
+paths this project doesn't exercise the way the advisory describes). In
+addition, `.cargo/audit.toml` carries **justified, documented ignores** for
+three advisories: RUSTSEC-2023-0071 (`rsa` via sqlx's mysql metadata — the
+mysql feature is disabled and the crate isn't in the built dependency graph)
+and RUSTSEC-2026-0194 / RUSTSEC-2026-0195 (quick-xml DoS advisories — its
+only path into this project is `wayland-scanner`, a Linux-only build-time
+codegen crate parsing trusted vendored XML; quick-xml never runs in the
+shipped binary; see PR #40).
 **Note**: These will be resolved when Iced (and its own dependencies) update;
-tracked via `cargo audit` in CI, which currently passes with these as
-allowed warnings, not blocking failures.
+tracked via `cargo audit` in CI, which passes (exit 0) with the 7 allowed
+warnings and the documented ignores. Revisit the quick-xml ignores when
+iced/winit are upgraded.
 
 ---
+
+## Resolved in v0.9.0
+
+#### ISSUE-002: Windows/Linux officially supported as of v0.9.0
+**Status**: Resolved in v0.9.0
+**Impact**: None — all three platforms now have official downloadable builds.
+**Description**: v0.9.0 is the first release that officially supports macOS
+(arm64 + x86_64), Windows x86_64, and Linux x86_64. CI (`ci.yml`) builds and
+runs the full test suite on ubuntu-latest, macos-latest, and windows-latest
+for every change, and the release workflow (`release.yml`) publishes
+checksummed binaries for all four targets. Note that macOS remains the
+platform with the most manual QA history; Windows/Linux are CI-validated on
+every change but have a shorter track record of hands-on use — please report
+platform-specific issues.
+**Workaround**: N/A.
+
+#### ISSUE-003: Orphaned `.partN` files after cancelling a segmented download
+**Status**: Resolved in v0.9.0 (PR #36)
+**Impact**: None — cancelled/removed downloads no longer leave partial files.
+**Description**: `QueueManager::cancel_task` / `remove_task` now best-effort
+delete the task's `.partN` files and its `.rustloader-resume` sidecar via
+`cleanup_task_artifacts`. Pausing deliberately keeps them — parts and the
+sidecar must survive a pause for cross-session resume (ISSUE-001's segmented
+path) to work.
+**Workaround**: N/A.
+
+#### ISSUE-005: Binary size
+**Status**: Resolved (documentation was wrong)
+**Impact**: None.
+**Description**: Earlier docs claimed a ~90 MB release binary. The actual
+released binary is ~6.9 MB (the v0.8.1 macOS arm64 binary measures
+7,204,408 bytes; compressed release archives are ~4–6 MB per platform).
+**Workaround**: N/A.
 
 ## Recently Resolved (v0.8.x download-reliability work)
 
@@ -128,10 +178,10 @@ If you encounter a bug not listed here:
    - Steps to reproduce
    - Expected vs actual behavior
    - Your OS and version
-   - Rustloader version (currently v0.8.1)
+   - Rustloader version (currently v0.9.0)
    - Any error messages or logs
 
 ---
 
-**Last Updated**: July 2026
-**Document Version**: 2.0
+**Last Updated**: 2026-07-02
+**Document Version**: 2.1

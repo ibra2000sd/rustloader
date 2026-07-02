@@ -8,9 +8,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Planned
-- Windows and Linux support (v0.9.0)
-- Segment-level resume tracking (v0.8.0)
 - Browser extension integration (v1.0.0)
+
+---
+
+## [0.9.0] - 2026-07-02
+
+First release officially supporting **all three platforms**: macOS (arm64 +
+x86_64), Windows x86_64, and Linux x86_64 — pre-built, checksummed binaries
+for each, built and tested by CI on every change. Also the release that ships
+real **byte-level resume** for segmented downloads, a durable **download
+history** with a GUI view, and a batch of GUI and reliability fixes.
+
+### ✨ Added
+- **Byte-level segmented resume**: interrupted segment transfers now resume
+  from the bytes already written instead of restarting from zero (#28); a
+  resume is only trusted when the server honors `Range` with `206 Partial
+  Content` — a server that ignores `Range` triggers a clean restart instead
+  of silent corruption (#29); and a `.rustloader-resume` identity sidecar
+  (URL + file size + segment count) guards cross-session resume, so stale or
+  foreign `.partN` files are discarded rather than merged (#30).
+- **Download history**: downloads are persisted to the database across the
+  full task lifecycle (#34) and browsable in a new History sidebar view with
+  Remove-from-history and Show-in-Folder actions (#35).
+- **Opt-in aria2c external downloader** for the yt-dlp path
+  (`YtDlpOptions::use_aria2c`, #31), exposed as an `EXPERIMENTAL`
+  `--experimental-aria2c` CLI flag (#33). Off by default; only affects plain
+  http/https/ftp transfers routed through yt-dlp (never HLS/DASH), and the
+  progress bar does not update incrementally while aria2c runs.
+- **`LICENSE` file (MIT)** backing the README's license claim (#27).
+- **Project docs/AI operating pack**: `CLAUDE.md` + `docs/ai-os/`
+  (architecture, invariants, backlog, status, ADRs) (#24, #38) and a
+  `.claude/skills` layer (#26).
+
+### 🐛 Fixed
+- **GUI: downloads actually start** — format selection no longer blocks
+  starting a download, and settings-save errors are surfaced instead of
+  silently dropped (#19).
+- **GUI polish**: row completion state, Open File path, cookies dropdown, and
+  scrollable settings (#20).
+- **Extraction: tolerant deserialization** — yt-dlp JSON with a float
+  `duration` (e.g. SoundCloud) no longer fails extraction (#21).
+- **HLS master playlists download correctly** via a robust default yt-dlp
+  format selector (#22).
+- **Extraction can no longer hang forever**: the yt-dlp subprocess is bounded
+  by a 60s timeout and killed on expiry (#23).
+- **Orphaned `.partN` files cleaned up**: cancelling or removing an
+  in-progress task now best-effort deletes its `.partN` files and resume
+  sidecar (pause deliberately keeps them so cross-session resume works) (#36).
+- **Native engine timeouts fixed**: the blanket 30s *total* request timeout
+  (which killed any slow-but-progressing transfer) is replaced by a 15s
+  connect timeout plus a 30s stall timeout on every native wait, and
+  `download_simple` now streams to a temp `.part0` and renames on success
+  instead of leaving a corrupt partial under the final name (#37).
+- **Saved file extension reflects the actual content** (probe `Content-Type`
+  → redirect-resolved URL → caller's hint), so an `audio/mpeg` file saves as
+  `.mp3` and an installer as `.exe` instead of a blanket `.mp4` (#39).
+
+### 🔧 Changed
+- `KNOWN_ISSUES.md` rewritten against the verified current state (#32).
+- `cargo audit` in CI now carries a justified, documented ignore for the
+  quick-xml RUSTSEC-2026-0194/-0195 advisories (build-time-only dependency of
+  the Linux Wayland codegen path; no runtime exposure) in
+  `.cargo/audit.toml` (#40).
 
 ---
 
@@ -71,7 +131,7 @@ top of 0.8.0, plus authenticated-site support.
 - Conditional compilation for platform-specific features
 - yt-dlp bundling optimization
 
-## [0.7.0] - 2026-01-078
+## [0.7.0] - 2026-01-07
 
 ### 🧪 Test Infrastructure
 - **Added**: Comprehensive stress test suite (`tests/stress_test.rs`)
@@ -272,7 +332,10 @@ top of 0.8.0, plus authenticated-site support.
 
 ---
 
-[Unreleased]: https://github.com/ibra2000sd/rustloader/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/ibra2000sd/rustloader/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/ibra2000sd/rustloader/compare/v0.8.1...v0.9.0
+[0.8.1]: https://github.com/ibra2000sd/rustloader/compare/v0.8.0...v0.8.1
+[0.8.0]: https://github.com/ibra2000sd/rustloader/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/ibra2000sd/rustloader/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/ibra2000sd/rustloader/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/ibra2000sd/rustloader/compare/v0.5.0...v0.5.1

@@ -4,12 +4,14 @@
 > or `README.md` — is the live source of truth for "where are we".
 
 **As of:** 2026-07-02
-**Released version:** v0.8.1 (first published release, 2026-06-29)
-**main HEAD:** `81d4dad` (the #38 merge, F-EXTRACT-001 Phase-0 spike findings +
-ADR 0004; supersedes the earlier `9eaee55`/#37 stamp — #38 has since merged)
+**Released version:** v0.8.1 (first published release, 2026-06-29); **v0.9.0
+staged** — version bump + docs landed via the release-prep PR (branched from
+`e6cd092`), tag/release execution still pending (maintainer action)
+**main HEAD:** `e6cd092` (the #40 merge, quick-xml audit-ignore; supersedes the
+earlier `81d4dad`/#38 stamp — #39 and #40 have since merged)
 **CI on main:** green (4 jobs × ubuntu/macOS/windows)
-**Open PRs:** #1 (draft, untouched), plus this B-DL-006 content-derived-extension
-fix PR (branched from `81d4dad`)
+**Open PRs:** #1 (draft, untouched), plus this v0.9.0 release-prep PR
+(docs + version only, branched from `e6cd092`)
 
 ## Where the project is
 
@@ -37,8 +39,23 @@ regression for the one case it would have changed anything (see "Done" below).
 
 ## Done (recent)
 
+- **v0.9.0 release prep** (2026-07-02, base `e6cd092`, PR pending) — staged
+  the release the read-only audit recommended, docs + version only (no `src/`
+  changes): `Cargo.toml` 0.8.1 → 0.9.0 (+ lockfile), a dated 0.9.0
+  `CHANGELOG.md` entry covering #19–#40 with fixed link refs,
+  `KNOWN_ISSUES.md` made true at HEAD (ISSUE-003 resolved via #36, ISSUE-004
+  corrected for `--experimental-aria2c`, ISSUE-005's ~90 MB corrected to the
+  measured ~6.9 MB, ISSUE-006 updated for the #40 audit ignores, ISSUE-002
+  resolved by this release; new entries for the missing disk-space pre-check,
+  resume-progress under-reporting, and unsigned binaries), a README truth
+  pass (0.9.0 badge/status, real resume claims, ~6.9 MB, three-platform
+  Releases install + ffmpeg/JS-runtime prerequisites + Gatekeeper/SmartScreen
+  first-run steps), ROADMAP 0.8/0.9 sections brought to reality, and
+  `RELEASE_NOTES.md` replaced (was stale at v0.1.1) with a v0.9.0 summary.
+  The `v0.9.0-rc.1` dry-run, tag, and Windows/Linux artifact smoke-test are
+  the next, separate release-execution steps (need a human/VM).
 - **B-DL-006 — saved extension now reflects the actual content** (2026-07-02,
-  base `81d4dad`, PR pending) — master-audit finding 3. The caller's
+  base `81d4dad`, merged `0ae844a` via PR #39) — master-audit finding 3. The caller's
   mode-derived extension (`.mp3`/`.mp4` from the CLI flag; the GUI's hardcoded
   `.mp4`) is now provisional: the engine finalizes it from what was actually
   fetched (probe `Content-Type` → redirect-resolved URL extension → caller's

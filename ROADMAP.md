@@ -1,7 +1,7 @@
 # RUSTLOADER: MASTER ROADMAP TO v1.0
 
-> **Last Updated**: July 2026  
-> **Current Version**: v0.8.1  
+> **Last Updated**: 2026-07-02  
+> **Current Version**: v0.9.0  
 > **Status Legend**: ✅ Completed | 🟡 In Progress | 🔴 Not Started | ⚠️ Deferred
 
 This document tracks the evolution of Rustloader from initial release to production-ready v1.0.
@@ -204,31 +204,34 @@ Comprehensive test coverage for concurrency properties.
 
 ---
 
-## v0.8.0 — Resume Semantics 🔴
+## v0.8.x — Resume Semantics ✅
 
-**Status**: Not started
-
-Formal verification of resume behavior.
+**Status**: Shipped across the v0.8.1 → v0.9.0 download-reliability arc
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| Segment-level resume tracking | 🔴 | Would need segment manifest |
-| Partial file recovery | 🔴 | Currently restarts from scratch |
-| Resume across sessions | 🔴 | rehydrate() sets to Paused but no partial data |
-| TLA+ model for resume | 🔴 | No formal model |
+| Segment-level resume (byte-level, from written bytes) | ✅ | PR #28, `src/downloader/segment.rs` |
+| Corruption guard: resume requires `206 Partial Content` | ✅ | PR #29, restart-clean on a server ignoring `Range` |
+| Resume across sessions (identity-guarded) | ✅ | PR #30, `downloader::resume_guard` sidecar (URL + size + segment count) |
+| Orphan `.partN`/sidecar cleanup on cancel/remove | ✅ | PR #36, `cleanup_task_artifacts` |
+| TLA+ model for resume | ⚠️ | Deferred — regression tests against a real mock HTTP server instead |
+
+Scope note: byte-level resume covers the native **segmented** path (direct
+media ≥1MB on `Range`-capable servers); small files and the yt-dlp/HLS path
+still restart (see `KNOWN_ISSUES.md` ISSUE-001).
 
 ---
 
-## v0.9.0 — Cross-Platform 🔴
+## v0.9.0 — Cross-Platform ✅
 
-**Status**: Not started
+**Status**: Shipped — first release officially supporting all three platforms
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| Windows support | 🔴 | Planned |
-| Linux support | 🔴 | Planned |
-| Platform-specific file handling | 🔴 | Path separators, permissions |
-| CI for all platforms | 🔴 | Currently macOS only |
+| Windows support | ✅ | Official x86_64 release binary |
+| Linux support | ✅ | Official x86_64 release binary (Ubuntu 22.04+, Fedora 38+) |
+| Platform-specific file handling | ✅ | `src/utils/platform.rs` (XDG on Linux, AppData on Windows) |
+| CI for all platforms | ✅ | `ci.yml` matrix: ubuntu-latest, macos-latest, windows-latest on every change |
 
 ---
 
@@ -238,7 +241,7 @@ Formal verification of resume behavior.
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| All compiler warnings resolved | 🔴 | ~15-20 remain |
+| All compiler warnings resolved | ✅ | Zero warnings from the crate's own code; CI enforces `clippy -D warnings` |
 | Full test coverage | 🟡 | Good stress tests, limited unit tests |
 | Documentation complete | 🟡 | This roadmap update |
 | Performance benchmarks published | 🔴 | Benchmarks exist but not documented |
