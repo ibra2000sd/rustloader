@@ -7,7 +7,7 @@
     unused_assignments
 )]
 
-use crate::downloader::progress::DownloadProgress;
+use crate::downloader::progress::{DownloadProgress, STALL_ABORT_TIMEOUT};
 use anyhow::Result;
 use futures::stream::{self, StreamExt};
 use reqwest::Client;
@@ -184,8 +184,23 @@ async fn download_segment_attempt(
         format!("bytes={}-{}", range_start, segment.end)
     };
 
-    // Send request with range header
-    let response = client.get(url).header("Range", range).send().await?;
+    // Send request with range header. The connect is bounded by the client's
+    // connect timeout; the wait for response headers is bounded here so a
+    // peer that accepts the connection but never answers can't hang the
+    // segment forever (I-1's bound-the-wait rule; the client deliberately has
+    // no total request timeout — see `STALL_ABORT_TIMEOUT`).
+    let response = tokio::time::timeout(
+        STALL_ABORT_TIMEOUT,
+        client.get(url).header("Range", range).send(),
+    )
+    .await
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "segment {}: no response headers within {}s; aborting attempt",
+            segment.id,
+            STALL_ABORT_TIMEOUT.as_secs()
+        )
+    })??;
 
     if existing_bytes > 0 {
         // Resuming a partial download is only safe if the server actually
@@ -230,7 +245,24 @@ async fn download_segment_attempt(
     // Stream response to file
     let mut stream = response.bytes_stream();
 
-    while let Some(chunk_result) = stream.next().await {
+    loop {
+        // Bound each wait for the next body chunk: a transfer that keeps
+        // delivering bytes (however slowly) never trips this, while a
+        // dead/idle connection aborts this attempt within the window. The
+        // bytes written so far stay in the part file, so the retry loop's
+        // resume-append (#28/#29) picks up from them instead of re-fetching.
+        let next_chunk = tokio::time::timeout(STALL_ABORT_TIMEOUT, stream.next())
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "segment {} stalled: no bytes received for {}s; aborting attempt",
+                    segment.id,
+                    STALL_ABORT_TIMEOUT.as_secs()
+                )
+            })?;
+        let Some(chunk_result) = next_chunk else {
+            break;
+        };
         let chunk = chunk_result?;
         file.write_all(&chunk).await?;
 
@@ -789,6 +821,101 @@ mod resume_tests {
         assert_eq!(
             final_bytes, body,
             "part file must be byte-identical to the source body, not corrupt"
+        );
+    }
+
+    /// Sends `206` headers for whatever range is asked, then never sends a
+    /// single body byte — a dead connection that keeps the socket open.
+    async fn spawn_stalling_range_server(
+        total_len: usize,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+
+        let handle = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = match listener.accept().await {
+                    Ok(x) => x,
+                    Err(_) => break,
+                };
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 8192];
+                    let mut req = Vec::new();
+                    loop {
+                        let n = match socket.read(&mut buf).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => n,
+                        };
+                        req.extend_from_slice(&buf[..n]);
+                        if req.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+
+                    let headers = format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                        total_len
+                    );
+                    let _ = socket.write_all(headers.as_bytes()).await;
+                    let _ = socket.flush().await;
+                    // Keep the connection open but never send a body byte.
+                    std::future::pending::<()>().await;
+                });
+            }
+        });
+
+        (format!("http://{}", addr), handle)
+    }
+
+    /// Stall-abort regression (master-audit finding 1's segmented half): with
+    /// the blanket total client timeout gone, a segment whose connection goes
+    /// dead must still be aborted within the `STALL_ABORT_TIMEOUT` window —
+    /// the wait for bytes is bounded (I-1 spirit), it does not hang forever.
+    /// Deliberately takes ~STALL_ABORT_TIMEOUT of wall clock — the bound
+    /// itself is the property under test.
+    #[tokio::test]
+    async fn test_stalled_segment_read_aborts_within_bound() {
+        let (base_url, _server) = spawn_stalling_range_server(64 * 1024).await;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let part_path = tmp.path().join("out.mp4.part0");
+        let segment = Segment {
+            id: 0,
+            start: 0,
+            end: 64 * 1024 - 1,
+            size: 64 * 1024,
+            path: part_path,
+        };
+
+        let client = Client::new();
+        let (tx, mut rx) = mpsc::channel(100);
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+
+        let started = Instant::now();
+        // retry_attempts = 0: a stalled attempt with zero forward progress
+        // must fail out on the first abort instead of retrying (forward
+        // progress would reset the budget, but no bytes ever arrive here).
+        let result = download_segment(
+            &client,
+            &base_url,
+            &segment,
+            tx,
+            0,
+            Duration::from_millis(5),
+        )
+        .await;
+        let elapsed = started.elapsed();
+
+        assert!(result.is_err(), "a stalled segment must fail, not hang");
+        let msg = format!("{:#}", result.expect_err("checked is_err above"));
+        assert!(
+            msg.contains("stalled"),
+            "error should say the segment stalled: {msg}"
+        );
+        assert!(
+            elapsed < STALL_ABORT_TIMEOUT + Duration::from_secs(30),
+            "stall abort must fire within a bounded window, took {:?}",
+            elapsed
         );
     }
 }

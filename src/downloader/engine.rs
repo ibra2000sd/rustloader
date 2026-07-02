@@ -10,7 +10,7 @@
 use crate::downloader::merger::{cleanup_segments, merge_segments, MergeProgress};
 // progress types already imported above
 use crate::downloader::progress::{
-    DownloadProgress, DownloadStatus, StallDetector, STALL_DETECTION_SECONDS,
+    DownloadProgress, DownloadStatus, StallDetector, STALL_ABORT_TIMEOUT, STALL_DETECTION_SECONDS,
 };
 use crate::downloader::resume_guard::{
     read_sidecar, remove_sidecar, sidecar_path, write_sidecar, ResumeIdentity,
@@ -298,12 +298,36 @@ pub struct DownloadEngine {
     ytdlp_options: YtDlpOptions,
 }
 
+/// Upper bound on establishing a connection (TCP + TLS handshake) for the
+/// native download client. Deliberately a *connect* timeout, not a total
+/// request timeout: reqwest's `ClientBuilder::timeout` covers the entire
+/// request INCLUDING the body read, which made every native transfer whose
+/// body took >30s fail (slow links could never complete `download_simple`,
+/// and segmented downloads churned through forced retries every 30s).
+/// Body-read liveness is bounded separately by `STALL_ABORT_TIMEOUT`.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Temp path for `download_simple`'s in-flight bytes: `<file_name>.part0`
+/// next to the output. Deliberately the same naming `calculate_segments`
+/// gives segment 0, so everything that already cleans up part files (the
+/// queue's cancel/remove artifact cleanup, the resume-guard's stale-part
+/// discard) covers this file without learning a new pattern. The two paths
+/// never run concurrently for the same output, so the shared name is safe.
+fn simple_temp_path(output_path: &Path) -> PathBuf {
+    let mut name = output_path.file_name().unwrap_or_default().to_os_string();
+    name.push(".part0");
+    match output_path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.join(&name),
+        _ => PathBuf::from(name),
+    }
+}
+
 impl DownloadEngine {
     /// Create new download engine with configuration
     pub fn new(config: DownloadConfig) -> Self {
         let client = Client::builder()
             .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
-            .timeout(Duration::from_secs(30))
+            .connect_timeout(CONNECT_TIMEOUT)
             .build()
             .expect("Failed to create HTTP client");
 
@@ -881,8 +905,18 @@ impl DownloadEngine {
     ) -> Result<()> {
         debug!("Using simple download for URL: {}", url);
 
-        // Send request
-        let response = self.client.get(url).send().await?;
+        // Send request. The connect is bounded by `CONNECT_TIMEOUT`; the wait
+        // for response headers is bounded here so a peer that accepts the
+        // connection but never answers can't hang the download forever (I-1's
+        // bound-the-wait rule; there is no total request timeout any more).
+        let response = timeout(STALL_ABORT_TIMEOUT, self.client.get(url).send())
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "no response headers within {}s; aborting",
+                    STALL_ABORT_TIMEOUT.as_secs()
+                )
+            })??;
 
         if !response.status().is_success() {
             return Err(anyhow::anyhow!("HTTP error: {}", response.status()));
@@ -916,8 +950,15 @@ impl DownloadEngine {
             warn!("Failed to send initial progress: {}", e);
         }
 
-        // Create output file
-        let mut file = File::create(output_path).await?;
+        // Stream into a temp part file next to the output and rename into
+        // place only on success, so a failed simple download never leaves a
+        // partial under the final name looking like a completed file. The
+        // temp reuses `calculate_segments`' `<file_name>.part0` naming, so the
+        // existing artifact cleanup (queue cancel/remove, B-DL-002/#36, and
+        // the resume-guard's stale-part discard) already covers it — no new
+        // scan pattern anywhere.
+        let temp_path = simple_temp_path(output_path);
+        let mut file = File::create(&temp_path).await?;
         let mut downloaded = 0u64;
 
         // Track download speed
@@ -928,38 +969,73 @@ impl DownloadEngine {
         // Stream response to file
         let mut stream = response.bytes_stream();
 
-        while let Some(chunk_result) = stream.next().await {
-            let chunk = chunk_result?;
-            file.write_all(&chunk).await?;
-
-            downloaded += chunk.len() as u64;
-
-            // Update progress every second
-            let now = std::time::Instant::now();
-            if now.duration_since(last_update_time) >= Duration::from_secs(1) {
-                let elapsed = now.duration_since(start_time).as_secs_f64();
-                let speed = if elapsed > 0.0 {
-                    downloaded as f64 / elapsed
-                } else {
-                    0.0
-                };
-
-                // Update progress
-                progress.downloaded_bytes = downloaded;
-                progress.speed = speed;
-
-                if let Err(e) = progress_tx.send(progress.clone()).await {
-                    warn!("Failed to send progress update: {}", e);
+        let streamed: Result<()> = async {
+            loop {
+                // Bound each wait for the next body chunk: a transfer that
+                // keeps delivering bytes (however slowly) never trips this,
+                // while a dead/idle connection is aborted within the window
+                // instead of hanging forever.
+                let next_chunk =
+                    timeout(STALL_ABORT_TIMEOUT, stream.next())
+                        .await
+                        .map_err(|_| {
+                            anyhow::anyhow!(
+                                "download stalled: no bytes received for {}s; aborting",
+                                STALL_ABORT_TIMEOUT.as_secs()
+                            )
+                        })?;
+                let Some(chunk_result) = next_chunk else {
                     break;
-                }
+                };
+                let chunk = chunk_result?;
+                file.write_all(&chunk).await?;
 
-                last_update_time = now;
-                last_downloaded = downloaded;
+                downloaded += chunk.len() as u64;
+
+                // Update progress every second
+                let now = std::time::Instant::now();
+                if now.duration_since(last_update_time) >= Duration::from_secs(1) {
+                    let elapsed = now.duration_since(start_time).as_secs_f64();
+                    let speed = if elapsed > 0.0 {
+                        downloaded as f64 / elapsed
+                    } else {
+                        0.0
+                    };
+
+                    // Update progress
+                    progress.downloaded_bytes = downloaded;
+                    progress.speed = speed;
+
+                    if let Err(e) = progress_tx.send(progress.clone()).await {
+                        warn!("Failed to send progress update: {}", e);
+                        break;
+                    }
+
+                    last_update_time = now;
+                    last_downloaded = downloaded;
+                }
             }
+
+            // Ensure file is flushed
+            file.flush().await?;
+            Ok(())
+        }
+        .await;
+
+        if let Err(e) = streamed {
+            // Best-effort: a failed simple download keeps nothing under the
+            // final name and removes its own temp part.
+            if let Err(remove_err) = tokio::fs::remove_file(&temp_path).await {
+                warn!(
+                    "Failed to remove temp part file {:?} after failed download: {}",
+                    temp_path, remove_err
+                );
+            }
+            return Err(e);
         }
 
-        // Ensure file is flushed
-        file.flush().await?;
+        // Atomically publish the completed file under the final name.
+        tokio::fs::rename(&temp_path, output_path).await?;
 
         // Final progress update
         let elapsed = start_time.elapsed().as_secs_f64();
@@ -1818,6 +1894,297 @@ mod tests {
             "enable_resume=false must ignore even fully-matching parts and re-fetch everything: served {} of {} bytes",
             served_bytes,
             body.len()
+        );
+    }
+
+    // ============================================================
+    // NATIVE-PATH TIMEOUT / TEMP-RENAME REGRESSION TESTS
+    // (master-audit findings 1+2: the blanket 30s total client
+    // timeout, and download_simple leaving a partial under the
+    // final name)
+    // ============================================================
+
+    /// Serves `body` as a plain `200 OK` (Range ignored, no `Accept-Ranges`)
+    /// with a media content-type, trickling `chunk_size` bytes every `gap` —
+    /// slow but always progressing. Routing: probe sees 200 → no range
+    /// support → `download_simple`.
+    async fn spawn_trickle_no_range_server(
+        body: Vec<u8>,
+        chunk_size: usize,
+        gap: Duration,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let body = Arc::new(body);
+
+        let handle = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = match listener.accept().await {
+                    Ok(x) => x,
+                    Err(_) => break,
+                };
+                let body = Arc::clone(&body);
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 8192];
+                    let mut req = Vec::new();
+                    loop {
+                        let n = match socket.read(&mut buf).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => n,
+                        };
+                        req.extend_from_slice(&buf[..n]);
+                        if req.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+
+                    let headers = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: video/mp4\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    if socket.write_all(headers.as_bytes()).await.is_err() {
+                        return;
+                    }
+                    for chunk in body.chunks(chunk_size) {
+                        if socket.write_all(chunk).await.is_err() {
+                            return;
+                        }
+                        if socket.flush().await.is_err() {
+                            return;
+                        }
+                        sleep(gap).await;
+                    }
+                });
+            }
+        });
+
+        (format!("http://{}", addr), handle)
+    }
+
+    /// Sends media headers (and optionally `first_bytes` of body), then goes
+    /// silent forever — a dead connection that keeps the socket open.
+    async fn spawn_stalling_media_server(
+        total_len: usize,
+        first_bytes: usize,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+
+        let handle = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = match listener.accept().await {
+                    Ok(x) => x,
+                    Err(_) => break,
+                };
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 8192];
+                    let mut req = Vec::new();
+                    loop {
+                        let n = match socket.read(&mut buf).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => n,
+                        };
+                        req.extend_from_slice(&buf[..n]);
+                        if req.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+
+                    let headers = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: video/mp4\r\nConnection: close\r\n\r\n",
+                        total_len
+                    );
+                    if socket.write_all(headers.as_bytes()).await.is_err() {
+                        return;
+                    }
+                    if first_bytes > 0 && socket.write_all(&vec![0u8; first_bytes]).await.is_err() {
+                        return;
+                    }
+                    let _ = socket.flush().await;
+                    // Keep the connection open but never send another byte.
+                    std::future::pending::<()>().await;
+                });
+            }
+        });
+
+        (format!("http://{}", addr), handle)
+    }
+
+    /// Serves media headers claiming `claimed_len` but closes the connection
+    /// after `actual` body bytes — a mid-transfer network failure.
+    async fn spawn_truncating_media_server(
+        claimed_len: usize,
+        actual: usize,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+
+        let handle = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = match listener.accept().await {
+                    Ok(x) => x,
+                    Err(_) => break,
+                };
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 8192];
+                    let mut req = Vec::new();
+                    loop {
+                        let n = match socket.read(&mut buf).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => n,
+                        };
+                        req.extend_from_slice(&buf[..n]);
+                        if req.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+
+                    let headers = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: video/mp4\r\nConnection: close\r\n\r\n",
+                        claimed_len
+                    );
+                    if socket.write_all(headers.as_bytes()).await.is_err() {
+                        return;
+                    }
+                    let _ = socket.write_all(&vec![0u8; actual]).await;
+                    let _ = socket.flush().await;
+                    // Drop the socket: connection closed mid-body.
+                });
+            }
+        });
+
+        (format!("http://{}", addr), handle)
+    }
+
+    /// Finding 1 regression: a transfer whose BODY takes longer than 30s but
+    /// keeps progressing must complete. Under the old blanket
+    /// `ClientBuilder::timeout(30s)` (a TOTAL request timeout including the
+    /// body read) this exact download failed at the 30s mark; with the
+    /// connect-timeout + per-chunk stall bound it must run to completion.
+    /// Deliberately >30s of wall clock — that's the property under test.
+    #[tokio::test]
+    async fn test_simple_download_slower_than_30s_total_completes() {
+        let body: Vec<u8> = (0..132 * 1024_u32).map(|i| (i % 256) as u8).collect();
+        // 132KB at 2KB per 500ms ≈ 33s of body time — beyond the old 30s
+        // total timeout, while each individual gap stays far below
+        // STALL_ABORT_TIMEOUT.
+        let (base_url, _server) =
+            spawn_trickle_no_range_server(body.clone(), 2 * 1024, Duration::from_millis(500)).await;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let output_path = tmp.path().join("slow.mp4");
+
+        let engine = DownloadEngine::default();
+        let (tx, mut rx) = mpsc::channel(100);
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+
+        let result = engine.download(&base_url, &output_path, tx).await;
+        assert!(
+            result.is_ok(),
+            "slow-but-progressing download must complete: {:?}",
+            result
+        );
+
+        let output = tokio::fs::read(&output_path).await.expect("read output");
+        assert_eq!(output, body, "output must be byte-correct");
+        assert!(
+            !simple_temp_path(&output_path).exists(),
+            "temp part must be renamed away on success"
+        );
+    }
+
+    /// Finding 1's safety counterpart: a connection that stops delivering
+    /// bytes entirely must be aborted within the stall window (bounded wait,
+    /// I-1 spirit) — not hang forever now that the total timeout is gone.
+    /// Finding 2 regression riding along: the failed simple download must
+    /// leave NO file under the final name and clean up its temp part.
+    #[tokio::test]
+    async fn test_simple_download_stalled_aborts_bounded_and_leaves_no_final_file() {
+        let (base_url, _server) = spawn_stalling_media_server(256 * 1024, 4 * 1024).await;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let output_path = tmp.path().join("stalled.mp4");
+
+        let engine = DownloadEngine::default();
+        let (tx, mut rx) = mpsc::channel(100);
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+
+        let started = std::time::Instant::now();
+        let result = engine.download(&base_url, &output_path, tx).await;
+        let elapsed = started.elapsed();
+
+        assert!(result.is_err(), "a stalled download must fail, not hang");
+        let msg = format!("{:#}", result.expect_err("checked is_err above"));
+        assert!(
+            msg.contains("stalled"),
+            "error should say the download stalled: {msg}"
+        );
+        assert!(
+            elapsed < STALL_ABORT_TIMEOUT + Duration::from_secs(30),
+            "stall abort must fire within a bounded window, took {:?}",
+            elapsed
+        );
+        assert!(
+            !output_path.exists(),
+            "a failed simple download must not leave a file under the final name"
+        );
+        assert!(
+            !simple_temp_path(&output_path).exists(),
+            "the failed download's temp part should be removed"
+        );
+    }
+
+    /// Finding 2 regression (fast path): a mid-transfer connection failure
+    /// must not leave a partial file under the final name.
+    #[tokio::test]
+    async fn test_failed_simple_download_leaves_no_final_named_file() {
+        let (base_url, _server) = spawn_truncating_media_server(100 * 1024, 10 * 1024).await;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let output_path = tmp.path().join("truncated.mp4");
+
+        let engine = DownloadEngine::default();
+        let (tx, mut rx) = mpsc::channel(100);
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+
+        let result = engine.download(&base_url, &output_path, tx).await;
+        assert!(
+            result.is_err(),
+            "a truncated transfer must surface an error"
+        );
+        assert!(
+            !output_path.exists(),
+            "a failed simple download must not leave a file under the final name"
+        );
+        assert!(
+            !simple_temp_path(&output_path).exists(),
+            "the failed download's temp part should be removed"
+        );
+    }
+
+    /// Happy-path guard for the temp-rename: a successful simple download
+    /// lands byte-correct under the final name with no temp left behind.
+    #[tokio::test]
+    async fn test_simple_download_success_renames_temp_to_final() {
+        let body: Vec<u8> = (0..64 * 1024_u32).map(|i| (i % 256) as u8).collect();
+        let (base_url, _server) =
+            spawn_trickle_no_range_server(body.clone(), 16 * 1024, Duration::from_millis(1)).await;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let output_path = tmp.path().join("ok.mp4");
+
+        let engine = DownloadEngine::default();
+        let (tx, mut rx) = mpsc::channel(100);
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+
+        let result = engine.download(&base_url, &output_path, tx).await;
+        assert!(result.is_ok(), "download should succeed: {:?}", result);
+
+        let output = tokio::fs::read(&output_path).await.expect("read output");
+        assert_eq!(output, body, "output must be byte-correct");
+        assert!(
+            !simple_temp_path(&output_path).exists(),
+            "temp part must be renamed away on success"
         );
     }
 }

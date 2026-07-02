@@ -44,6 +44,41 @@ intentionally retained/unchanged — see the PR description. The
 whole-download-abort-tolerance half (letting the engine survive a segment
 that never recovers) remains open, tracked separately if pursued.
 
+### B-DL-004 — Blanket 30s TOTAL client timeout killed slow native transfers · closed · MEDIUM
+`DownloadEngine::new` built the reqwest client with `.timeout(30s)` — in
+reqwest a **total** request timeout covering the body read. Any native
+transfer whose body took >30s failed: `download_simple` could never complete
+on a slow link (proven live in the master audit: a 3 MB file over a ~70 KB/s
+throttled server died at ~66%), and segmented downloads had every in-flight
+segment body killed at T+30s, surviving only via #28/#29's resume-append
+retry churn. **Fix:** client now uses `CONNECT_TIMEOUT` (15s, handshake
+only); every native HTTP *wait* (response headers, each body-chunk read, in
+both `segment.rs::download_segment_attempt` and `download_simple`) is
+bounded by the new `STALL_ABORT_TIMEOUT` (`progress.rs`, aligned with
+`STALL_DETECTION_SECONDS` = 30s). Slow-but-progressing transfers run to
+completion; a genuinely idle connection aborts within the window (I-1's
+bound-the-wait rule) and feeds the existing resume-append retry on the
+segmented path. Stall watchdog stays notify-only. Regression tests:
+`test_simple_download_slower_than_30s_total_completes`,
+`test_simple_download_stalled_aborts_bounded_and_leaves_no_final_file`,
+`test_stalled_segment_read_aborts_within_bound`. Source: master audit
+2026-07-01/02, finding 1. PR
+[#37](https://github.com/ibra2000sd/rustloader/pull/37).
+
+### B-DL-005 — `download_simple` left a failed partial under the FINAL name · closed · SMALL
+`download_simple` `File::create`d the final output path directly, so a
+mid-transfer failure left a partial (e.g. 2.1 MB of a 3.1 MB `slow.mp4`)
+that looks like a completed download and plays corrupt. **Fix:** stream into
+a temp part next to the output (`<file_name>.part0` — deliberately
+`calculate_segments`' naming, so the queue's cancel/remove artifact cleanup
+(B-DL-002/#36) and the resume-guard's stale-part discard already cover it)
+and rename into place only on success; on failure remove the temp and leave
+nothing under the final name. Regression tests:
+`test_failed_simple_download_leaves_no_final_named_file`,
+`test_simple_download_success_renames_temp_to_final`. Source: master audit
+2026-07-01/02, finding 2. PR
+[#37](https://github.com/ibra2000sd/rustloader/pull/37).
+
 ## P2
 
 ### F-DL-001 — Shape A: use aria2c as yt-dlp's external downloader · closed (opt-in) · SMALL (XS)

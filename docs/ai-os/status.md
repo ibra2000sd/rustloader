@@ -5,11 +5,12 @@
 
 **As of:** 2026-07-02
 **Released version:** v0.8.1 (first published release, 2026-06-29)
-**main HEAD:** `59d96bb` (the #35 merge)
+**main HEAD:** `612bda9` (the #36 merge; this file previously said `59d96bb`
+— stale, flagged by the 2026-07-01/02 master audit and corrected here)
 **CI on main:** green (4 jobs × ubuntu/macOS/windows)
-**Open PRs:** #1 (draft, untouched), [#36](https://github.com/ibra2000sd/rustloader/pull/36)
-(B-DL-002 orphaned-`.partN`/sidecar cleanup on cancel/remove, open, branched
-from `59d96bb`)
+**Open PRs:** #1 (draft, untouched),
+[#37](https://github.com/ibra2000sd/rustloader/pull/37) (B-DL-004/B-DL-005
+native-path timeout + temp-rename fix, open, branched from `612bda9`)
 
 ## Where the project is
 
@@ -194,7 +195,7 @@ regression for the one case it would have changed anything (see "Done" below).
   the real shared local database was caught and cleaned up immediately;
   a second attempt was correctly blocked).
 - **B-DL-002** (2026-07-02, PR
-  [#36](https://github.com/ibra2000sd/rustloader/pull/36), open) — the F-DL-003
+  [#36](https://github.com/ibra2000sd/rustloader/pull/36), merged `612bda9`) — the F-DL-003
   hygiene spinoff: `cancel_task`/`remove_task` (`queue/manager.rs`) now
   best-effort delete the task's `<output>.partN` files and its
   `<output>.rustloader-resume` sidecar via a new private
@@ -209,6 +210,29 @@ regression for the one case it would have changed anything (see "Done" below).
   time). Engine/resume/sidecar/persistence untouched. New regression tests
   in `tests/orphan_cleanup_test.rs`: cancel and remove delete the artifacts
   (decoy files untouched), and — the load-bearing guard — pause keeps them.
+- **B-DL-004 + B-DL-005** (2026-07-02, PR
+  [#37](https://github.com/ibra2000sd/rustloader/pull/37), open) — the two
+  B-class native-path bugs from the 2026-07-01/02 **master audit** (an
+  isolated end-to-end capability test of the real binary at `612bda9`).
+  B-DL-004: the engine's reqwest client used `.timeout(30s)` — a TOTAL
+  request timeout including the body read — so any native transfer whose
+  body took >30s failed (`download_simple` could never complete on a slow
+  link; segmented downloads churned through forced retries every 30s, kept
+  alive only by #28/#29's resume-append). Replaced with `CONNECT_TIMEOUT`
+  (15s, handshake only) plus a new `STALL_ABORT_TIMEOUT` (aligned with
+  `STALL_DETECTION_SECONDS` = 30s) bounding every native wait — response
+  headers and each body-chunk read in both native paths — so
+  slow-but-progressing transfers complete while idle/dead connections still
+  abort within a bounded window (I-1's spirit applied to HTTP reads; the
+  stall watchdog stays notify-only). B-DL-005: `download_simple` wrote the
+  final path directly and left a corrupt-looking partial under the final
+  name on failure; it now streams to `<file_name>.part0` (the existing
+  segment naming, already covered by #36's cancel/remove cleanup and the
+  resume-guard discard) and renames on success, removing the temp on
+  failure. Verified with a real before/after repro against a local ~70 KB/s
+  no-range server (main: died at 65.9% + left a 2,085,888-byte partial;
+  branch: completed byte-correct, sha256-verified) + 5 new regression tests;
+  full local gates green (210 tests, clippy `-D warnings`, fmt, audit).
 
 ## Next (ordered)
 
