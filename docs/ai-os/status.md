@@ -5,11 +5,11 @@
 
 **As of:** 2026-07-02
 **Released version:** v0.8.1 (first published release, 2026-06-29)
-**main HEAD:** `9eaee55` (the #37 merge, B-DL-004/B-DL-005 native-path timeout +
-temp-rename fix; supersedes the earlier `612bda9`/#36 stamp — #37 has since merged)
+**main HEAD:** `81d4dad` (the #38 merge, F-EXTRACT-001 Phase-0 spike findings +
+ADR 0004; supersedes the earlier `9eaee55`/#37 stamp — #38 has since merged)
 **CI on main:** green (4 jobs × ubuntu/macOS/windows)
-**Open PRs:** #1 (draft, untouched), plus this docs-only F-EXTRACT-001 Phase-0
-spike PR (findings + ADR 0004, branched from `9eaee55`)
+**Open PRs:** #1 (draft, untouched), plus this B-DL-006 content-derived-extension
+fix PR (branched from `81d4dad`)
 
 ## Where the project is
 
@@ -37,6 +37,18 @@ regression for the one case it would have changed anything (see "Done" below).
 
 ## Done (recent)
 
+- **B-DL-006 — saved extension now reflects the actual content** (2026-07-02,
+  base `81d4dad`, PR pending) — master-audit finding 3. The caller's
+  mode-derived extension (`.mp3`/`.mp4` from the CLI flag; the GUI's hardcoded
+  `.mp4`) is now provisional: the engine finalizes it from what was actually
+  fetched (probe `Content-Type` → redirect-resolved URL extension → caller's
+  extension) and `DownloadEngine::download` returns the real saved path; the
+  yt-dlp path uses a `%(ext)s` output template and adopts the file yt-dlp
+  actually wrote. Verified live against the audit's own repros: an
+  `audio/mpeg` file now saves `.mp3` (was `.mp4`), an octet-stream installer
+  saves `.exe` (was `.mp4`), and a yt-dlp-fallback download gets yt-dlp's real
+  extension. `.partN`/sidecar naming, #36 cleanup, F-DL-003 resume identity,
+  I-3 progress, and the I-8 non-media guard are unchanged.
 - **F-EXTRACT-001 Phase-0 desk spike** (2026-07-02, base `9eaee55`) — read-only
   proxy-capture (res-downloader style) feasibility. Resolved the stale-snapshot
   divergence (local tree = `71c463c`; authoritative = origin/main `9eaee55`);
