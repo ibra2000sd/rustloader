@@ -5,12 +5,11 @@
 
 **As of:** 2026-07-02
 **Released version:** v0.8.1 (first published release, 2026-06-29)
-**main HEAD:** `612bda9` (the #36 merge; this file previously said `59d96bb`
-— stale, flagged by the 2026-07-01/02 master audit and corrected here)
+**main HEAD:** `9eaee55` (the #37 merge, B-DL-004/B-DL-005 native-path timeout +
+temp-rename fix; supersedes the earlier `612bda9`/#36 stamp — #37 has since merged)
 **CI on main:** green (4 jobs × ubuntu/macOS/windows)
-**Open PRs:** #1 (draft, untouched),
-[#37](https://github.com/ibra2000sd/rustloader/pull/37) (B-DL-004/B-DL-005
-native-path timeout + temp-rename fix, open, branched from `612bda9`)
+**Open PRs:** #1 (draft, untouched), plus this docs-only F-EXTRACT-001 Phase-0
+spike PR (findings + ADR 0004, branched from `9eaee55`)
 
 ## Where the project is
 
@@ -38,6 +37,16 @@ regression for the one case it would have changed anything (see "Done" below).
 
 ## Done (recent)
 
+- **F-EXTRACT-001 Phase-0 desk spike** (2026-07-02, base `9eaee55`) — read-only
+  proxy-capture (res-downloader style) feasibility. Resolved the stale-snapshot
+  divergence (local tree = `71c463c`; authoritative = origin/main `9eaee55`);
+  live-verified the crate/license landscape and chose **`hudsucker`** (MIT/Apache)
+  as the MITM base, **rejecting `slinger-mitm`** on license (GPL-3.0-only, ADR 0002).
+  Findings drafted (`docs/ai-os/spikes/F-EXTRACT-001-phase0-findings.md`) and
+  **ADR 0004** written (`adr/0004-proxy-capture-mitm.md`, Status: **Proposed**,
+  gated). The machine-level proofs (root-CA install, system-proxy rewrite, real-site
+  pinning) are **deferred to a supervised session** — not run unattended, not
+  fabricated. `F-EXTRACT-001` stays **open**. Docs-only; no Rust source touched.
 - **PR #21** (`dff16f2`) — float-`duration` deserialize fix (SoundCloud).
 - **PR #22** (`933b2c0`) — yt-dlp default format selector fixes HLS master.
 - **PR #23** (`1c038e2`) — extraction subprocess now timeout-bounded + kill
