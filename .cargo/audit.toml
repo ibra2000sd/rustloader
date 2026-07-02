@@ -2,7 +2,17 @@
 # RUSTSEC-2023-0071 is reported via sqlx-mysql -> rsa, but mysql feature is disabled
 # and cargo tree confirms neither mysql nor rsa are in the built dependency graph.
 # This ignore documents the false positive until sqlx removes mysql from lock metadata.
-ignore = ["RUSTSEC-2023-0071"]
+#
+# RUSTSEC-2026-0194 / RUSTSEC-2026-0195 are DoS advisories (quadratic attribute
+# check / unbounded namespace allocation) against quick-xml 0.39.4. Its ONLY path
+# into this project is `wayland-scanner` (a proc-macro/codegen crate, Linux target
+# only: winit 0.29 <- smithay-client-toolkit <- wayland-scanner), which parses the
+# TRUSTED Wayland protocol XML vendored in the wayland-protocols crates at BUILD
+# time. quick-xml never runs in the shipped binary and never sees untrusted input,
+# so there is no runtime DoS surface. A real fix (quick-xml >=0.41) is blocked:
+# wayland-scanner 0.31 requires ^0.39, pinned transitively by iced 0.12. Revisit
+# and remove these two ignores when iced/winit are upgraded (tracked post-0.9.0).
+ignore = ["RUSTSEC-2023-0071", "RUSTSEC-2026-0194", "RUSTSEC-2026-0195"]
 
 # Severity threshold for warnings
 # Only report vulnerabilities of this severity level or higher
