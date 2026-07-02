@@ -394,6 +394,29 @@ helpers live in `src/gui/clipboard_monitor.rs` with unit tests; the
 — no engine/resume/persistence change (I-3 untouched). 2026-07-02, base
 `e8ebbe1`, PR pending.
 
+### `B-DL-007` — native download output handling (naming + missing dir)
+
+Two pre-ship smoke findings in the native download path, both in
+`src/downloader/engine.rs` (+ a truthful-error tweak in `src/cli.rs`):
+
+1. **Unknown / `application/octet-stream` content was saved as `<name>.mp4`.** The
+   B-DL-006 extension map has no octet-stream entry, so it fell through to the
+   audio/video *mode default* (`.mp4`) — a checksum file from a GitHub release
+   asset landed as `<uuid>.mp4`. Now the final name is derived: media
+   `Content-Type` → correct ext (unchanged); else URL-path ext; else the
+   **`Content-Disposition`** filename; else the URL basename; else `.bin`. Never
+   `.mp4` for a non-media binary, and the server-provided name replaces bare-UUID
+   names. B-DL-006 media behaviour and #37 temp-rename are preserved.
+2. **A missing `-o` directory failed ungracefully** — every segment errored
+   `No such file or directory` and the user saw the misleading `Unable to process
+   this URL`. The engine now `create_dir_all`s the output parent up front, and
+   `cli.rs` surfaces genuine filesystem errors verbatim instead of the generic
+   URL message.
+
+Regression tests cover the extension-derivation matrix (incl. Content-Disposition
+parsing + octet-stream→`.bin`) and the directory creation. 2026-07-02, base
+`68c0ee0`, PR pending.
+
 ## Recently closed
 
 | ID | Title | Closed by |
@@ -409,6 +432,7 @@ helpers live in `src/gui/clipboard_monitor.rs` with unit tests; the
 | `B-DOC-002` | KNOWN_ISSUES.md content refresh | PR #32, 2026-07-01 (PR pending) |
 | `B-DL-006` | Saved extension reflects actual content, not the mode flag | 2026-07-02 (PR pending) |
 | `F-GUI-001` | Opt-in clipboard monitoring (detect copied URLs, confirm to queue) | 2026-07-02 (PR pending) |
+| `B-DL-007` | Native downloads: create missing output dir; name/ext for unknown content (Content-Disposition → URL basename → `.bin`, never `.mp4`) | 2026-07-02 (PR pending) |
 
 (Pre-`docs/ai-os` work was tracked via GitHub PRs/CHANGELOG; future items use the
 IDs above.)

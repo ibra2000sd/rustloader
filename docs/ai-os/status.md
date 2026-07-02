@@ -39,6 +39,16 @@ regression for the one case it would have changed anything (see "Done" below).
 
 ## Done (recent)
 
+- **B-DL-007 — native download output handling** (2026-07-02, base `68c0ee0`, PR
+  pending) — two pre-ship smoke findings in `src/downloader/engine.rs` (+ a
+  truthful-error tweak in `src/cli.rs`): (1) unknown/`application/octet-stream`
+  content no longer defaults to `.mp4` — the saved name is derived from media
+  `Content-Type` → URL-path ext → `Content-Disposition` filename → URL basename →
+  `.bin`, replacing the old `<uuid>.mp4`; B-DL-006 media behaviour unchanged. (2)
+  a missing `-o` directory is now `create_dir_all`'d up front instead of failing
+  every segment with `No such file or directory` surfaced as the misleading
+  `Unable to process this URL`. Regression tests for both; no transport/resume/
+  history/GUI change (I-3 untouched).
 - **F-GUI-001 — opt-in clipboard monitoring** (2026-07-02, base `e8ebbe1`, PR
   pending) — GUI-only feature: a plainly-labelled Settings toggle (**default
   OFF**) adds a 2s `iced::time::every` poll subscription batched with the

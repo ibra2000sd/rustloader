@@ -230,6 +230,20 @@ pub fn sanitize_filename(title: &str) -> String {
     }
 }
 
+/// Whether a download error string denotes a LOCAL filesystem/output problem
+/// (a missing or unwritable output directory, a write failure) rather than a
+/// network or site problem. Such errors are shown to the user verbatim instead
+/// of being flattened to the generic "Unable to process this URL" (B-DL-007).
+fn is_local_output_error(raw: &str) -> bool {
+    let e = raw.to_ascii_lowercase();
+    e.contains("output directory")
+        || e.contains("could not write")
+        || e.contains("permission denied")
+        || e.contains("no such file or directory")
+        || e.contains("read-only file system")
+        || e.contains("no space left")
+}
+
 /// Run a single headless download (or print the plan when `--dry-run`).
 ///
 /// This drives A's existing engine: it builds the same [`HybridExtractor`] the
@@ -313,7 +327,15 @@ pub async fn run(cli: &Cli) -> Result<()> {
         .map_err(|e| {
             // Keep the raw error in the logs; show the user a friendly message.
             tracing::debug!("download failed (raw): {e:#}");
-            anyhow::anyhow!("{}", crate::utils::make_error_user_friendly(&e.to_string()))
+            let raw = e.to_string();
+            // A local filesystem/output problem is the user's environment, not a
+            // bad URL — surface it truthfully instead of "Unable to process this
+            // URL" (B-DL-007). The generic mapper still handles network/site errors.
+            if is_local_output_error(&raw) {
+                anyhow::anyhow!("{raw}")
+            } else {
+                anyhow::anyhow!("{}", crate::utils::make_error_user_friendly(&raw))
+            }
         })?;
     // The engine finalizes the extension from the actual content, so the
     // saved path can differ from the provisional one printed above.
@@ -324,6 +346,21 @@ pub async fn run(cli: &Cli) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_output_errors_bypass_the_generic_url_mapper() {
+        // B-DL-007: filesystem problems are surfaced truthfully, not as "bad URL".
+        assert!(is_local_output_error(
+            "could not create output directory /nope/x: Permission denied (os error 13)"
+        ));
+        assert!(is_local_output_error(
+            "No such file or directory (os error 2)"
+        ));
+        assert!(is_local_output_error("Read-only file system (os error 30)"));
+        // Network/site errors still go through the friendly mapper.
+        assert!(!is_local_output_error("dns error: failed to resolve host"));
+        assert!(!is_local_output_error("HTTP error: 404 Not Found"));
+    }
 
     #[test]
     fn no_url_is_gui_mode() {
