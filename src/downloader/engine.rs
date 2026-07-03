@@ -142,6 +142,11 @@ fn parse_yt_dlp_progress(line: &str) -> Option<(f64, f64, u64)> {
 pub struct YtDlpOptions {
     /// Maximum video height (e.g. 480/720/1080). `None` => best available.
     pub quality: Option<u32>,
+    /// Verbatim yt-dlp `-f` selector that overrides the `quality`-derived one
+    /// (video mode only; `audio_only` still wins). Set per-download by the
+    /// queue path via [`PageFallback`] so a fallback re-extraction honours the
+    /// format the user actually picked instead of re-deciding from scratch.
+    pub format_spec: Option<String>,
     /// Extract audio only (maps to yt-dlp `-x`).
     pub audio_only: bool,
     /// Audio format when extracting audio (e.g. "mp3").
@@ -210,15 +215,18 @@ pub fn build_ytdlp_args(
             args.push(fmt.clone());
         }
     } else {
-        let selector = match opts.quality {
-            Some(h) => {
+        let selector = match (&opts.format_spec, opts.quality) {
+            // A caller-supplied selector (the queue path's PageFallback) is
+            // the user's already-made choice — it outranks the quality knob.
+            (Some(spec), _) => spec.clone(),
+            (None, Some(h)) => {
                 format!("bestvideo[height<={h}]+bestaudio/best[height<={h}]/best")
             }
             // A bare `best` makes yt-dlp reject HLS master playlists with
             // "Requested format is not available". `bestvideo*+bestaudio/best`
             // resolves HLS/DASH variants (merging video+audio when split) and
             // still falls back to a single progressive stream via `/best`.
-            None => "bestvideo*+bestaudio/best".to_string(),
+            (None, None) => "bestvideo*+bestaudio/best".to_string(),
         };
         args.push("-f".to_string());
         args.push(selector);
@@ -263,6 +271,57 @@ pub fn build_ytdlp_args(
     args.push(url.to_string());
 
     args
+}
+
+/// The original page URL (and the yt-dlp `-f` selector for the format chosen
+/// from it) behind a resolved direct media URL.
+///
+/// The queue path hands the engine a *direct* URL that the extractor resolved
+/// from a page. When the native path can't serve that URL (probe failure,
+/// non-media Content-Type), the yt-dlp fallback must NOT retry the direct URL:
+/// sites with signed/session-bound URLs (TikTok, YouTube DASH) 403 yt-dlp's
+/// `[generic]` extractor exactly like they 403'd the probe (B-DL-008). yt-dlp
+/// needs the page URL it has an extractor for, plus the format the user chose.
+#[derive(Debug, Clone)]
+pub struct PageFallback {
+    /// The original page URL the direct URL was extracted from.
+    pub page_url: String,
+    /// Ready-made yt-dlp `-f` value reproducing the chosen format.
+    pub format_spec: Option<String>,
+}
+
+impl PageFallback {
+    /// Build a fallback from the chosen format's identity.
+    ///
+    /// `video_only` (vcodec present, acodec "none" — DASH-split video) needs
+    /// `+bestaudio` so the fallback download isn't silent; a complete format
+    /// re-selects itself by id. Both end in `/best` so the fallback still
+    /// degrades to *a* download if the id no longer exists on re-extraction.
+    pub fn new(page_url: String, format_id: &str, video_only: bool) -> Self {
+        let format_spec = if video_only {
+            format!("{format_id}+bestaudio/{format_id}/best")
+        } else {
+            format!("{format_id}/best")
+        };
+        Self {
+            page_url,
+            format_spec: Some(format_spec),
+        }
+    }
+}
+
+/// Pick the URL and `-f` override the yt-dlp fallback should run with:
+/// the original page URL + chosen-format spec when the caller supplied them,
+/// otherwise the URL the engine was driving (the CLI path, where `url` already
+/// IS the page URL).
+fn ytdlp_fallback_target<'a>(
+    url: &'a str,
+    fallback: Option<&'a PageFallback>,
+) -> (&'a str, Option<&'a str>) {
+    match fallback {
+        Some(f) => (f.page_url.as_str(), f.format_spec.as_deref()),
+        None => (url, None),
+    }
 }
 
 /// Download configuration
@@ -363,6 +422,22 @@ impl DownloadEngine {
         output_path: &Path,
         progress_tx: mpsc::Sender<DownloadProgress>,
     ) -> Result<PathBuf> {
+        self.download_with_fallback(url, None, output_path, progress_tx)
+            .await
+    }
+
+    /// [`download`](Self::download), plus the page-URL identity the yt-dlp
+    /// fallback should use instead of `url` (see [`PageFallback`]). Callers
+    /// whose `url` is already a page URL (the CLI) use `download`; the queue
+    /// path, whose `url` is a resolved direct URL, passes the original page
+    /// URL here so a probe failure doesn't retry a dead direct URL (B-DL-008).
+    pub async fn download_with_fallback(
+        &self,
+        url: &str,
+        fallback: Option<PageFallback>,
+        output_path: &Path,
+        progress_tx: mpsc::Sender<DownloadProgress>,
+    ) -> Result<PathBuf> {
         debug!("🚀🚀🚀 [ENGINE-ENTRY] download() ENTERED - First line executed!");
         debug!("    URL: {}", url);
         debug!("    Output: {:?}", output_path);
@@ -415,7 +490,16 @@ impl DownloadEngine {
             Err(e) => {
                 info!("🔀 [ENGINE] Taking path: yt-dlp fallback (probe failed)");
                 warn!("⚠️ [ENGINE] Probe failed, falling back to yt-dlp: {}", e);
-                return self.download_via_ytdlp(url, output_path, progress_tx).await;
+                let (ytdlp_url, format_spec) = ytdlp_fallback_target(url, fallback.as_ref());
+                if ytdlp_url != url {
+                    info!(
+                        "🔀 [ENGINE] yt-dlp fallback runs on the original page URL {} (format spec {:?}), not the direct URL",
+                        ytdlp_url, format_spec
+                    );
+                }
+                return self
+                    .download_via_ytdlp(ytdlp_url, format_spec, output_path, progress_tx)
+                    .await;
             }
         };
 
@@ -426,7 +510,16 @@ impl DownloadEngine {
                 "🔀 [ENGINE] Taking path: yt-dlp (not a direct media URL; content_type={:?})",
                 probe.content_type
             );
-            return self.download_via_ytdlp(url, output_path, progress_tx).await;
+            let (ytdlp_url, format_spec) = ytdlp_fallback_target(url, fallback.as_ref());
+            if ytdlp_url != url {
+                info!(
+                    "🔀 [ENGINE] yt-dlp fallback runs on the original page URL {} (format spec {:?}), not the direct URL",
+                    ytdlp_url, format_spec
+                );
+            }
+            return self
+                .download_via_ytdlp(ytdlp_url, format_spec, output_path, progress_tx)
+                .await;
         }
 
         info!(
@@ -775,6 +868,7 @@ impl DownloadEngine {
     async fn download_via_ytdlp(
         &self,
         url: &str,
+        format_spec: Option<&str>,
         output_path: &Path,
         progress_tx: mpsc::Sender<DownloadProgress>,
     ) -> Result<PathBuf> {
@@ -802,7 +896,17 @@ impl DownloadEngine {
         // like any other external tool).
         let aria2c_available = self.ytdlp_options.use_aria2c && find_aria2c().is_some();
         debug!("🔧 [YT-DLP] aria2c_available={}", aria2c_available);
-        let args = build_ytdlp_args(&self.ytdlp_options, url, &out, aria2c_available);
+        // Per-download `-f` override (the PageFallback's chosen-format spec)
+        // over the engine-wide options. The engine is shared across downloads
+        // (Arc in QueueManager), so this must not mutate `self`.
+        let opts = match format_spec {
+            Some(spec) => YtDlpOptions {
+                format_spec: Some(spec.to_string()),
+                ..self.ytdlp_options.clone()
+            },
+            None => self.ytdlp_options.clone(),
+        };
+        let args = build_ytdlp_args(&opts, url, &out, aria2c_available);
         debug!("🔧 [YT-DLP] Args: {:?}", args);
         let mut cmd = AsyncCommand::new("yt-dlp");
         cmd.args(&args);
@@ -1781,6 +1885,68 @@ mod tests {
         // `-f` is still present and the selector is the robust chain (not bare best).
         assert!(args.iter().any(|a| a == "-f"));
         assert_eq!(args[1], "bestvideo*+bestaudio/best");
+    }
+
+    #[test]
+    fn test_build_ytdlp_args_format_spec_overrides_quality() {
+        // A caller-supplied selector (PageFallback's chosen format) must win
+        // over the quality knob — it's the user's already-made choice.
+        let opts = YtDlpOptions {
+            quality: Some(720),
+            format_spec: Some("137+bestaudio/137/best".to_string()),
+            ..Default::default()
+        };
+        let args = build_ytdlp_args(&opts, "URL", "/out.mp4", false);
+        assert_eq!(args[0], "-f");
+        assert_eq!(args[1], "137+bestaudio/137/best");
+        assert!(
+            !args.iter().any(|a| a.contains("height<=720")),
+            "format_spec must replace the quality-derived selector: {args:?}"
+        );
+    }
+
+    #[test]
+    fn test_build_ytdlp_args_audio_only_ignores_format_spec() {
+        // audio_only still wins: `-x` extraction, no `-f` selector.
+        let opts = YtDlpOptions {
+            audio_only: true,
+            format_spec: Some("137+bestaudio/137/best".to_string()),
+            ..Default::default()
+        };
+        let args = build_ytdlp_args(&opts, "URL", "/out.mp3", false);
+        assert!(args.iter().any(|a| a == "-x"));
+        assert!(!args.iter().any(|a| a == "-f"));
+    }
+
+    #[test]
+    fn test_page_fallback_new_video_only_merges_audio() {
+        let f = PageFallback::new("https://example.com/watch".to_string(), "137", true);
+        assert_eq!(f.page_url, "https://example.com/watch");
+        assert_eq!(f.format_spec.as_deref(), Some("137+bestaudio/137/best"));
+    }
+
+    #[test]
+    fn test_page_fallback_new_complete_format_selects_by_id() {
+        let f = PageFallback::new("https://example.com/watch".to_string(), "18", false);
+        assert_eq!(f.format_spec.as_deref(), Some("18/best"));
+    }
+
+    #[test]
+    fn test_ytdlp_fallback_target_prefers_page_url() {
+        // Queue path: the direct URL is dead to yt-dlp; the page URL + chosen
+        // format spec must be what the fallback runs with (B-DL-008).
+        let fallback = PageFallback::new("https://page.example/v".to_string(), "137", true);
+        let (url, spec) = ytdlp_fallback_target("https://cdn.example/signed.mp4", Some(&fallback));
+        assert_eq!(url, "https://page.example/v");
+        assert_eq!(spec, Some("137+bestaudio/137/best"));
+    }
+
+    #[test]
+    fn test_ytdlp_fallback_target_without_fallback_keeps_url() {
+        // CLI path: `url` already IS the page URL.
+        let (url, spec) = ytdlp_fallback_target("https://page.example/v", None);
+        assert_eq!(url, "https://page.example/v");
+        assert_eq!(spec, None);
     }
 
     #[test]

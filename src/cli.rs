@@ -123,6 +123,9 @@ impl Cli {
         let audio_only = self.format.as_deref() == Some("mp3");
         YtDlpOptions {
             quality: self.quality.as_deref().and_then(|q| q.parse::<u32>().ok()),
+            // The CLI's format choice is the `quality`/`audio_only` knobs;
+            // the verbatim selector override is the queue path's (PageFallback).
+            format_spec: None,
             audio_only,
             audio_format: if audio_only {
                 Some("mp3".to_string())

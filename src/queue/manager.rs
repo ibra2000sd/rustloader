@@ -9,7 +9,7 @@
 
 use super::{EventLog, QueueEvent};
 use crate::downloader::resume_guard::{remove_sidecar, sidecar_path};
-use crate::downloader::{DownloadEngine, DownloadProgress};
+use crate::downloader::{DownloadEngine, DownloadProgress, PageFallback};
 use crate::extractor::{Format, VideoInfo};
 use crate::utils::error::RustloaderError;
 use crate::utils::{ContentType, FileOrganizer, MetadataManager, VideoMetadata};
@@ -672,6 +672,22 @@ impl QueueManager {
         let output_path = task.output_path.clone();
         let url = task.format.url.clone();
 
+        // `url` above is the extractor-RESOLVED direct URL, not the page the
+        // user pasted. If the native path can't serve it (signed/session-bound
+        // URLs 403 the probe — TikTok, YouTube DASH), the engine's yt-dlp
+        // fallback must re-run extraction on the original page URL with the
+        // chosen format, not retry the dead direct URL (B-DL-008).
+        let page_fallback = {
+            let page_url = task.video_info.url.clone();
+            (!page_url.is_empty()).then(|| {
+                // DASH-split video (no audio track) needs `+bestaudio` on
+                // re-extraction; a complete format re-selects itself by id.
+                let video_only = task.format.vcodec.as_deref().unwrap_or("none") != "none"
+                    && task.format.acodec.as_deref().unwrap_or("none") == "none";
+                PageFallback::new(page_url, &task.format.format_id, video_only)
+            })
+        };
+
         info!("💾 [DOWNLOAD] start_download called for: {}", task_id);
         debug!("   - URL: {}", url);
         debug!("   - Output: {:?}", output_path);
@@ -824,7 +840,12 @@ impl QueueManager {
             let mut cancelled = false;
 
             // Create a future that completes when either the download finishes or is cancelled
-            let download_task = engine.download(&url, &output_path, progress_tx.clone());
+            let download_task = engine.download_with_fallback(
+                &url,
+                page_fallback,
+                &output_path,
+                progress_tx.clone(),
+            );
             let cancel_task = cancel_rx.recv();
 
             tokio::select! {

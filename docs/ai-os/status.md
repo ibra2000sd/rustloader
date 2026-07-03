@@ -7,9 +7,9 @@
 **Released version:** v0.8.1 (first published release, 2026-06-29); **v0.9.0
 staged** — version bump + docs merged to main (#41), tag/release execution
 still pending (maintainer action)
-**main HEAD:** `1a08571` (the #44 merge, B-DL-007 output-dir/naming fix;
-F-GUI-001 clipboard monitoring merged just before it as #43)
-**CI on main:** green at `1a08571` (run 28628456095, 2026-07-02)
+**main HEAD:** `6ba62e8` (the #48 merge, B-GUI-001 native-stub/`get_direct_url`
+fix; #47 extraction-failure logging and #46 wordmark/titlebar just before it)
+**CI on main:** green at `6ba62e8` (run 28663551210, 2026-07-03)
 **Open PRs:** #1 (draft, untouched), plus the F-GUI-002 design-system
 foundation PR this entry describes
 
@@ -38,6 +38,19 @@ shipped default-off after live-testing found a real progress-contract
 regression for the one case it would have changed anything (see "Done" below).
 
 ## Done (recent)
+
+- **B-DL-008 — engine yt-dlp fallback ran on the dead direct URL**
+  (2026-07-03, base `6ba62e8`, PR pending) — found live in the #48 GUI
+  acceptance run: a TikTok download failed because its signed/session-bound
+  direct URL 403'd the native probe AND yt-dlp's `[generic]` extractor — the
+  fallback was handed the same direct URL the probe had just proven dead,
+  while the "yt-dlp runs on the page URL itself" comment only held for the
+  CLI. Fixed with `PageFallback` (original page URL + a `-f` spec that
+  reproduces the chosen format, `+bestaudio`-merging DASH-split video-only
+  formats): the queue path now calls `engine.download_with_fallback(...)`,
+  both yt-dlp routing exits use the page URL, and `download()` delegates
+  unchanged so the CLI path is untouched. Unit tests on selector precedence,
+  spec shapes, and fallback-target routing. See backlog B-DL-008.
 
 - **B-GUI-001 — GUI YouTube downloads dead: native stub broke `get_direct_url`**
   (2026-07-03, base `babe8e0`, PR pending) — ship-blocker found in the first
