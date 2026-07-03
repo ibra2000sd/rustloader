@@ -67,6 +67,23 @@ impl HybridExtractor {
 
     pub async fn get_direct_url(&self, url: &str, format_id: &str) -> Result<String> {
         let extractor = self.find_extractor(url);
-        extractor.get_direct_url(url, format_id).await
+        match extractor.get_direct_url(url, format_id).await {
+            Ok(direct_url) => Ok(direct_url),
+            Err(e) => {
+                // Same fallback-on-error contract as `extract_info`: a
+                // specialized extractor that can't resolve the URL must not
+                // kill the download when the fallback still can.
+                info!(
+                    "Primary extractor {} failed to resolve direct URL: {}. Retrying with fallback...",
+                    extractor.id(),
+                    e
+                );
+                if extractor.id() != self.fallback.id() {
+                    self.fallback.get_direct_url(url, format_id).await
+                } else {
+                    Err(e)
+                }
+            }
+        }
     }
 }

@@ -1,10 +1,7 @@
 use super::messages::{BackendCommand, BackendEvent};
 use crate::database::{DatabaseManager, DownloadRecord};
 use crate::downloader::{DownloadConfig, DownloadEngine};
-use crate::extractor::{
-    native::youtube::NativeYoutubeExtractor, Extractor, Format, HybridExtractor, VideoInfo,
-    YtDlpExtractor,
-};
+use crate::extractor::{Extractor, Format, HybridExtractor, VideoInfo, YtDlpExtractor};
 use crate::gui::DownloadProgressData;
 use crate::queue::{DownloadTask, EventLog, QueueManager, TaskStatus};
 use crate::utils::config::AppSettings;
@@ -59,10 +56,15 @@ impl BackendActor {
         // Initialize components
         // 1. Initialize Extractors
         let ytdlp = Arc::new(YtDlpExtractor::new()?.with_cookies(cookies.clone()));
-        let native_youtube = Arc::new(NativeYoutubeExtractor::new());
 
         // 2. Build Hybrid Registry
-        let extractors: Vec<Arc<dyn Extractor>> = vec![native_youtube];
+        //
+        // Empty native registry, same as the CLI (`cli.rs`). The native
+        // YouTube extractor is an unimplemented stub; registering it made
+        // every GUI YouTube download fail at `get_direct_url` (which routes
+        // by `supports()` and, unlike `extract_info`, used to have no
+        // fallback). Re-register it here once it actually extracts.
+        let extractors: Vec<Arc<dyn Extractor>> = Vec::new();
         let fallback = ytdlp;
         let hybrid_extractor = Arc::new(HybridExtractor::new(extractors, fallback));
         let extractor = hybrid_extractor;
@@ -239,6 +241,10 @@ impl BackendActor {
         let format = match Self::select_format(&video_info, format_id) {
             Ok(f) => f,
             Err(e) => {
+                // Log it: the error otherwise only surfaces to the GUI status
+                // bar, so a failed download start would be invisible to anyone
+                // reading the logs.
+                warn!("Format selection failed for {}: {}", video_info.url, e);
                 let _ = self.sender.send(BackendEvent::Error(e)).await;
                 return;
             }
@@ -248,6 +254,8 @@ impl BackendActor {
         let download_url = match self.get_download_url(&video_info, &format).await {
             Ok(url) => url,
             Err(e) => {
+                // Log it: same reasoning as the format-selection arm above.
+                warn!("Direct URL resolution failed for {}: {}", video_info.url, e);
                 let _ = self.sender.send(BackendEvent::Error(e)).await;
                 return;
             }
