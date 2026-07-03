@@ -39,6 +39,21 @@ regression for the one case it would have changed anything (see "Done" below).
 
 ## Done (recent)
 
+- **B-GUI-001 — GUI YouTube downloads dead: native stub broke `get_direct_url`**
+  (2026-07-03, base `babe8e0`, PR pending) — ship-blocker found in the first
+  interactive GUI test session: every GUI YouTube download died silently after
+  extraction because the actor registered the unimplemented
+  `NativeYoutubeExtractor` stub and `HybridExtractor::get_direct_url` had no
+  yt-dlp fallback (unlike `extract_info`). Fixed by giving the GUI the CLI's
+  empty native registry, adding the symmetric fallback to `get_direct_url`,
+  and logging the previously-silent `handle_start_download` error exits.
+  **Note on the native extractor:** `native/youtube.rs` remains a stub that
+  errors on both methods; it is now registered **nowhere**. Whoever implements
+  it re-registers it in `actor.rs` (and `cli.rs`, if desired) — the hybrid
+  fallback now degrades gracefully on both routes. Verified end-to-end at the
+  actor level (isolated HOME): StartDownload → queue task → segmented download
+  → 31 MB file + history row. See backlog B-GUI-001.
+
 - **F-GUI-002 — design-system foundation: theme tokens + fonts (phase 1)**
   (2026-07-03, base `1a08571`, PR pending) — the maintainer's Claude-Design
   kit is committed as `design-system/` (brand source of truth) and its

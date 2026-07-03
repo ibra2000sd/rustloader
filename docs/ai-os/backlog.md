@@ -106,6 +106,33 @@ guard is unchanged. Regression tests:
 `output_path_extension_is_provisional_only`. Source: master audit
 2026-07-01/02, finding 3.
 
+### B-GUI-001 — GUI YouTube downloads dead: unimplemented native stub broke `get_direct_url` · closed (PR open) · SMALL
+Pasting a YouTube URL in the GUI showed "Extracting…" then nothing — no
+downloads-panel row, no queue task, no history entry, reproducibly — while the
+same URL downloaded fine via CLI. Root cause (live-diagnosed 2026-07-03 on
+`babe8e0`): the GUI actor registered the **unimplemented**
+`NativeYoutubeExtractor` stub in its hybrid registry (`actor.rs`), and while
+`HybridExtractor::extract_info` falls back to yt-dlp when the stub errors,
+`get_direct_url` had **no fallback** (`hybrid.rs`) — so extraction succeeded,
+the GUI sent `StartDownload`, and `get_download_url` always died on the stub's
+`Err("Native extraction not implemented yet")`. The failure was fully silent:
+both error exits in `handle_start_download` sent `BackendEvent::Error`
+(status-bar text only) with no log line, the #47 warn only covers the
+extraction leg, and the stub's `get_direct_url` (unlike its `extract_info`)
+logs nothing. Not cookies (settings were empty; cookie config is opt-in,
+default `None`) and not yt-dlp (the identical command succeeded in 6.5s).
+**Fix:** the GUI now builds its `HybridExtractor` with an **empty native
+registry**, exactly like the proven CLI path (`cli.rs`) — re-register the
+native extractor only once it actually extracts; `HybridExtractor::
+get_direct_url` gained the same fallback-on-error retry `extract_info` has
+(defense in depth for any future native extractor); and both
+`handle_start_download` error exits now `warn!` with url + error (#47 style),
+closing the observability gap. Verified end-to-end at the actor level under an
+isolated HOME: `ExtractInfo` → `ExtractionCompleted(Ok)` → `StartDownload` →
+queue task created → segmented native download of the resolved direct URL →
+31 MB file landed + history row persisted. Source: interactive GUI test
+session, 2026-07-03.
+
 ## P2
 
 ### F-DL-001 — Shape A: use aria2c as yt-dlp's external downloader · closed (opt-in) · SMALL (XS)
