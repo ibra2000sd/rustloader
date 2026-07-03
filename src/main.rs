@@ -34,9 +34,26 @@ fn main() -> Result<()> {
         window: iced::window::Settings {
             size: iced::Size::new(900.0, 600.0),
             min_size: Some(iced::Size::new(800.0, 500.0)),
-            decorations: true, // Keep decorations for now as custom title bars are complex in Iced without winit direct access
-            transparent: false, // Transparency can be tricky across platforms
+            // Native decorations stay ON: the merged titlebar below keeps the
+            // real macOS traffic lights and native dragging — no custom-drawn
+            // window buttons.
+            decorations: true,
+            // NOT window transparency: the app's own dark surface must fill
+            // the titlebar area, not the desktop behind the window.
+            transparent: false,
             icon: gui::icon::load_icon(), // Load application icon
+            // macOS merged titlebar: hide the title text, make the titlebar
+            // transparent, and extend the content to the top edge
+            // (`titlebarAppearsTransparent` + `titleVisibility = .hidden` +
+            // `.fullSizeContentView` via winit's `WindowBuilderExtMacOS`).
+            // The traffic lights float over the sidebar, which reserves
+            // top-left clearance for them (see `gui/app.rs`).
+            #[cfg(target_os = "macos")]
+            platform_specific: iced::window::settings::PlatformSpecific {
+                title_hidden: true,
+                titlebar_transparent: true,
+                fullsize_content_view: true,
+            },
             ..Default::default()
         },
         // Design-system typefaces (design-system/tokens/typography.css):
