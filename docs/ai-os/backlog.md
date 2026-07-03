@@ -179,6 +179,36 @@ tests cover the selector precedence, both `PageFallback` spec shapes, and the
 fallback-target routing. Source: interactive GUI acceptance session,
 2026-07-03.
 
+### B-GUI-003 — Quality selector ignored: every GUI download got max resolution · closed (PR open) · SMALL-MEDIUM
+Reported by the maintainer, verified at `0d53329`: the dropdown stored the
+choice correctly (`app.rs` `QualityChanged` → `VideoQuality::Specific("480")`)
+but it never travelled — the auto-start path sent `StartDownload` with
+`format_id: None` and no quality, and `select_format(…, None)` picked max
+resolution unconditionally (`max_by_key(width*height)`). Three sibling leaks:
+the dropdown *displayed* `Specific(_)` as "Custom" (matches no pick_list
+option, renders blank); save flattened `Specific(_)` to `"Custom"`; load
+mapped anything but Best/Worst to Best — so the choice also silently reverted
+across restarts. **Fix:** `StartDownload` carries `quality: VideoQuality`;
+`select_format` honours it — `Best` byte-identical to the old behaviour
+(progressive-first, DASH/direct fallback), `Specific(h)` picks the best
+format with `height <= h` across all formats (progressive preferred at equal
+resolution; nothing under the cap → nearest above; heightless direct files
+still selectable), `Worst` picks the smallest with a video track. The choice
+travels as a concrete format id, so the native engine downloads its resolved
+URL and the B-DL-008 `PageFallback` reproduces it on the yt-dlp path —
+no engine changes. Display renders `Specific(h)` as "{h}p"; persistence
+round-trips the height (legacy `"Custom"` rows still load as Best).
+Acceptance (real runs, isolated HOME, same YouTube video):
+480→854×480, 720→1280×720, 1080→1920×1080 by ffprobe; TikTok/Facebook
+downloads still succeed. Unit tests cover the cap, tie-preference, nearest-
+above, heightless, Worst-not-audio, id-outranks-quality, and the settings
+round-trip; `tests/quality_acceptance.rs` (`#[ignore]`, real network) encodes
+the acceptance. Known limitation, pre-existing and unchanged: `Best` still
+means "best progressive", so YouTube `Best` yields 360p (its only progressive
+format) while `Specific(1080)` yields 1080p — filed as an adjacent
+observation, not fixed here. Source: maintainer bug report + fix session,
+2026-07-03.
+
 ## P2
 
 ### F-DL-001 — Shape A: use aria2c as yt-dlp's external downloader · closed (opt-in) · SMALL (XS)

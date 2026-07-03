@@ -390,7 +390,11 @@ impl Application for RustloaderApp {
                                     self.backend_sender.try_send(BackendCommand::StartDownload {
                                         video_info: Box::new(video_info),
                                         output_path,
-                                        format_id: None, // Auto format
+                                        // No explicit format: the backend picks
+                                        // one honouring the quality choice
+                                        // (B-GUI-003 — it used to be ignored).
+                                        format_id: None,
+                                        quality: self.quality.clone(),
                                     });
                             }
                             Err(e) => {
@@ -1011,10 +1015,13 @@ impl Application for RustloaderApp {
         let content = match self.current_view {
             View::Main => {
                 use crate::gui::views::main_view;
-                let quality_str = match self.quality {
-                    VideoQuality::Best => "Best Available",
-                    VideoQuality::Worst => "Worst Available",
-                    VideoQuality::Specific(_) => "Custom",
+                // "{h}p" matches the pick_list option strings ("480p", …), so
+                // the dropdown shows the actual selection — it used to say
+                // "Custom", which matches no option and rendered blank.
+                let quality_str = match &self.quality {
+                    VideoQuality::Best => "Best Available".to_string(),
+                    VideoQuality::Worst => "Worst Available".to_string(),
+                    VideoQuality::Specific(h) => format!("{h}p"),
                 };
                 main_view(
                     &self.url_input,
@@ -1022,7 +1029,7 @@ impl Application for RustloaderApp {
                     &self.status_message,
                     self.is_extracting,
                     self.url_error.as_deref(),
-                    quality_str,
+                    &quality_str,
                     self.segments_per_download,
                     self.detected_url.as_deref(),
                 )
@@ -1118,11 +1125,14 @@ async fn load_settings_from_db(db_manager: &DatabaseManager) -> Result<AppSettin
         }
     }
 
-    // Load quality
+    // Load quality. A numeric value is a saved `Specific` height (see
+    // `save_settings_to_db`); anything else — including the legacy "Custom"
+    // that older builds wrote for every `Specific` choice — falls back to Best.
     if let Some(value) = db_manager.get_setting("quality").await? {
         settings.quality = match value.as_str() {
             "Best" => VideoQuality::Best,
             "Worst" => VideoQuality::Worst,
+            h if h.parse::<u32>().is_ok() => VideoQuality::Specific(h.to_string()),
             _ => VideoQuality::Best,
         };
     }
@@ -1160,12 +1170,14 @@ async fn save_settings_to_db(db_manager: &DatabaseManager, settings: &AppSetting
         .save_setting("segments", &settings.segments.to_string())
         .await?;
 
-    let quality_str = match settings.quality {
-        VideoQuality::Best => "Best",
-        VideoQuality::Worst => "Worst",
-        VideoQuality::Specific(_) => "Custom",
+    // `Specific` persists its height (e.g. "480") so it round-trips; it used
+    // to be flattened to "Custom", which loaded back as Best.
+    let quality_str = match &settings.quality {
+        VideoQuality::Best => "Best".to_string(),
+        VideoQuality::Worst => "Worst".to_string(),
+        VideoQuality::Specific(h) => h.clone(),
     };
-    db_manager.save_setting("quality", quality_str).await?;
+    db_manager.save_setting("quality", &quality_str).await?;
 
     db_manager
         .save_setting(
@@ -1232,6 +1244,45 @@ mod settings_tests {
         assert_eq!(loaded.max_concurrent, 7);
         assert_eq!(loaded.segments, 12);
         assert!(loaded.clipboard_monitoring);
+
+        std::fs::remove_file(&db_path).ok();
+    }
+
+    // B-GUI-003: a `Specific` quality must survive a save/load round-trip. It
+    // used to be flattened to "Custom" on save and loaded back as Best.
+    #[tokio::test]
+    async fn specific_quality_round_trips_through_db() {
+        use crate::utils::config::VideoQuality;
+
+        let dir = std::env::temp_dir().join(format!("rl-quality-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("settings.db");
+        let _ = std::fs::remove_file(&db_path);
+        let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
+
+        let pool = initialize_database(&db_url).await.expect("init db");
+        let db = DatabaseManager::new(pool);
+
+        let settings = AppSettings {
+            quality: VideoQuality::Specific("480".to_string()),
+            ..AppSettings::default()
+        };
+        save_settings_to_db(&db, &settings).await.expect("save");
+        assert_eq!(
+            db.get_setting("quality").await.expect("get").as_deref(),
+            Some("480")
+        );
+        let loaded = load_settings_from_db(&db).await.expect("load");
+        assert!(
+            matches!(&loaded.quality, VideoQuality::Specific(h) if h == "480"),
+            "loaded {:?}",
+            loaded.quality
+        );
+
+        // The legacy value older builds wrote must not wedge the load.
+        db.save_setting("quality", "Custom").await.expect("save");
+        let loaded = load_settings_from_db(&db).await.expect("load");
+        assert!(matches!(loaded.quality, VideoQuality::Best));
 
         std::fs::remove_file(&db_path).ok();
     }
