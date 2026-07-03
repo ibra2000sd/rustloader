@@ -55,3 +55,110 @@ jobs:
         run: |
           cargo install cargo-audit
           cargo audit
+
+  # Runtime smoke gate: `cargo test` proves the code compiles and unit tests
+  # pass, but never RUNS the shipped binary. This job builds the release
+  # binary on each supported OS, launches it (`--version`), and performs one
+  # real CLI download of a pinned release asset through the native segmented
+  # engine (served as application/octet-stream with range support, >1 MB, so
+  # it takes the segmented path — see src/downloader/engine.rs routing).
+  smoke:
+    name: Runtime smoke on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            pkg-config
+
+      # The CLI hard-requires a yt-dlp binary at startup (YtDlpExtractor::new
+      # in src/cli.rs fails without one), even for direct-file downloads that
+      # never invoke it for the transfer itself.
+      - name: Set up Python (for yt-dlp)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install yt-dlp
+        run: pip install yt-dlp
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: 'Smoke: binary launches (--version)'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin=target/release/rustloader
+          if [ "$RUNNER_OS" = "Windows" ]; then bin=target/release/rustloader.exe; fi
+          out="$("$bin" --version)"
+          echo "--version output: $out"
+          case "$out" in
+            *0.9.0*) echo "version OK" ;;
+            *) echo "FAIL: expected 0.9.0 in --version output" >&2; exit 1 ;;
+          esac
+
+      - name: 'Smoke: real download via the native segmented engine'
+        shell: bash
+        env:
+          # Pinned release asset of this repo: stable, public, supports range
+          # requests, served as application/octet-stream (native-engine path).
+          SMOKE_URL: https://github.com/ibra2000sd/rustloader/releases/download/v0.8.1/rustloader-linux-x86_64.tar.gz
+          SMOKE_SIZE: '6091105'
+          # From the release's SHA256SUMS.txt, independently re-verified.
+          SMOKE_SHA256: 532409dc25b9747eba12cf449c80c099fe8ba8cfd1106ca300fbc2fbb3795ad2
+        run: |
+          set -euo pipefail
+          bin=target/release/rustloader
+          if [ "$RUNNER_OS" = "Windows" ]; then bin=target/release/rustloader.exe; fi
+          dl=smoke-download
+          rm -rf "$dl" && mkdir "$dl"
+
+          "$bin" "$SMOKE_URL" -o "$dl" | tee smoke.log
+          grep -q "Done. Saved to" smoke.log
+
+          # The CLI derives the final filename from the content (title +
+          # content-derived extension), so locate the file by its hash
+          # instead of assuming a fixed name.
+          sha() {
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "$1" | awk '{print $1}'
+            else
+              shasum -a 256 "$1" | awk '{print $1}'
+            fi
+          }
+          match=""
+          for f in "$dl"/*; do
+            [ -f "$f" ] || continue
+            echo "downloaded file: $f ($(wc -c < "$f") bytes)"
+            if [ "$(sha "$f")" = "$SMOKE_SHA256" ]; then match="$f"; fi
+          done
+          if [ -z "$match" ]; then
+            echo "FAIL: no downloaded file matches the expected sha256" >&2
+            exit 1
+          fi
+          size=$(wc -c < "$match")
+          if [ "$size" -ne "$SMOKE_SIZE" ]; then
+            echo "FAIL: size $size != expected $SMOKE_SIZE" >&2
+            exit 1
+          fi
+          echo "OK: $match ($size bytes, sha256 verified)"
