@@ -40,6 +40,17 @@ history** with a GUI view, and a batch of GUI and reliability fixes.
 - **Project docs/AI operating pack**: `CLAUDE.md` + `docs/ai-os/`
   (architecture, invariants, backlog, status, ADRs) (#24, #38) and a
   `.claude/skills` layer (#26).
+- **Opt-in clipboard monitoring**: a Settings toggle (default OFF) watches
+  for copied URLs and surfaces a confirm/dismiss banner on the Downloads
+  view; confirming queues the URL through the normal extraction path —
+  nothing ever auto-downloads, and clipboard text is never stored, logged,
+  or transmitted (#43).
+- **Design-system foundation**: the GUI theme rewritten to the brand token
+  palette (warm near-black surfaces, rust accent, amber reserved for live
+  data), with Geist and Geist Mono bundled (OFL-1.1) as the default fonts
+  (#45); plus the "Rustloader" wordmark and, on macOS, a merged transparent
+  titlebar — the dark UI extends to the top edge with the native traffic
+  lights floating over it (#46).
 
 ### 🐛 Fixed
 - **GUI: downloads actually start** — format selection no longer blocks
@@ -64,6 +75,39 @@ history** with a GUI view, and a batch of GUI and reliability fixes.
 - **Saved file extension reflects the actual content** (probe `Content-Type`
   → redirect-resolved URL → caller's hint), so an `audio/mpeg` file saves as
   `.mp3` and an installer as `.exe` instead of a blanket `.mp4` (#39).
+- **Unknown/binary content saves under a sensible name**: non-media downloads
+  (e.g. `application/octet-stream`) no longer fall through to a blanket
+  `.mp4` — the final name is derived from media `Content-Type` → URL-path
+  extension → `Content-Disposition` filename → URL basename → `.bin`, and a
+  server/URL-provided name replaces bare-UUID names; the native path also
+  creates a missing output directory instead of failing (#44).
+- **Non-timeout extraction failures are now logged** with the URL and error —
+  previously only the 60s-timeout path logged, so a failed extraction (e.g. a
+  transient bot-check) surfaced only in the GUI and could not be diagnosed
+  after the fact (#47).
+- **GUI downloads no longer die silently after extraction**: the actor no
+  longer registers the unimplemented native YouTube extractor stub, and
+  `get_direct_url` gained the same yt-dlp fallback-on-error that
+  `extract_info` already had; both start-download error exits are now
+  logged (#48).
+- **The yt-dlp fallback runs on the original page URL with the chosen
+  format** instead of re-running yt-dlp on the same dead direct URL, so
+  signed/session-bound direct URLs (TikTok; YouTube DASH behaves the same)
+  no longer fail the fallback identically to the native probe (#49).
+- **Non-Latin titles no longer render as tofu boxes**: content-derived text
+  (titles, error messages, output paths) now uses Advanced text shaping, so
+  Arabic/CJK/emoji fall back to system fonts per script — a regression from
+  the Latin-only Geist introduced in #45 (#50).
+- **The quality selector actually constrains the download**: the dropdown
+  choice now travels with the start-download command and format selection
+  honours it — previously every GUI download got the highest resolution
+  regardless, and the selection displayed and persisted as "Custom" (#51).
+- **"Best" means true best — highest resolution, merged with audio**: Best
+  now selects the highest-resolution format across ALL formats instead of
+  preferring progressive (YouTube serves no progressive above 360p, so the
+  default quality silently gave 360p); and video-only picks are downloaded
+  via the page URL with a `+bestaudio` merge, fixing videos that previously
+  downloaded silent (#52).
 
 ### 🔧 Changed
 - `KNOWN_ISSUES.md` rewritten against the verified current state (#32).
@@ -71,6 +115,10 @@ history** with a GUI view, and a batch of GUI and reliability fixes.
   quick-xml RUSTSEC-2026-0194/-0195 advisories (build-time-only dependency of
   the Linux Wayland codegen path; no runtime exposure) in
   `.cargo/audit.toml` (#40).
+- **Release workflow**: hyphenated tags (e.g. `v0.9.0-rc.1`) now publish as
+  GitHub pre-releases — never marked "Latest" — so an rc dry-run cannot
+  displace the current stable release; the unused `workflow_dispatch`
+  version input was removed (#42).
 
 ---
 
