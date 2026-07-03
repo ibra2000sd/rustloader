@@ -29,6 +29,11 @@ const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(900);
 #[tokio::test]
 #[ignore = "real network + yt-dlp; run manually per quality (see module doc)"]
 async fn downloads_at_selected_quality() {
+    // Surface backend/engine logs (which format was selected and which `-f`
+    // spec the yt-dlp fallback ran with) when RUST_LOG is set. try_init: a
+    // second in-process run must not panic on the existing subscriber.
+    let _ = tracing_subscriber::fmt::try_init();
+
     let url = std::env::var("RL_TEST_URL")
         .unwrap_or_else(|_| "https://www.youtube.com/watch?v=aqz-KE-bpKQ".to_string());
     let quality_arg = std::env::var("RL_QUALITY").unwrap_or_else(|_| "best".to_string());
