@@ -309,7 +309,10 @@ impl Application for RustloaderApp {
     }
 
     fn title(&self) -> String {
-        String::from("Rustloader - High-Performance Video Downloader")
+        // Hidden in the merged macOS titlebar (`title_hidden`, see
+        // `main.rs`); still shown in Mission Control, the Dock, and the
+        // Windows/Linux titlebars.
+        String::from("Rustloader")
     }
 
     fn update(&mut self, message: Message) -> Command<Message> {
@@ -929,19 +932,36 @@ impl Application for RustloaderApp {
         use iced::widget::{button, column, container, row, text, Space};
         use iced::Length;
 
+        // With the merged macOS titlebar (fullsize content view, see
+        // `main.rs`) the native traffic lights float over the top-left of
+        // the window; extra top padding keeps them clear of the wordmark.
+        // Other platforms keep a real titlebar above the content, so the
+        // original uniform padding stands.
+        #[cfg(target_os = "macos")]
+        let wordmark_padding = iced::Padding {
+            top: 38.0,
+            right: 20.0,
+            bottom: 20.0,
+            left: 20.0,
+        };
+        #[cfg(not(target_os = "macos"))]
+        let wordmark_padding = iced::Padding::new(20.0);
+
         // Sidebar
         let sidebar = container(
             column![
                 // App Title / Logo Area
-                // Brand lockup: lowercase wordmark in Geist SemiBold (readme:
-                // there is no logo asset beyond the app icon).
+                // Brand lockup: "Rustloader" wordmark in Geist SemiBold (the
+                // maintainer's capital-R override of the design-system
+                // readme's lowercase suggestion; there is no logo asset
+                // beyond the app icon).
                 container(
-                    text("rustloader")
+                    text("Rustloader")
                         .size(24)
                         .font(theme::FONT_UI_SEMIBOLD)
                         .style(theme::TEXT_PRIMARY),
                 )
-                .padding(20),
+                .padding(wordmark_padding),
                 Space::with_height(20),
                 // Navigation Items
                 button(text("Downloads").size(16))
