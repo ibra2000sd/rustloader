@@ -1,0 +1,48 @@
+<!-- @dsCard group="Components" viewport="700x300" name="Data — SegmentBar, ProgressBar, StatTile" subtitle="The signature parallel-segment visual + state colors" -->
+<!DOCTYPE html>
+<html>
+<head>
+<link rel="stylesheet" href="../../styles.css">
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="../../_ds_bundle.js"></script>
+<style>body { margin: 0; background: var(--bg-0); }
+.lbl { font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg-3); width: 90px; flex-shrink: 0; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { SegmentBar, ProgressBar, StatTile } = window.RustloaderDesignSystem_48af0e;
+const segs = [100,100,84,61,90,42,100,77,55,68,100,31,88,49,72,60];
+const Row = ({ label, children }) => (
+  <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+    <span className="lbl">{label}</span>
+    <div style={{ flex: 1 }}>{children}</div>
+  </div>
+);
+ReactDOM.createRoot(document.getElementById("root")).render(
+  <div style={{ display: "flex", flexDirection: "column", gap: 12, padding: "18px 24px" }}>
+    <Row label="segments · live"><SegmentBar segments={segs} /></Row>
+    <Row label="paused"><SegmentBar segments={segs} status="paused" height={8} /></Row>
+    <Row label="queued"><SegmentBar count={16} status="queued" height={8} /></Row>
+    <Row label="downloading"><ProgressBar value={62} /></Row>
+    <Row label="complete"><ProgressBar value={100} status="complete" /></Row>
+    <Row label="stalled / error">
+      <div style={{ display: "flex", gap: 12 }}>
+        <ProgressBar value={38} status="stalled" style={{ flex: 1 }} />
+        <ProgressBar value={54} status="error" style={{ flex: 1 }} />
+      </div>
+    </Row>
+    <div style={{ display: "flex", gap: 10, marginTop: 4 }}>
+      <StatTile label="Aggregate" value="12.8" unit="MB/s" icon="gauge" hot />
+      <StatTile label="Active" value={3} icon="download" />
+      <StatTile label="Queued" value={2} icon="inbox" />
+      <StatTile label="Segments" value="48" icon="layers" />
+    </div>
+  </div>
+);
+</script>
+</body>
+</html>

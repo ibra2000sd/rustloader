@@ -40,6 +40,7 @@ pub fn settings_view(
         row![
             text_input("", download_location)
                 .on_input(crate::gui::app::Message::DownloadLocationChanged)
+                .font(crate::gui::theme::FONT_MONO) // paths are data
                 .padding(12)
                 .width(Length::Fill)
                 .style(iced::theme::TextInput::Custom(Box::new(
@@ -71,6 +72,7 @@ pub fn settings_view(
                 Space::with_width(Length::Fill),
                 text(format!("{}", max_concurrent))
                     .size(14)
+                    .font(crate::gui::theme::FONT_MONO)
                     .style(iced::theme::Text::Color(crate::gui::theme::TEXT_PRIMARY)),
             ],
             slider(1..=10, max_concurrent as u8, |v| {
@@ -88,6 +90,7 @@ pub fn settings_view(
                 Space::with_width(Length::Fill),
                 text(format!("{}", segments))
                     .size(14)
+                    .font(crate::gui::theme::FONT_MONO)
                     .style(iced::theme::Text::Color(crate::gui::theme::TEXT_PRIMARY)),
             ],
             slider(4..=32, segments as u8, |v| {
@@ -228,7 +231,7 @@ pub fn settings_view(
         .width(Length::Fill)
         .height(Length::Fill)
         .style(iced::theme::Container::Custom(Box::new(
-            crate::gui::theme::MainGradientContainer,
+            crate::gui::theme::WindowContainer,
         )))
         .into()
 }

@@ -24,7 +24,7 @@ pub fn main_view(
         column![
             text("Download Video")
                 .size(30)
-                .style(iced::theme::Text::Color(theme::GRAY_800)),
+                .style(iced::theme::Text::Color(theme::FG_1)),
             url_input(
                 url_value,
                 Message::UrlInputChanged,
@@ -58,7 +58,7 @@ pub fn main_view(
                     column![
                         text("Quality")
                             .size(11)
-                            .style(iced::theme::Text::Color(theme::GRAY_500)),
+                            .style(iced::theme::Text::Color(theme::FG_3)),
                         pick_list(
                             vec![
                                 "Best Available".to_string(),
@@ -82,10 +82,10 @@ pub fn main_view(
                     column![
                         text("Format")
                             .size(11)
-                            .style(iced::theme::Text::Color(theme::GRAY_500)),
+                            .style(iced::theme::Text::Color(theme::FG_3)),
                         text("MP4")
                             .size(12)
-                            .style(iced::theme::Text::Color(theme::GRAY_800)),
+                            .style(iced::theme::Text::Color(theme::FG_1)),
                     ]
                     .spacing(4)
                 )
@@ -97,11 +97,12 @@ pub fn main_view(
                         row![
                             text("Segments")
                                 .size(11)
-                                .style(iced::theme::Text::Color(theme::GRAY_500)),
+                                .style(iced::theme::Text::Color(theme::FG_3)),
                             Space::with_width(iced::Length::Fill),
                             text(format!("{}", segments))
                                 .size(11)
-                                .style(iced::theme::Text::Color(theme::GRAY_800)),
+                                .font(theme::FONT_MONO)
+                                .style(iced::theme::Text::Color(theme::FG_1)),
                         ],
                         iced::widget::slider(4..=32, segments as u8, |v| Message::SegmentsChanged(
                             v as usize
@@ -129,10 +130,10 @@ pub fn main_view(
             column![
                 text("No active downloads")
                     .size(16)
-                    .style(iced::theme::Text::Color(theme::GRAY_500)),
+                    .style(iced::theme::Text::Color(theme::FG_2)),
                 text("Your downloads will appear here")
                     .size(14)
-                    .style(iced::theme::Text::Color(theme::GRAY_400)),
+                    .style(iced::theme::Text::Color(theme::FG_3)),
             ]
             .spacing(10)
             .align_items(Alignment::Center),
@@ -146,7 +147,7 @@ pub fn main_view(
         let mut downloads_col = column![row![
             text("Active Downloads")
                 .size(24)
-                .style(iced::theme::Text::Color(theme::GRAY_800)),
+                .style(iced::theme::Text::Color(theme::FG_1)),
             Space::with_width(Length::Fill),
             button(text("Resume All").size(14))
                 .on_press(Message::ResumeAll)
@@ -185,10 +186,11 @@ pub fn main_view(
                 column![
                     text("Copied link detected — download it?")
                         .size(14)
-                        .style(iced::theme::Text::Color(theme::GRAY_800)),
+                        .style(iced::theme::Text::Color(theme::FG_1)),
                     text(url.to_string())
                         .size(12)
-                        .style(iced::theme::Text::Color(theme::GRAY_500)),
+                        .font(theme::FONT_MONO)
+                        .style(iced::theme::Text::Color(theme::FG_3)),
                 ]
                 .spacing(4)
                 .width(Length::Fill),
@@ -239,11 +241,11 @@ impl iced::widget::container::StyleSheet for InfoTagStyle {
         use crate::gui::theme;
 
         iced::widget::container::Appearance {
-            background: Some(iced::Background::Color(theme::GRAY_100)),
+            background: Some(iced::Background::Color(theme::BG_1)),
             border: iced::Border {
-                color: theme::GRAY_200,
+                color: theme::BORDER_HAIRLINE,
                 width: 1.0,
-                radius: 10.0.into(),
+                radius: theme::RADIUS_CONTROL.into(),
             },
             ..Default::default()
         }

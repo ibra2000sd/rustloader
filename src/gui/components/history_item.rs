@@ -73,15 +73,23 @@ pub fn history_item(record: &DownloadRecord) -> Element<'static, Message> {
 
     content = content
         .push(
+            // Paths, sizes, and timestamps are data — Geist Mono.
             text(record.output_path.display().to_string())
                 .size(12)
+                .font(theme::FONT_MONO)
                 .style(iced::theme::Text::Color(theme::TEXT_SECONDARY)),
         )
         .push(
             row![
-                text(size_text).size(12).style(theme::TEXT_SECONDARY),
+                text(size_text)
+                    .size(12)
+                    .font(theme::FONT_MONO)
+                    .style(theme::TEXT_SECONDARY),
                 Space::with_width(Length::Fill),
-                text(timestamp).size(12).style(theme::TEXT_SECONDARY),
+                text(timestamp)
+                    .size(12)
+                    .font(theme::FONT_MONO)
+                    .style(theme::TEXT_SECONDARY),
             ]
             .spacing(10)
             .align_items(Alignment::Center),

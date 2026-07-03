@@ -1,0 +1,22 @@
+/* Rustloader motion — functional only; explains state, never sparkles */
+:root {
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1); /* @kind other */
+  --ease-in-out: cubic-bezier(0.45, 0, 0.15, 1); /* @kind other */
+  --dur-fast: 120ms; /* @kind other */
+  --dur-med: 220ms; /* @kind other */
+  --dur-slow: 400ms; /* @kind other */
+}
+
+/* Active-transfer pulse — subtle; honoured off under reduced motion */
+@keyframes rl-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-fast: 0ms; /* @kind other */
+    --dur-med: 0ms; /* @kind other */
+    --dur-slow: 0ms; /* @kind other */
+  }
+}

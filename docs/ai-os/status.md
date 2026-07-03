@@ -3,15 +3,15 @@
 > Update at the end of any session that lands work. This file — not `ROADMAP.md`
 > or `README.md` — is the live source of truth for "where are we".
 
-**As of:** 2026-07-02
+**As of:** 2026-07-03
 **Released version:** v0.8.1 (first published release, 2026-06-29); **v0.9.0
 staged** — version bump + docs merged to main (#41), tag/release execution
 still pending (maintainer action)
-**main HEAD:** `e8ebbe1` (the #42 merge, release-workflow pre-release fix;
-supersedes the earlier `e6cd092`/#40 stamp — #41 and #42 have since merged)
-**CI on main:** green at `e8ebbe1` (run 28605062669, 2026-07-02)
-**Open PRs:** #1 (draft, untouched), plus the F-GUI-001 clipboard-monitoring
-PR this entry describes
+**main HEAD:** `1a08571` (the #44 merge, B-DL-007 output-dir/naming fix;
+F-GUI-001 clipboard monitoring merged just before it as #43)
+**CI on main:** green at `1a08571` (run 28628456095, 2026-07-02)
+**Open PRs:** #1 (draft, untouched), plus the F-GUI-002 design-system
+foundation PR this entry describes
 
 ## Where the project is
 
@@ -39,6 +39,27 @@ regression for the one case it would have changed anything (see "Done" below).
 
 ## Done (recent)
 
+- **F-GUI-002 — design-system foundation: theme tokens + fonts (phase 1)**
+  (2026-07-03, base `1a08571`, PR pending) — the maintainer's Claude-Design
+  kit is committed as `design-system/` (brand source of truth) and its
+  achievable-in-Iced subset applied. `src/gui/theme.rs` rewritten to the
+  exact `tokens/colors.css` dark palette (warm near-black surfaces
+  `#0A0908→#23201B`, rust accent `#CF6F38` hover `#DE8B54` pressed `#A9572B`,
+  amber `#E9B44C` reserved for live data, warm status green/amber/red), the
+  radius scale (4 bars / 8 controls / 10 cards), and the readme's documented
+  Iced fallbacks (glass → solid `--bg-2` card + hairline, no gradients,
+  default motion). Geist + Geist Mono (OFL-1.1, vercel/geist-font v1.7.2
+  static TTFs, license bundled at `assets/fonts/OFL.txt`) are embedded and
+  registered via `Settings::fonts`; Geist is the default font and every
+  speed/size/ETA/count/path/timestamp/URL renders in Geist Mono. Iced's
+  built-in widget palette maps to the tokens via `Theme::custom` in
+  `app.rs::theme()`. The app/window icon was **already wired** at HEAD
+  (`gui::icon::load_icon()` in `main.rs`, `AppIcon.icns` in the bundle
+  scripts; the kit's PNGs are byte-identical to `assets/icons/`) — verified,
+  not re-done. Per-component restyling (SegmentBar, bento stat tiles,
+  DownloadItem states), the light theme, Lucide icons, and the fixed
+  1080×720 window are explicitly **later phases**. No engine/queue/
+  persistence change; I-3 untouched.
 - **B-DL-007 — native download output handling** (2026-07-02, base `68c0ee0`, PR
   pending) — two pre-ship smoke findings in `src/downloader/engine.rs` (+ a
   truthful-error tweak in `src/cli.rs`): (1) unknown/`application/octet-stream`

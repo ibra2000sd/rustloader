@@ -1,0 +1,20 @@
+<!-- @dsCard group="Type" viewport="700x150" name="Micro-labels" subtitle="Uppercase mono tags, 10px, 0.08em tracking" -->
+<!DOCTYPE html>
+<html>
+<head>
+<link rel="stylesheet" href="../styles.css">
+<style>
+body { margin: 0; background: var(--bg-0); height: 150px; display: flex; align-items: center; justify-content: center; gap: 10px; }
+.tag { font-family: var(--font-mono); font-size: var(--text-2xs); letter-spacing: var(--tracking-caps); text-transform: uppercase; color: var(--fg-3); background: var(--bg-2); border: 1px solid var(--border-hairline); border-radius: var(--radius-xs); padding: 5px 8px; }
+.tag.accent { color: var(--rust-300); background: var(--bg-accent-soft); border-color: var(--border-accent); }
+.tag.hot { color: var(--data-hot); background: var(--bg-warning-soft); border-color: rgba(233,180,76,0.35); }
+</style>
+</head>
+<body>
+<span class="tag accent">mp4 · 1080p</span>
+<span class="tag">youtube.com</span>
+<span class="tag">16 seg</span>
+<span class="tag hot">live</span>
+<span class="tag">queued</span>
+</body>
+</html>

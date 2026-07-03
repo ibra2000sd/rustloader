@@ -46,8 +46,10 @@ pub fn progress_bar(
 
     column![
         bar,
+        // ETA is data — Geist Mono per the design system.
         text(eta_text)
             .size(12)
+            .font(crate::gui::theme::FONT_MONO)
             .style(iced::theme::Text::Color(crate::gui::theme::TEXT_SECONDARY)),
     ]
     .spacing(6)

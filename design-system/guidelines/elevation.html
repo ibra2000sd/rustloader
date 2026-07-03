@@ -1,0 +1,17 @@
+<!-- @dsCard group="Effects" viewport="700x170" name="Elevation & machined panels" subtitle="Hairlines + inset top-highlight + soft warm shadows; subtle glass (web-only)" -->
+<!DOCTYPE html>
+<html>
+<head>
+<link rel="stylesheet" href="../styles.css">
+<style>
+body { margin: 0; background: var(--bg-0); height: 170px; display: flex; align-items: center; justify-content: center; gap: 16px; font-family: var(--font-mono); font-size: 10px; color: var(--fg-3); }
+.p { width: 150px; height: 100px; border-radius: var(--radius-lg); padding: 10px; box-sizing: border-box; display: flex; align-items: flex-end; }
+</style>
+</head>
+<body>
+<div class="p" style="background:var(--bg-1);border:1px solid var(--border-hairline);box-shadow:var(--shadow-1),var(--inset-highlight)">panel · shadow-1</div>
+<div class="p" style="background:var(--bg-2);border:1px solid var(--border-hairline);box-shadow:var(--shadow-2),var(--inset-highlight)">card · shadow-2</div>
+<div class="p" style="background:var(--bg-glass);backdrop-filter:var(--glass-blur);border:1px solid var(--border-strong);box-shadow:var(--shadow-3)">glass · web-only</div>
+<div class="p" style="background:var(--bg-2);border:1px solid var(--border-accent);box-shadow:var(--shadow-accent)">accent glow · CTA</div>
+</body>
+</html>

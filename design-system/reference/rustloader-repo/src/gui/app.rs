@@ -1,0 +1,1210 @@
+//! Main GUI application
+#![allow(dead_code, unused_imports, unused_variables, unused_mut)]
+
+use crate::backend::{BackendActor, BackendCommand, BackendEvent};
+use crate::database::{initialize_database, DatabaseManager, DownloadRecord};
+use crate::extractor::VideoInfo;
+use crate::gui::clipboard;
+use crate::gui::clipboard_monitor::ClipboardWatch;
+use std::time::Instant;
+// DownloadProgressData defined below
+use crate::queue::TaskStatus;
+use crate::utils::config::{AppSettings, VideoQuality};
+
+use anyhow::Result;
+use iced::{executor, Application, Command, Element, Subscription, Theme};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use tokio::runtime::Runtime;
+use tokio::sync::mpsc;
+use tracing::error;
+use uuid::Uuid;
+
+/// Main application state
+pub struct RustloaderApp {
+    // Core components
+    backend_sender: mpsc::Sender<BackendCommand>,
+    backend_receiver: Arc<Mutex<Option<mpsc::Receiver<BackendEvent>>>>,
+    db_manager: Arc<DatabaseManager>,
+    // Keep a long-lived runtime so backend tasks stay alive
+    runtime: Arc<Runtime>,
+
+    // UI State
+    current_view: View,
+    url_input: String,
+    status_message: String,
+
+    // Download tasks
+    active_downloads: Vec<DownloadTaskUI>,
+
+    // Download history (Shape-3 PR-2): a read/delete-only projection of the
+    // persisted `downloads` table (#34). Never a second authority over live
+    // task state — the queue above remains authoritative for in-flight work.
+    history: Vec<DownloadRecord>,
+    history_loading: bool,
+    history_error: Option<String>,
+
+    // Settings
+    download_location: String,
+    max_concurrent: usize,
+    segments_per_download: usize,
+    quality: VideoQuality,
+    /// Browser to read cookies from for authenticated sites (yt-dlp
+    /// `--cookies-from-browser`); empty = none.
+    cookies_from_browser: String,
+    /// Browsers detected on this machine (for the Settings cookies dropdown).
+    cookie_browser_options: Vec<String>,
+
+    // Clipboard monitoring (opt-in, default OFF). While enabled, a timer
+    // subscription polls the clipboard; a newly copied http(s) URL is surfaced
+    // as `detected_url` for the user to confirm — never auto-downloaded.
+    // Clipboard content is only held in memory for de-dup, never persisted or
+    // logged.
+    clipboard_monitoring: bool,
+    clipboard_watch: ClipboardWatch,
+    detected_url: Option<String>,
+
+    // Flags
+    is_extracting: bool,
+    url_error: Option<String>,
+}
+
+/// Application view
+#[derive(Debug, Clone, PartialEq)]
+pub enum View {
+    Main,
+    Settings,
+    History,
+}
+
+/// v0.7.0: Failure category for UI display and recovery hints
+#[derive(Debug, Clone, PartialEq)]
+pub enum FailureCategory {
+    NetworkError,
+    AuthError,
+    DiskError,
+    ParseError,
+    UnknownError,
+}
+
+impl FailureCategory {
+    /// Classify error string into category (pure UI logic)
+    pub fn from_error(error: &str) -> Self {
+        let lower = error.to_lowercase();
+        if lower.contains("timeout")
+            || lower.contains("connection")
+            || lower.contains("dns")
+            || lower.contains("503")
+            || lower.contains("network")
+            || lower.contains("reset")
+        {
+            FailureCategory::NetworkError
+        } else if lower.contains("401")
+            || lower.contains("403")
+            || lower.contains("cookie")
+            || lower.contains("auth")
+            || lower.contains("forbidden")
+            || lower.contains("unauthorized")
+        {
+            FailureCategory::AuthError
+        } else if lower.contains("disk")
+            || lower.contains("permission")
+            || lower.contains("space")
+            || lower.contains("full")
+        {
+            FailureCategory::DiskError
+        } else if lower.contains("extractor")
+            || lower.contains("format")
+            || lower.contains("parse")
+            || lower.contains("unsupported")
+            || lower.contains("yt-dlp")
+        {
+            FailureCategory::ParseError
+        } else {
+            FailureCategory::UnknownError
+        }
+    }
+
+    /// Get recovery hint for this category
+    pub fn recovery_hint(&self) -> &'static str {
+        match self {
+            FailureCategory::NetworkError => "Check your internet connection or VPN, then retry.",
+            FailureCategory::AuthError => {
+                "This may require refreshing cookies or login credentials."
+            }
+            FailureCategory::DiskError => "Free up disk space or change the download directory.",
+            FailureCategory::ParseError => "Try a different format or re-add the URL.",
+            FailureCategory::UnknownError => "Try again or remove and re-add this download.",
+        }
+    }
+}
+
+/// Download task UI representation
+#[derive(Debug, Clone)]
+pub struct DownloadTaskUI {
+    pub id: String,
+    pub title: String,
+    pub url: String,
+    pub progress: f32,  // 0.0 to 1.0
+    pub speed: f64,     // bytes per second
+    pub status: String, // "Downloading", "Paused", "Completed", etc.
+    pub downloaded_mb: f64,
+    pub total_mb: f64,
+    pub eta_seconds: Option<u64>,
+    pub file_path: Option<String>, // Path to the downloaded file
+    pub error_message: Option<String>,
+    pub last_progress_at: Instant,       // v0.6.0: For stall detection
+    pub was_resumed_after_failure: bool, // v0.6.0: Track retry attempts
+    pub error_dismissed: bool,           // v0.7.0: User dismissed error display
+}
+
+/// Progress data transfer object
+#[derive(Debug, Clone)]
+pub struct DownloadProgressData {
+    pub progress: f32,
+    pub speed: f64,
+    pub downloaded: u64,
+    pub total: u64,
+    pub eta: Option<u64>,
+}
+
+/// Application messages
+#[derive(Debug, Clone)]
+pub enum Message {
+    // Input events
+    UrlInputChanged(String),
+    DownloadButtonPressed,
+    PasteFromClipboard,
+    ClearUrlInput,
+
+    // Backend Events
+    // Boxed: BackendEvent carries a large VideoInfo; boxing keeps the Message
+    // enum variants similar in size (clippy::large_enum_variant).
+    BackendEventReceived(Box<BackendEvent>),
+
+    // Queue control
+    PauseDownload(String),
+    ResumeDownload(String),
+    CancelDownload(String),
+    RemoveCompleted(String),
+    ClearAllCompleted,
+    ResumeAll,
+    RetryDownload(String),
+    OpenFile(String),
+    OpenDownloadFolder(String),
+
+    // v0.7.0: Recovery actions
+    ResetTask(String),      // Cancel + Delete + Re-add as new task
+    DismissError(String),   // Hide error display, keep Failed
+    RestartStalled(String), // Pause + Resume for stalled tasks
+
+    // View navigation
+    SwitchToMain,
+    SwitchToSettings,
+    SwitchToHistory,
+
+    // Download history (Shape-3 PR-2)
+    RefreshHistory,
+    HistoryLoaded(Result<Vec<DownloadRecord>, String>),
+    RemoveFromHistory(String),
+    HistoryRecordRemoved(Result<String, String>),
+    OpenHistoryFolder(String),
+
+    // Settings
+    DownloadLocationChanged(String),
+    BrowseDownloadLocation,
+    MaxConcurrentChanged(usize),
+    SegmentsChanged(usize),
+    QualityChanged(String),
+    CookiesFromBrowserChanged(String),
+    ClipboardMonitoringToggled(bool),
+    SaveSettings,
+    SettingsSaved(Result<(), String>),
+
+    // Clipboard monitoring (opt-in)
+    ClipboardTick,      // Poll timer fired; check the clipboard for a new URL
+    ConfirmDetectedUrl, // User accepted the detected URL — queue it
+    DismissDetectedUrl, // User declined the detected URL
+
+    // System
+    Tick, // For periodic UI updates
+}
+
+impl Application for RustloaderApp {
+    type Executor = iced::executor::Default;
+    type Message = Message;
+    type Theme = Theme;
+    type Flags = Vec<String>;
+
+    fn new(startup_warnings: Self::Flags) -> (Self, Command<Message>) {
+        // Initialize settings
+        let mut settings = AppSettings::default();
+
+        let db_path = crate::utils::get_database_path();
+        let db_url = format!("sqlite://{}?mode=rwc", db_path.to_string_lossy());
+
+        // Create a single runtime and keep it alive for the app lifetime
+        let rt = Runtime::new().expect("Failed to create tokio runtime");
+
+        let db_pool = rt
+            .block_on(initialize_database(&db_url))
+            .expect("Failed to initialize database");
+
+        let db_manager = Arc::new(DatabaseManager::new(db_pool));
+
+        // Load settings from database
+        if let Ok(loaded_settings) = rt.block_on(load_settings_from_db(&db_manager)) {
+            settings = loaded_settings;
+        }
+
+        // Initialize Backend Actor
+        let (cmd_tx, cmd_rx) = mpsc::channel(100);
+        let (event_tx, event_rx) = mpsc::channel(100);
+
+        // Spawn the actor on the runtime. Shares the SAME `DatabaseManager`
+        // (and therefore the same sqlite connection pool/file) already
+        // created above for settings — not a second DB instance — so the
+        // actor's download-history writes and the GUI's settings reads/writes
+        // are always looking at the same database.
+        let settings_clone = settings.clone();
+        let db_manager_for_actor = Arc::clone(&db_manager);
+        rt.spawn(async move {
+            match BackendActor::new(settings_clone, cmd_rx, event_tx, db_manager_for_actor).await {
+                Ok(actor) => actor.run().await,
+                Err(e) => error!("Failed to start backend actor: {}", e),
+            }
+        });
+
+        let app = Self {
+            backend_sender: cmd_tx,
+            backend_receiver: Arc::new(Mutex::new(Some(event_rx))),
+            db_manager,
+            runtime: Arc::new(rt),
+            current_view: View::Main,
+            url_input: String::new(),
+            // Surface any startup dependency-health warning as the initial
+            // status banner (non-blocking); otherwise show "Ready".
+            status_message: startup_warnings
+                .first()
+                .map(|w| format!("⚠️  {w}"))
+                .unwrap_or_else(|| "Ready".to_string()),
+            active_downloads: Vec::new(),
+            history: Vec::new(),
+            history_loading: false,
+            history_error: None,
+            download_location: settings.download_location.to_string_lossy().to_string(),
+            max_concurrent: settings.max_concurrent,
+            segments_per_download: settings.segments,
+            quality: settings.quality,
+            cookies_from_browser: settings.cookies_from_browser.clone().unwrap_or_default(),
+            cookie_browser_options: crate::utils::cookies::detect_browsers(),
+            clipboard_monitoring: settings.clipboard_monitoring,
+            clipboard_watch: ClipboardWatch::new(),
+            detected_url: None,
+            is_extracting: false,
+            url_error: None,
+        };
+
+        (app, Command::none())
+    }
+
+    fn title(&self) -> String {
+        String::from("Rustloader - High-Performance Video Downloader")
+    }
+
+    fn update(&mut self, message: Message) -> Command<Message> {
+        match message {
+            // Input events
+            Message::UrlInputChanged(url) => {
+                self.url_input = url;
+                self.url_error = None; // Clear error when user types
+                Command::none()
+            }
+
+            Message::DownloadButtonPressed => {
+                if !self.url_input.is_empty() && !self.is_extracting {
+                    self.is_extracting = true;
+                    self.status_message = "Extracting video information...".to_string();
+
+                    // Send extract command to backend
+                    let url = self.url_input.clone();
+                    let _ = self
+                        .backend_sender
+                        .try_send(BackendCommand::ExtractInfo { url });
+                }
+                Command::none()
+            }
+
+            Message::PasteFromClipboard => {
+                match clipboard::get_clipboard_content() {
+                    Ok(content) => {
+                        // The user handled this content themselves; the
+                        // monitor must not re-offer it on the next tick.
+                        self.clipboard_watch.mark_seen(&content);
+                        self.url_input = content;
+                        self.status_message = "URL pasted from clipboard".to_string();
+                    }
+                    Err(e) => {
+                        self.status_message = format!("Failed to paste from clipboard: {}", e);
+                    }
+                }
+                Command::none()
+            }
+
+            Message::ClearUrlInput => {
+                self.url_input.clear();
+                Command::none()
+            }
+
+            // Backend Events Handling
+            Message::BackendEventReceived(event) => {
+                // Set by the terminal-state arms below (Completed/Failed/
+                // Cancelled); if the history view is currently open, its list
+                // is refreshed so it doesn't go stale while visible. History
+                // itself is never mutated directly here — only reloaded from
+                // the `downloads` table (#34 remains the sole writer).
+                let mut should_refresh_history = false;
+                match *event {
+                    BackendEvent::ExtractionStarted => {
+                        self.is_extracting = true;
+                        self.status_message = "Extracting video information...".to_string();
+                    }
+                    BackendEvent::ExtractionCompleted(result) => {
+                        self.is_extracting = false;
+                        match result {
+                            Ok(video_info) => {
+                                // Auto-start download logic
+                                let output_path = PathBuf::from(&self.download_location)
+                                    .join(format!("{}.mp4", sanitize_filename(&video_info.title)));
+
+                                self.url_input.clear();
+                                self.url_error = None;
+                                self.status_message =
+                                    format!("Starting download: {}", video_info.title);
+
+                                // Send start command
+                                let _ =
+                                    self.backend_sender.try_send(BackendCommand::StartDownload {
+                                        video_info: Box::new(video_info),
+                                        output_path,
+                                        format_id: None, // Auto format
+                                    });
+                            }
+                            Err(e) => {
+                                self.url_error = Some(make_error_user_friendly(&e));
+                                self.status_message = "Extraction failed".to_string();
+                            }
+                        }
+                    }
+                    BackendEvent::DownloadStarted {
+                        task_id,
+                        video_info,
+                    } => {
+                        let task_ui = DownloadTaskUI {
+                            id: task_id.clone(),
+                            title: video_info.title.clone(),
+                            url: video_info.url.clone(),
+                            progress: 0.0,
+                            speed: 0.0,
+                            status: "Queued".to_string(),
+                            downloaded_mb: 0.0,
+                            total_mb: video_info.filesize.unwrap_or(0) as f64 / (1024.0 * 1024.0),
+                            eta_seconds: None,
+                            file_path: None,
+                            error_message: None,
+                            last_progress_at: Instant::now(),
+                            was_resumed_after_failure: false,
+                            error_dismissed: false,
+                        };
+                        self.active_downloads.push(task_ui);
+                        self.status_message = format!("Added to queue: {}", video_info.title);
+                    }
+                    BackendEvent::DownloadProgress { task_id, data } => {
+                        if let Some(task) =
+                            self.active_downloads.iter_mut().find(|t| t.id == task_id)
+                        {
+                            // Row status is owned solely by the status events
+                            // (TaskStatusUpdated / DownloadCompleted / Failed).
+                            // Ignore progress for already-terminal rows so a late
+                            // event can't flip a finished download back to active,
+                            // and never set the status here.
+                            if !matches!(task.status.as_str(), "Completed" | "Failed" | "Cancelled")
+                            {
+                                task.progress = data.progress;
+                                task.speed = data.speed;
+                                task.downloaded_mb = data.downloaded as f64 / (1024.0 * 1024.0);
+                                task.total_mb = data.total as f64 / (1024.0 * 1024.0);
+                                task.eta_seconds = data.eta;
+                                task.last_progress_at = Instant::now(); // stall detection
+                            }
+                        }
+                    }
+                    BackendEvent::DownloadCompleted { task_id, file_path } => {
+                        if let Some(task) =
+                            self.active_downloads.iter_mut().find(|t| t.id == task_id)
+                        {
+                            task.status = "Completed".to_string();
+                            task.progress = 1.0;
+                            if let Some(p) = file_path {
+                                task.file_path = Some(p);
+                            }
+                        }
+                        self.status_message = "Download completed".to_string();
+                        should_refresh_history = true;
+                    }
+                    BackendEvent::DownloadFailed { task_id, error } => {
+                        if let Some(task) =
+                            self.active_downloads.iter_mut().find(|t| t.id == task_id)
+                        {
+                            task.status = "Failed".to_string();
+                            task.error_message = Some(error.clone());
+                        }
+                        self.status_message = format!("Failed: {}", error);
+                        should_refresh_history = true;
+                    }
+                    BackendEvent::TaskStatusUpdated { task_id, status } => {
+                        if status == "Cancelled" {
+                            should_refresh_history = true;
+                        }
+                        if let Some(task) =
+                            self.active_downloads.iter_mut().find(|t| t.id == task_id)
+                        {
+                            task.status = status;
+                        }
+                    }
+                    BackendEvent::Error(e) => {
+                        self.status_message = format!("Error: {}", e);
+                    }
+                }
+                if should_refresh_history && self.current_view == View::History {
+                    self.history_loading = true;
+                    reload_history_command(&self.db_manager)
+                } else {
+                    Command::none()
+                }
+            }
+
+            // Queue control
+            Message::PauseDownload(task_id) => {
+                let _ = self
+                    .backend_sender
+                    .try_send(BackendCommand::PauseDownload(task_id));
+                Command::none()
+            }
+
+            Message::ResumeDownload(task_id) => {
+                let _ = self
+                    .backend_sender
+                    .try_send(BackendCommand::ResumeDownload(task_id));
+                Command::none()
+            }
+
+            Message::CancelDownload(task_id) => {
+                // Optimistic UI update
+                self.active_downloads.retain(|t| t.id != task_id);
+                let _ = self
+                    .backend_sender
+                    .try_send(BackendCommand::CancelDownload(task_id));
+                Command::none()
+            }
+
+            Message::RemoveCompleted(task_id) => {
+                self.active_downloads.retain(|t| t.id != task_id);
+                let _ = self
+                    .backend_sender
+                    .try_send(BackendCommand::RemoveTask(task_id));
+                Command::none()
+            }
+
+            Message::ClearAllCompleted => {
+                self.active_downloads.retain(|t| t.status != "Completed");
+                let _ = self.backend_sender.try_send(BackendCommand::ClearCompleted);
+                Command::none()
+            }
+
+            Message::ResumeAll => {
+                let _ = self.backend_sender.try_send(BackendCommand::ResumeAll);
+                Command::none()
+            }
+
+            Message::RetryDownload(task_id) => {
+                // v0.6.0: Track that this was retried after failure
+                if let Some(task) = self.active_downloads.iter_mut().find(|t| t.id == task_id) {
+                    if task.status == "Failed" {
+                        task.was_resumed_after_failure = true;
+                        task.error_dismissed = false; // Reset dismissed state on retry
+                    }
+                }
+                let _ = self
+                    .backend_sender
+                    .try_send(BackendCommand::ResumeDownload(task_id));
+                Command::none()
+            }
+
+            // v0.7.0: Reset Task - Cancel, Delete, Re-add as new task
+            Message::ResetTask(task_id) => {
+                // Find the task and capture URL before removal
+                if let Some(task) = self.active_downloads.iter().find(|t| t.id == task_id) {
+                    let url = task.url.clone();
+
+                    // Cancel and remove from backend
+                    let _ = self
+                        .backend_sender
+                        .try_send(BackendCommand::CancelDownload(task_id.clone()));
+                    let _ = self
+                        .backend_sender
+                        .try_send(BackendCommand::RemoveTask(task_id.clone()));
+
+                    // Remove from UI
+                    self.active_downloads.retain(|t| t.id != task_id);
+
+                    // Re-add the URL (will trigger extraction and new task creation)
+                    self.url_input = url;
+                    self.status_message = "Task reset - re-adding...".to_string();
+
+                    // Trigger extraction for the URL
+                    let _ = self.backend_sender.try_send(BackendCommand::ExtractInfo {
+                        url: self.url_input.clone(),
+                    });
+                }
+                Command::none()
+            }
+
+            // v0.7.0: Dismiss Error - Hide error display, keep Failed state
+            Message::DismissError(task_id) => {
+                if let Some(task) = self.active_downloads.iter_mut().find(|t| t.id == task_id) {
+                    task.error_dismissed = true;
+                }
+                Command::none()
+            }
+
+            // v0.7.0: Restart Stalled - Pause + Resume to restart engine
+            Message::RestartStalled(task_id) => {
+                // First pause, then resume to restart the engine
+                let _ = self
+                    .backend_sender
+                    .try_send(BackendCommand::PauseDownload(task_id.clone()));
+                let _ = self
+                    .backend_sender
+                    .try_send(BackendCommand::ResumeDownload(task_id));
+                self.status_message = "Restarting stalled download...".to_string();
+                Command::none()
+            }
+
+            Message::OpenFile(task_id) => {
+                if let Some(task) = self.active_downloads.iter().find(|t| t.id == task_id) {
+                    // Logic to find file...
+                    // Previously we set file_path in DownloadCompleted.
+                    // We might need BackendEvent to include path in DownloadCompleted?
+                    // Or keep track of it.
+                    // For now, construct from download location + title?
+                    if let Some(file_path) = &task.file_path {
+                        let path = std::path::PathBuf::from(file_path);
+                        let _ = open::that(&path);
+                    } else {
+                        // Fallback guess
+                        let path = PathBuf::from(&self.download_location)
+                            .join(format!("{}.mp4", sanitize_filename(&task.title)));
+                        if path.exists() {
+                            let _ = open::that(&path);
+                        }
+                    }
+                }
+                Command::none()
+            }
+
+            Message::OpenDownloadFolder(task_id) => {
+                // Open the folder that actually contains the file (the organizer
+                // moves it into a quality/date subfolder), falling back to the
+                // configured download location.
+                let folder = self
+                    .active_downloads
+                    .iter()
+                    .find(|t| t.id == task_id)
+                    .and_then(|t| t.file_path.as_ref())
+                    .and_then(|p| PathBuf::from(p).parent().map(PathBuf::from))
+                    .unwrap_or_else(|| PathBuf::from(&self.download_location));
+                let _ = open::that(&folder);
+                Command::none()
+            }
+
+            // View navigation
+            Message::SwitchToMain => {
+                self.current_view = View::Main;
+                Command::none()
+            }
+
+            Message::SwitchToSettings => {
+                self.current_view = View::Settings;
+                Command::none()
+            }
+
+            Message::SwitchToHistory => {
+                self.current_view = View::History;
+                self.history_loading = true;
+                self.history_error = None;
+                reload_history_command(&self.db_manager)
+            }
+
+            // Download history (Shape-3 PR-2)
+            Message::RefreshHistory => {
+                self.history_loading = true;
+                self.history_error = None;
+                reload_history_command(&self.db_manager)
+            }
+
+            Message::HistoryLoaded(result) => {
+                self.history_loading = false;
+                match result {
+                    Ok(records) => {
+                        self.history = records;
+                        self.history_error = None;
+                    }
+                    Err(e) => {
+                        self.history_error = Some(e);
+                    }
+                }
+                Command::none()
+            }
+
+            Message::RemoveFromHistory(id) => {
+                // Optimistic UI update, mirroring RemoveCompleted/CancelDownload
+                // above. This deletes the DB record only — not the downloaded
+                // file.
+                self.history.retain(|r| r.id != id);
+                let db_manager = Arc::clone(&self.db_manager);
+                Command::perform(
+                    async move {
+                        db_manager
+                            .delete_download(&id)
+                            .await
+                            .map(|_| id.clone())
+                            .map_err(|e| e.to_string())
+                    },
+                    Message::HistoryRecordRemoved,
+                )
+            }
+
+            Message::HistoryRecordRemoved(result) => {
+                if let Err(e) = result {
+                    // The optimistic removal above may now disagree with the
+                    // database; reload to reconcile and surface the failure.
+                    self.status_message = format!("Failed to remove history record: {e}");
+                    return reload_history_command(&self.db_manager);
+                }
+                Command::none()
+            }
+
+            Message::OpenHistoryFolder(id) => {
+                if let Some(record) = self.history.iter().find(|r| r.id == id) {
+                    let folder = record
+                        .output_path
+                        .parent()
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| PathBuf::from(&self.download_location));
+                    let _ = open::that(&folder);
+                }
+                Command::none()
+            }
+
+            // Settings
+            Message::DownloadLocationChanged(location) => {
+                self.download_location = location;
+                Command::none()
+            }
+
+            Message::BrowseDownloadLocation => {
+                if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                    self.download_location = path.to_string_lossy().to_string();
+                }
+                Command::none()
+            }
+
+            Message::MaxConcurrentChanged(value) => {
+                self.max_concurrent = value;
+                Command::none()
+            }
+
+            Message::SegmentsChanged(value) => {
+                self.segments_per_download = value;
+                Command::none()
+            }
+
+            Message::QualityChanged(quality) => {
+                self.quality = match quality.as_str() {
+                    "Best Available" => VideoQuality::Best,
+                    "1080p" => VideoQuality::Specific("1080".to_string()),
+                    "720p" => VideoQuality::Specific("720".to_string()),
+                    "480p" => VideoQuality::Specific("480".to_string()),
+                    "Worst Available" => VideoQuality::Worst,
+                    _ => VideoQuality::Best,
+                };
+                Command::none()
+            }
+
+            Message::CookiesFromBrowserChanged(value) => {
+                self.cookies_from_browser = value;
+                Command::none()
+            }
+
+            Message::ClipboardMonitoringToggled(enabled) => {
+                self.clipboard_monitoring = enabled;
+                if enabled {
+                    // Fresh watch: the first poll tick only seeds it with
+                    // whatever is already on the clipboard, so stale content
+                    // copied before opting in never prompts.
+                    self.clipboard_watch = ClipboardWatch::new();
+                } else {
+                    // OFF disables monitoring fully: drop any pending prompt.
+                    self.detected_url = None;
+                }
+                Command::none()
+            }
+
+            Message::ClipboardTick => {
+                if self.clipboard_monitoring {
+                    // Read errors are ignored silently: a transient clipboard
+                    // failure is not actionable, and logging could leak
+                    // clipboard-adjacent details.
+                    if let Ok(content) = clipboard::get_clipboard_content() {
+                        if let Some(url) = self.clipboard_watch.observe(&content) {
+                            // Don't re-offer what's already in the URL input
+                            // (e.g. the user copied it out of the app).
+                            if url != self.url_input {
+                                self.detected_url = Some(url);
+                            }
+                        }
+                    }
+                }
+                Command::none()
+            }
+
+            Message::ConfirmDetectedUrl => {
+                if let Some(url) = self.detected_url.take() {
+                    // Same add path as DownloadButtonPressed: extraction via
+                    // the backend actor, which then auto-starts the download
+                    // (I-2: GUI never drives the engine directly).
+                    self.is_extracting = true;
+                    self.status_message = "Extracting video information...".to_string();
+                    let _ = self
+                        .backend_sender
+                        .try_send(BackendCommand::ExtractInfo { url });
+                }
+                Command::none()
+            }
+
+            Message::DismissDetectedUrl => {
+                self.detected_url = None;
+                Command::none()
+            }
+
+            Message::SaveSettings => {
+                let settings = AppSettings {
+                    download_location: PathBuf::from(&self.download_location),
+                    segments: self.segments_per_download,
+                    max_concurrent: self.max_concurrent,
+                    quality: self.quality.clone(),
+                    chunk_size: 8192,
+                    retry_attempts: 3,
+                    enable_resume: true,
+                    cookies_from_browser: {
+                        let t = self.cookies_from_browser.trim();
+                        if t.is_empty() {
+                            None
+                        } else {
+                            Some(t.to_string())
+                        }
+                    },
+                    cookies_file: None,
+                    clipboard_monitoring: self.clipboard_monitoring,
+                };
+
+                // Save settings to database. The result is surfaced (see
+                // SettingsSaved) instead of being swallowed — previously the
+                // closure ignored it and always switched to Main, so a failed
+                // save looked successful.
+                let db_manager = Arc::clone(&self.db_manager);
+                Command::perform(
+                    async move {
+                        save_settings_to_db(&db_manager, &settings)
+                            .await
+                            .map_err(|e| e.to_string())
+                    },
+                    Message::SettingsSaved,
+                )
+            }
+
+            Message::SettingsSaved(result) => {
+                match result {
+                    Ok(()) => {
+                        self.status_message = "Settings saved".to_string();
+                        self.current_view = View::Main;
+                    }
+                    Err(e) => {
+                        // Keep the user on Settings and show why it failed.
+                        self.status_message = format!("Failed to save settings: {e}");
+                    }
+                }
+                Command::none()
+            }
+
+            Message::Tick => Command::none(), // No polling needed
+        }
+    }
+
+    fn subscription(&self) -> Subscription<Message> {
+        // Create a backend subscription using the receiver in self.
+        // We use a wrapper struct to handle the Hash identity for unfold.
+        struct BackendListener(Arc<Mutex<Option<mpsc::Receiver<BackendEvent>>>>);
+
+        impl std::hash::Hash for BackendListener {
+            fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+                // Hash the pointer address of the Arc to ensure identity stability
+                (Arc::as_ptr(&self.0) as usize).hash(state);
+            }
+        }
+
+        // We use unfold. State::Starting(Listener), State::Ready(Rx), State::Empty
+        enum State {
+            Starting(BackendListener),
+            Ready(mpsc::Receiver<BackendEvent>),
+            Empty,
+        }
+
+        let listener = BackendListener(self.backend_receiver.clone());
+
+        let backend_events = iced::subscription::unfold(
+            "backend-listener",
+            State::Starting(listener),
+            |state| async move {
+                match state {
+                    State::Starting(wrapper) => {
+                        let rx_opt = wrapper.0.lock().unwrap().take();
+                        if let Some(rx) = rx_opt {
+                            let mut rx = rx;
+                            match rx.recv().await {
+                                Some(event) => (
+                                    Message::BackendEventReceived(Box::new(event)),
+                                    State::Ready(rx),
+                                ),
+                                None => std::future::pending().await,
+                            }
+                        } else {
+                            std::future::pending().await
+                        }
+                    }
+                    State::Ready(mut rx) => match rx.recv().await {
+                        Some(event) => (
+                            Message::BackendEventReceived(Box::new(event)),
+                            State::Ready(rx),
+                        ),
+                        None => std::future::pending().await,
+                    },
+                    State::Empty => std::future::pending().await,
+                }
+            },
+        );
+
+        // Clipboard monitoring is a second, opt-in subscription: while the
+        // toggle is ON, poll the clipboard every 2s (`iced::time::every`,
+        // tokio backend). Turning the toggle OFF removes the subscription
+        // entirely — no timer runs and the clipboard is never read.
+        if self.clipboard_monitoring {
+            Subscription::batch([
+                backend_events,
+                iced::time::every(std::time::Duration::from_secs(2))
+                    .map(|_| Message::ClipboardTick),
+            ])
+        } else {
+            backend_events
+        }
+    }
+
+    fn theme(&self) -> Self::Theme {
+        Theme::Dark
+    }
+
+    fn view(&self) -> Element<'_, Message> {
+        use crate::gui::theme;
+        use iced::widget::{button, column, container, row, text, Space};
+        use iced::Length;
+
+        // Sidebar
+        let sidebar = container(
+            column![
+                // App Title / Logo Area
+                container(text("Rustloader").size(24).style(theme::TEXT_PRIMARY)).padding(20),
+                Space::with_height(20),
+                // Navigation Items
+                button(text("Downloads").size(16))
+                    .style(iced::theme::Button::Custom(Box::new(
+                        if self.current_view == View::Main {
+                            theme::SidebarButtonStyle::Active
+                        } else {
+                            theme::SidebarButtonStyle::Inactive
+                        }
+                    )))
+                    .width(Length::Fill)
+                    .padding(12)
+                    .on_press(Message::SwitchToMain),
+                button(text("History").size(16))
+                    .style(iced::theme::Button::Custom(Box::new(
+                        if self.current_view == View::History {
+                            theme::SidebarButtonStyle::Active
+                        } else {
+                            theme::SidebarButtonStyle::Inactive
+                        }
+                    )))
+                    .width(Length::Fill)
+                    .padding(12)
+                    .on_press(Message::SwitchToHistory),
+                button(text("Settings").size(16))
+                    .style(iced::theme::Button::Custom(Box::new(
+                        if self.current_view == View::Settings {
+                            theme::SidebarButtonStyle::Active
+                        } else {
+                            theme::SidebarButtonStyle::Inactive
+                        }
+                    )))
+                    .width(Length::Fill)
+                    .padding(12)
+                    .on_press(Message::SwitchToSettings),
+            ]
+            .spacing(10)
+            .padding(10),
+        )
+        .width(Length::Fixed(250.0))
+        .height(Length::Fill)
+        .style(iced::theme::Container::Custom(Box::new(
+            theme::SidebarContainer,
+        )));
+
+        // Main Content Area
+        let content = match self.current_view {
+            View::Main => {
+                use crate::gui::views::main_view;
+                let quality_str = match self.quality {
+                    VideoQuality::Best => "Best Available",
+                    VideoQuality::Worst => "Worst Available",
+                    VideoQuality::Specific(_) => "Custom",
+                };
+                main_view(
+                    &self.url_input,
+                    &self.active_downloads,
+                    &self.status_message,
+                    self.is_extracting,
+                    self.url_error.as_deref(),
+                    quality_str,
+                    self.segments_per_download,
+                    self.detected_url.as_deref(),
+                )
+            }
+            View::Settings => {
+                use crate::gui::views::settings_view;
+                settings_view(
+                    &self.download_location,
+                    self.max_concurrent,
+                    self.segments_per_download,
+                    &self.cookies_from_browser,
+                    &self.cookie_browser_options,
+                    self.clipboard_monitoring,
+                )
+            }
+            View::History => {
+                use crate::gui::views::history_view;
+                history_view(
+                    &self.history,
+                    self.history_loading,
+                    self.history_error.as_deref(),
+                )
+            }
+        };
+
+        // Combine Sidebar and Content
+        let main_layout = row![
+            sidebar,
+            container(content)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .padding(20)
+        ];
+
+        // Wrap in Gradient Container
+        container(main_layout)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(iced::theme::Container::Custom(Box::new(
+                theme::MainGradientContainer,
+            )))
+            .into()
+    }
+}
+
+/// Sanitize filename for filesystem
+fn sanitize_filename(name: &str) -> String {
+    name.chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            _ => c,
+        })
+        .collect()
+}
+
+/// Build the `Command` that (re)loads download history from the `downloads`
+/// table. Shared by `SwitchToHistory`, `RefreshHistory`, and the
+/// terminal-event auto-refresh in `BackendEventReceived` below, so all three
+/// paths stay in sync.
+fn reload_history_command(db_manager: &Arc<DatabaseManager>) -> Command<Message> {
+    let db_manager = Arc::clone(db_manager);
+    Command::perform(
+        async move {
+            db_manager
+                .get_all_downloads()
+                .await
+                .map_err(|e| e.to_string())
+        },
+        Message::HistoryLoaded,
+    )
+}
+
+/// Load settings from database
+async fn load_settings_from_db(db_manager: &DatabaseManager) -> Result<AppSettings> {
+    let mut settings = AppSettings::default();
+
+    // Load download location
+    if let Some(location) = db_manager.get_setting("download_location").await? {
+        settings.download_location = PathBuf::from(location);
+    }
+
+    // Load max concurrent
+    if let Some(value) = db_manager.get_setting("max_concurrent").await? {
+        if let Ok(val) = value.parse::<usize>() {
+            settings.max_concurrent = val;
+        }
+    }
+
+    // Load segments
+    if let Some(value) = db_manager.get_setting("segments").await? {
+        if let Ok(val) = value.parse::<usize>() {
+            settings.segments = val;
+        }
+    }
+
+    // Load quality
+    if let Some(value) = db_manager.get_setting("quality").await? {
+        settings.quality = match value.as_str() {
+            "Best" => VideoQuality::Best,
+            "Worst" => VideoQuality::Worst,
+            _ => VideoQuality::Best,
+        };
+    }
+
+    // Load cookies-from-browser (empty string => unset)
+    if let Some(value) = db_manager.get_setting("cookies_from_browser").await? {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            settings.cookies_from_browser = Some(trimmed.to_string());
+        }
+    }
+
+    // Load clipboard monitoring (absent/unparsable => default OFF)
+    if let Some(value) = db_manager.get_setting("clipboard_monitoring").await? {
+        if let Ok(val) = value.parse::<bool>() {
+            settings.clipboard_monitoring = val;
+        }
+    }
+
+    Ok(settings)
+}
+
+/// Save settings to database
+async fn save_settings_to_db(db_manager: &DatabaseManager, settings: &AppSettings) -> Result<()> {
+    db_manager
+        .save_setting(
+            "download_location",
+            &settings.download_location.to_string_lossy(),
+        )
+        .await?;
+    db_manager
+        .save_setting("max_concurrent", &settings.max_concurrent.to_string())
+        .await?;
+    db_manager
+        .save_setting("segments", &settings.segments.to_string())
+        .await?;
+
+    let quality_str = match settings.quality {
+        VideoQuality::Best => "Best",
+        VideoQuality::Worst => "Worst",
+        VideoQuality::Specific(_) => "Custom",
+    };
+    db_manager.save_setting("quality", quality_str).await?;
+
+    db_manager
+        .save_setting(
+            "cookies_from_browser",
+            settings.cookies_from_browser.as_deref().unwrap_or(""),
+        )
+        .await?;
+
+    db_manager
+        .save_setting(
+            "clipboard_monitoring",
+            &settings.clipboard_monitoring.to_string(),
+        )
+        .await?;
+
+    Ok(())
+}
+
+// `make_error_user_friendly` now lives in `crate::utils` so the CLI and GUI
+// share one implementation (see `src/utils/error.rs`).
+use crate::utils::make_error_user_friendly;
+
+#[cfg(test)]
+mod settings_tests {
+    use super::{load_settings_from_db, save_settings_to_db};
+    use crate::database::{initialize_database, DatabaseManager};
+    use crate::utils::config::AppSettings;
+
+    // Proves the settings save actually writes a row and round-trips. The GUI
+    // bug was that the save's Result was swallowed; here we assert the
+    // persistence layer used by SaveSettings genuinely writes and reloads.
+    #[tokio::test]
+    async fn save_settings_writes_and_reloads_from_db() {
+        let dir = std::env::temp_dir().join(format!("rl-settings-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("settings.db");
+        let _ = std::fs::remove_file(&db_path);
+        let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
+
+        let pool = initialize_database(&db_url).await.expect("init db");
+        let db = DatabaseManager::new(pool);
+
+        let settings = AppSettings {
+            max_concurrent: 7,
+            segments: 12,
+            cookies_from_browser: Some("firefox".to_string()),
+            clipboard_monitoring: true,
+            ..AppSettings::default()
+        };
+
+        save_settings_to_db(&db, &settings).await.expect("save");
+
+        // A row must exist — the bug was that nothing got persisted at all.
+        assert_eq!(
+            db.get_setting("cookies_from_browser")
+                .await
+                .expect("get")
+                .as_deref(),
+            Some("firefox")
+        );
+
+        let loaded = load_settings_from_db(&db).await.expect("load");
+        assert_eq!(loaded.cookies_from_browser.as_deref(), Some("firefox"));
+        assert_eq!(loaded.max_concurrent, 7);
+        assert_eq!(loaded.segments, 12);
+        assert!(loaded.clipboard_monitoring);
+
+        std::fs::remove_file(&db_path).ok();
+    }
+}

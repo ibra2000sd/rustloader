@@ -79,10 +79,10 @@ pub fn history_view(
                     "No download history yet"
                 })
                 .size(16)
-                .style(iced::theme::Text::Color(theme::GRAY_500)),
+                .style(iced::theme::Text::Color(theme::FG_2)),
                 text("Downloads you complete will show up here.")
                     .size(14)
-                    .style(iced::theme::Text::Color(theme::GRAY_400)),
+                    .style(iced::theme::Text::Color(theme::FG_3)),
             ]
             .spacing(10)
             .align_items(Alignment::Center),
@@ -117,7 +117,7 @@ pub fn history_view(
         .width(Length::Fill)
         .height(Length::Fill)
         .style(iced::theme::Container::Custom(Box::new(
-            theme::MainGradientContainer,
+            theme::WindowContainer,
         )))
         .into()
 }

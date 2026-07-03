@@ -921,7 +921,7 @@ impl Application for RustloaderApp {
     }
 
     fn theme(&self) -> Self::Theme {
-        Theme::Dark
+        crate::gui::theme::app_theme()
     }
 
     fn view(&self) -> Element<'_, Message> {
@@ -933,7 +933,15 @@ impl Application for RustloaderApp {
         let sidebar = container(
             column![
                 // App Title / Logo Area
-                container(text("Rustloader").size(24).style(theme::TEXT_PRIMARY)).padding(20),
+                // Brand lockup: lowercase wordmark in Geist SemiBold (readme:
+                // there is no logo asset beyond the app icon).
+                container(
+                    text("rustloader")
+                        .size(24)
+                        .font(theme::FONT_UI_SEMIBOLD)
+                        .style(theme::TEXT_PRIMARY),
+                )
+                .padding(20),
                 Space::with_height(20),
                 // Navigation Items
                 button(text("Downloads").size(16))
@@ -1029,12 +1037,12 @@ impl Application for RustloaderApp {
                 .padding(20)
         ];
 
-        // Wrap in Gradient Container
+        // Wrap in the flat near-black window background
         container(main_layout)
             .width(Length::Fill)
             .height(Length::Fill)
             .style(iced::theme::Container::Custom(Box::new(
-                theme::MainGradientContainer,
+                theme::WindowContainer,
             )))
             .into()
     }

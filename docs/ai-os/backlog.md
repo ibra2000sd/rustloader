@@ -394,6 +394,32 @@ helpers live in `src/gui/clipboard_monitor.rs` with unit tests; the
 — no engine/resume/persistence change (I-3 untouched). 2026-07-02, base
 `e8ebbe1`, PR pending.
 
+### F-GUI-002 — Design-system foundation: theme tokens + fonts (phase 1) · closed (PR open) · MEDIUM
+The maintainer's Claude-Design kit (`Rustloader_Design_System.zip`) committed
+as `design-system/` (brand source of truth) and its Iced-achievable subset
+applied: `src/gui/theme.rs` rewritten to the exact `tokens/colors.css` dark
+palette (surfaces `#0A0908→#23201B`, rust accent `#CF6F38`, amber `#E9B44C`
+reserved for live data, warm status colors), radius scale (4/8/10), and the
+readme's documented fallbacks (glass → solid `--bg-2`, no gradients, default
+motion). Geist + Geist Mono bundled (OFL-1.1, vercel/geist-font v1.7.2,
+license at `assets/fonts/OFL.txt`), registered via `Settings::fonts`; all
+data text (speeds, sizes, ETAs, counts, paths, timestamps, URLs) renders in
+Geist Mono. Built-in widgets follow via `Theme::custom` palette mapping. The
+window icon was already wired at HEAD (verified byte-identical to the kit's
+PNGs — not re-done). GUI-only; no engine/queue/persistence change.
+2026-07-03, base `1a08571`, PR pending.
+
+### F-GUI-003 — Design-system per-component restyling (phases 2+) · open · MEDIUM-LARGE
+Follow-ups after the F-GUI-002 foundation, per `design-system/readme.md`,
+each a separate PR: (1) component fidelity — `DownloadItem` states, the
+signature **`SegmentBar`** (N-cell parallel-segment progress), `UrlBar`,
+`HistoryItem`, `ClipboardBanner`, stat bento tiles, Lucide icons replacing
+unicode glyphs; (2) the `[data-theme="light"]` light theme; (3) the design
+brief's fixed 1080×720 non-resizable window (a behavior change — maintainer
+call); (4) a Windows `.ico` if/when Windows bundle packaging exists (macOS
+`AppIcon.icns` already ships; no Windows packaging is in the repo today).
+A full-fidelity web-shell (Tauri) migration is a separate strategic decision.
+
 ### `B-DL-007` — native download output handling (naming + missing dir)
 
 Two pre-ship smoke findings in the native download path, both in
@@ -433,6 +459,7 @@ parsing + octet-stream→`.bin`) and the directory creation. 2026-07-02, base
 | `B-DL-006` | Saved extension reflects actual content, not the mode flag | 2026-07-02 (PR pending) |
 | `F-GUI-001` | Opt-in clipboard monitoring (detect copied URLs, confirm to queue) | 2026-07-02 (PR pending) |
 | `B-DL-007` | Native downloads: create missing output dir; name/ext for unknown content (Content-Disposition → URL basename → `.bin`, never `.mp4`) | 2026-07-02 (PR pending) |
+| `F-GUI-002` | Design-system foundation: token palette + Geist/Geist Mono in the Iced theme; `design-system/` committed | 2026-07-03 (PR pending) |
 
 (Pre-`docs/ai-os` work was tracked via GitHub PRs/CHANGELOG; future items use the
 IDs above.)

@@ -39,6 +39,10 @@ fn main() -> Result<()> {
             icon: gui::icon::load_icon(), // Load application icon
             ..Default::default()
         },
+        // Design-system typefaces (design-system/tokens/typography.css):
+        // Geist for UI text, Geist Mono for numerals/data.
+        fonts: gui::theme::font_bytes(),
+        default_font: gui::theme::FONT_UI,
         antialiasing: true,
         ..Default::default()
     })?;
