@@ -1,0 +1,41 @@
+<!-- @dsCard group="Components" viewport="700x260" name="Forms — Input, Select, Slider, Toggle" subtitle="Focus, error, disabled" -->
+<!DOCTYPE html>
+<html>
+<head>
+<link rel="stylesheet" href="../../styles.css">
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="../../_ds_bundle.js"></script>
+<style>body { margin: 0; background: var(--bg-0); }</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { Input, Select, Slider, Toggle } = window.RustloaderDesignSystem_48af0e;
+function Demo() {
+  const [path, setPath] = React.useState("~/Downloads/Rustloader/");
+  const [q, setQ] = React.useState("1080p");
+  const [seg, setSeg] = React.useState(16);
+  const [clip, setClip] = React.useState(false);
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px 24px", padding: "18px 24px", alignItems: "start" }}>
+      <Input value={path} onChange={setPath} mono />
+      <Input placeholder="Enter a valid http(s) URL" error />
+      <div style={{ display: "flex", gap: 12 }}>
+        <Select label="Quality" options={["Best Available","1080p","720p","480p"]} value={q} onChange={setQ} width={150} />
+        <Select label="Format" options={["MP4","MP3"]} value="MP4" width={90} />
+      </div>
+      <Slider label="Segments per download" min={4} max={32} value={seg} onChange={setSeg} />
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        <Toggle checked={clip} onChange={setClip} label="Detect copied URLs" />
+        <Toggle checked disabled label="Disabled, on" />
+      </div>
+      <Slider label="Max concurrent downloads" min={1} max={10} value={5} />
+    </div>
+  );
+}
+ReactDOM.createRoot(document.getElementById("root")).render(<Demo />);
+</script>
+</body>
+</html>

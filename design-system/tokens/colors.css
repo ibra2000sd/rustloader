@@ -1,0 +1,108 @@
+/* ============================================================
+   Rustloader color system — dark-first
+   Accent: rust / copper / amber (nods to the name).
+   Base surfaces: OLED-friendly warm near-blacks.
+   ============================================================ */
+
+:root {
+  /* ---- Accent: rust/copper ramp ---- */
+  --rust-100: #F8E3D0;
+  --rust-200: #F2C9A8;
+  --rust-300: #E8A878;
+  --rust-400: #DE8B54;
+  --rust-500: #CF6F38;   /* primary accent */
+  --rust-600: #A9572B;
+  --rust-700: #7F4222;
+  --rust-800: #55301C;
+  --rust-900: #2E1D14;
+
+  /* Amber — data highlight (live speed, hot numbers) */
+  --amber-300: #F2CE84;
+  --amber-400: #E9B44C;
+  --amber-500: #D99A2B;
+
+  /* ---- Semantic status (warm-tuned) ---- */
+  --success-400: #5FCB90;
+  --success-500: #3AAE6F;
+  --warning-400: #E9B44C;   /* paused / stalled */
+  --warning-500: #D99A2B;
+  --danger-400: #EA6E5A;
+  --danger-500: #D9503B;
+
+  /* ============ DARK THEME (default) ============ */
+
+  /* Surfaces — warm near-blacks, subtle elevation steps */
+  --bg-0: #0A0908;          /* window base, OLED-friendly */
+  --bg-1: #121110;          /* raised panel */
+  --bg-2: #1A1815;          /* card */
+  --bg-3: #23201B;          /* hover / nested */
+  --bg-glass: rgba(26, 24, 21, 0.72);       /* translucent panel (web-only blur) */
+  --bg-input: #14120F;
+  --bg-accent-soft: rgba(207, 111, 56, 0.12);
+  --bg-danger-soft: rgba(217, 80, 59, 0.12);
+  --bg-success-soft: rgba(58, 174, 111, 0.12);
+  --bg-warning-soft: rgba(217, 154, 43, 0.12);
+
+  /* Text — warm whites */
+  --fg-1: #F4F1EC;          /* primary */
+  --fg-2: #B7B0A6;          /* secondary */
+  --fg-3: #7E786E;          /* tertiary / labels */
+  --fg-disabled: #55504A;
+  --fg-on-accent: #150C06;  /* text on rust-500 fills */
+
+  /* Borders & hairlines */
+  --border-hairline: rgba(244, 241, 236, 0.08);
+  --border-strong: rgba(244, 241, 236, 0.14);
+  --border-accent: rgba(207, 111, 56, 0.45);
+  --border-gradient: linear-gradient(135deg, rgba(232, 168, 120, 0.28), rgba(244, 241, 236, 0.06) 40%, rgba(207, 111, 56, 0.14)); /* @kind other */
+
+  /* ---- Semantic aliases ---- */
+  --accent: var(--rust-500);
+  --accent-hover: var(--rust-400);
+  --accent-pressed: var(--rust-600);
+  --data-hot: var(--amber-400);           /* live speeds, active numerals */
+  --surface-window: var(--bg-0);
+  --surface-panel: var(--bg-1);
+  --surface-card: var(--bg-2);
+  --surface-hover: var(--bg-3);
+  --text-body: var(--fg-1);
+  --text-muted: var(--fg-2);
+  --text-label: var(--fg-3);
+  --progress-track: rgba(244, 241, 236, 0.07);
+  --focus-ring: 0 0 0 2px var(--bg-0), 0 0 0 4px var(--rust-400);
+}
+
+/* ============ LIGHT THEME (adaptation) ============ */
+[data-theme="light"] {
+  --bg-0: #F6F3EE;          /* warm paper */
+  --bg-1: #FFFFFF;
+  --bg-2: #FFFFFF;
+  --bg-3: #F0EBE3;
+  --bg-glass: rgba(255, 255, 255, 0.78);
+  --bg-input: #FFFFFF;
+  --bg-accent-soft: rgba(207, 111, 56, 0.10);
+  --bg-danger-soft: rgba(217, 80, 59, 0.10);
+  --bg-success-soft: rgba(58, 174, 111, 0.12);
+  --bg-warning-soft: rgba(217, 154, 43, 0.14);
+
+  --fg-1: #221E19;
+  --fg-2: #5C564D;
+  --fg-3: #8A8378;
+  --fg-disabled: #B5AEA3;
+  --fg-on-accent: #FFF6EE;
+
+  --border-hairline: rgba(34, 30, 25, 0.10);
+  --border-strong: rgba(34, 30, 25, 0.16);
+  --border-accent: rgba(169, 87, 43, 0.5);
+  --border-gradient: linear-gradient(135deg, rgba(169, 87, 43, 0.25), rgba(34, 30, 25, 0.06) 40%, rgba(207, 111, 56, 0.12)); /* @kind other */
+
+  --accent: var(--rust-600);
+  --accent-hover: var(--rust-500);
+  --accent-pressed: var(--rust-700);
+  --data-hot: var(--amber-500);
+  --success-400: #2E9A60;
+  --danger-400: #C9432F;
+  --warning-400: #B57F1B;
+  --progress-track: rgba(34, 30, 25, 0.08);
+  --focus-ring: 0 0 0 2px var(--bg-0), 0 0 0 4px var(--rust-500);
+}

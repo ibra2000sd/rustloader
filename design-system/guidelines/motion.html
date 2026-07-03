@@ -1,0 +1,23 @@
+<!-- @dsCard group="Effects" viewport="700x150" name="Functional motion" subtitle="120 / 220 / 400ms ease-out · rl-pulse on live transfers · reduced-motion zeroes all" -->
+<!DOCTYPE html>
+<html>
+<head>
+<link rel="stylesheet" href="../styles.css">
+<style>
+body { margin: 0; background: var(--bg-0); height: 150px; display: flex; align-items: center; justify-content: center; gap: 32px; font-family: var(--font-mono); font-size: 10px; color: var(--fg-3); }
+.demo { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.dot { width: 10px; height: 10px; border-radius: 999px; background: var(--accent); animation: rl-pulse 2s var(--ease-in-out) infinite; }
+.bar { width: 140px; height: 5px; background: var(--progress-track); border-radius: 4px; overflow: hidden; }
+.bar i { display: block; height: 100%; background: var(--accent); border-radius: 4px; animation: fill 3s var(--ease-out) infinite; }
+@keyframes fill { 0% { width: 8%; } 70% { width: 92%; } 100% { width: 92%; } }
+@media (prefers-reduced-motion: reduce) { .dot, .bar i { animation: none; } .bar i { width: 62%; } }
+.chip { padding: 8px 14px; background: var(--bg-2); border: 1px solid var(--border-hairline); border-radius: var(--radius-md); color: var(--fg-2); font-size: 11px; transition: background var(--dur-fast) var(--ease-out); }
+.chip:hover { background: var(--surface-hover); }
+</style>
+</head>
+<body>
+<div class="demo"><span class="dot"></span>rl-pulse · active transfer</div>
+<div class="demo"><div class="bar"><i></i></div>segment fill · ease-out</div>
+<div class="demo"><div class="chip">hover me</div>120ms elevation step</div>
+</body>
+</html>

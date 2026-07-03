@@ -1,0 +1,33 @@
+<!-- @dsCard group="Colors" viewport="700x170" name="Light adaptation" subtitle="[data-theme=light] — warm paper, accent shifted darker" -->
+<!DOCTYPE html>
+<html>
+<head>
+<link rel="stylesheet" href="../styles.css">
+<style>
+body { margin: 0; height: 170px; display: flex; font-family: var(--font-ui); }
+.half { flex: 1; display: flex; align-items: center; justify-content: center; }
+.card { background: var(--surface-card); border: 1px solid var(--border-hairline); border-radius: var(--radius-lg); padding: 14px 18px; box-shadow: var(--shadow-1), var(--inset-highlight); width: 240px; }
+.title { color: var(--text-body); font-size: 13px; font-weight: 600; margin: 0 0 6px 0; }
+.data { font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); display: flex; justify-content: space-between; }
+.data b { color: var(--data-hot); font-weight: 500; }
+.bar { height: 4px; border-radius: 4px; background: var(--progress-track); margin: 10px 0 8px 0; overflow: hidden; }
+.bar i { display: block; height: 100%; width: 62%; background: var(--accent); border-radius: 4px; }
+</style>
+</head>
+<body>
+<div class="half" style="background:var(--bg-0)">
+  <div class="card">
+    <p class="title">interview-cut-final.mp4</p>
+    <div class="bar"><i></i></div>
+    <div class="data"><b>4.2 MB/s</b><span>62% · ETA 0:42</span></div>
+  </div>
+</div>
+<div class="half" data-theme="light" style="background:var(--bg-0)">
+  <div class="card">
+    <p class="title">interview-cut-final.mp4</p>
+    <div class="bar"><i></i></div>
+    <div class="data"><b>4.2 MB/s</b><span>62% · ETA 0:42</span></div>
+  </div>
+</div>
+</body>
+</html>

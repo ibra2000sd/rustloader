@@ -18,6 +18,7 @@ pub fn url_input(
     let input_row = row![
         text_input("Paste video URL here...", value)
             .on_input(on_change)
+            .font(theme::FONT_MONO) // URLs are data (design-system UrlBar)
             .padding(15)
             .width(Length::Fill)
             .style(if error_message.is_some() {

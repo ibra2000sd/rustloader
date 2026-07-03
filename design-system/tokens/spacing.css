@@ -1,0 +1,22 @@
+/* Rustloader spacing & radius — tight, intentional, 4px base */
+:root {
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  /* Radius — precise, not bubbly */
+  --radius-xs: 4px;    /* progress bars, tags */
+  --radius-sm: 6px;    /* inputs small, segments */
+  --radius-md: 8px;    /* buttons, inputs */
+  --radius-lg: 10px;   /* cards */
+  --radius-xl: 14px;   /* panels, window sections */
+  --radius-full: 999px;
+
+  /* Fixed canvas */
+  --window-w: 1080px;
+  --window-h: 720px;
+}

@@ -1,0 +1,19 @@
+<!-- @dsCard group="Effects" viewport="700x150" name="Interactive states" subtitle="Hover steps elevation up · press darkens accent · rust focus ring" -->
+<!DOCTYPE html>
+<html>
+<head>
+<link rel="stylesheet" href="../styles.css">
+<style>
+body { margin: 0; background: var(--bg-0); height: 150px; display: flex; align-items: center; justify-content: center; gap: 14px; }
+.b { font-family: var(--font-ui); font-size: 13px; font-weight: 500; border-radius: var(--radius-md); padding: 9px 18px; border: none; }
+.lbl { font-family: var(--font-mono); font-size: 9px; color: var(--fg-3); text-align: center; margin-top: 8px; }
+</style>
+</head>
+<body>
+<div><button class="b" style="background:var(--accent);color:var(--fg-on-accent)">Download</button><p class="lbl">rest</p></div>
+<div><button class="b" style="background:var(--accent-hover);color:var(--fg-on-accent);box-shadow:var(--shadow-accent)">Download</button><p class="lbl">hover</p></div>
+<div><button class="b" style="background:var(--accent-pressed);color:var(--fg-on-accent)">Download</button><p class="lbl">press</p></div>
+<div><button class="b" style="background:var(--accent);color:var(--fg-on-accent);box-shadow:var(--focus-ring)">Download</button><p class="lbl">focus (keyboard)</p></div>
+<div><button class="b" style="background:var(--bg-2);color:var(--fg-disabled);border:1px solid var(--border-hairline)">Download</button><p class="lbl">disabled</p></div>
+</body>
+</html>

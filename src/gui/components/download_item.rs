@@ -217,9 +217,21 @@ pub fn download_item(task: &DownloadTaskUI) -> Element<'static, Message> {
         ))
         .push(
             row![
-                text(speed_text).size(12).style(theme::TEXT_SECONDARY),
+                // Live data renders in Geist Mono, speeds in the amber
+                // "data-hot" tone the design system reserves for them.
+                text(speed_text)
+                    .size(12)
+                    .font(theme::FONT_MONO)
+                    .style(if is_active {
+                        theme::AMBER_400
+                    } else {
+                        theme::TEXT_SECONDARY
+                    }),
                 Space::with_width(Length::Fill),
-                text(size_text).size(12).style(theme::TEXT_SECONDARY),
+                text(size_text)
+                    .size(12)
+                    .font(theme::FONT_MONO)
+                    .style(theme::TEXT_SECONDARY),
             ]
             .spacing(10)
             .align_items(Alignment::Center),

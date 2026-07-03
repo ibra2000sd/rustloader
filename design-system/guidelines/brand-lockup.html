@@ -1,0 +1,27 @@
+<!-- @dsCard group="Brand" viewport="700x160" name="App icon & wordmark treatment" subtitle="Rocket+gear icon from the repo; no logo exists — wordmark is Geist Semibold lowercase" -->
+<!DOCTYPE html>
+<html>
+<head>
+<link rel="stylesheet" href="../styles.css">
+<style>
+body { margin: 0; background: var(--bg-0); height: 160px; display: flex; align-items: center; justify-content: center; gap: 48px; }
+.lockup { display: flex; align-items: center; gap: 14px; }
+.lockup img { width: 44px; height: 44px; }
+.word { font-family: var(--font-ui); font-weight: 600; font-size: 24px; color: var(--fg-1); letter-spacing: -0.01em; }
+.word b { color: var(--rust-400); font-weight: 600; }
+.sizes { display: flex; align-items: flex-end; gap: 14px; }
+.sizes figure { margin: 0; display: flex; flex-direction: column; align-items: center; gap: 6px; font-family: var(--font-mono); font-size: 9px; color: var(--fg-3); }
+</style>
+</head>
+<body>
+<div class="lockup">
+  <img src="../assets/icons/icon_128x128.png" alt="Rustloader app icon">
+  <span class="word">rust<b>loader</b></span>
+</div>
+<div class="sizes">
+  <figure><img src="../assets/icons/icon_32x32.png" width="16" height="16" alt="">16</figure>
+  <figure><img src="../assets/icons/icon_32x32.png" width="32" height="32" alt="">32</figure>
+  <figure><img src="../assets/icons/icon_128x128.png" width="64" height="64" alt="">64</figure>
+</div>
+</body>
+</html>

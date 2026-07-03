@@ -1,0 +1,19 @@
+<!-- @dsCard group="Colors" viewport="700x150" name="Semantic status" subtitle="Warm-tuned status colors + amber reserved for live data" -->
+<!DOCTYPE html>
+<html>
+<head>
+<link rel="stylesheet" href="../styles.css">
+<style>
+body { margin: 0; background: var(--bg-0); font-family: var(--font-mono); display: flex; align-items: center; justify-content: center; gap: 12px; height: 150px; }
+.chip { display: flex; align-items: center; gap: 8px; background: var(--bg-2); border: 1px solid var(--border-hairline); border-radius: var(--radius-md); padding: 10px 14px; font-size: 11px; color: var(--fg-2); }
+.dot { width: 10px; height: 10px; border-radius: 999px; }
+</style>
+</head>
+<body>
+<div class="chip"><span class="dot" style="background:var(--accent)"></span>downloading · --accent</div>
+<div class="chip"><span class="dot" style="background:var(--success-400)"></span>complete · --success-400</div>
+<div class="chip"><span class="dot" style="background:var(--warning-400)"></span>paused / stalled · --warning-400</div>
+<div class="chip"><span class="dot" style="background:var(--danger-400)"></span>error · --danger-400</div>
+<div class="chip"><span class="dot" style="background:var(--data-hot)"></span><span style="color:var(--data-hot)">4.2 MB/s · --data-hot</span></div>
+</body>
+</html>

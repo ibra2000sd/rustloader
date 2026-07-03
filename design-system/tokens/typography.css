@@ -1,0 +1,37 @@
+/* ============================================================
+   Rustloader type system
+   UI: Geist — crisp, engineered sans.
+   Data: Geist Mono — every speed, size, ETA, %, segment count.
+   ============================================================ */
+
+:root {
+  --font-ui: "Geist", -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  /* Scale — desktop density, 1080×720 fixed canvas */
+  --text-2xs: 10px;    /* mono micro-labels, uppercase tags */
+  --text-xs: 11px;     /* labels, captions */
+  --text-sm: 12px;     /* secondary body, buttons small */
+  --text-md: 13px;     /* body default */
+  --text-lg: 15px;     /* item titles, buttons */
+  --text-xl: 18px;     /* section titles */
+  --text-2xl: 22px;    /* view titles */
+  --text-3xl: 28px;    /* hero numerals (aggregate speed) */
+
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  --leading-tight: 1.15;
+  --leading-normal: 1.45;
+  --tracking-caps: 0.08em;   /* uppercase mono labels */
+  --tracking-tight: -0.01em; /* titles */
+
+  /* Semantic */
+  --type-view-title: var(--weight-semibold) var(--text-2xl)/var(--leading-tight) var(--font-ui);
+  --type-body: var(--weight-regular) var(--text-md)/var(--leading-normal) var(--font-ui);
+  --type-label: var(--weight-medium) var(--text-xs)/var(--leading-tight) var(--font-ui);
+  --type-data: var(--weight-medium) var(--text-sm)/var(--leading-tight) var(--font-mono);
+  --type-data-hero: var(--weight-semibold) var(--text-3xl)/var(--leading-tight) var(--font-mono);
+}

@@ -1,0 +1,7 @@
+/* Rustloader webfonts.
+   The repo ships no font files (Iced uses platform defaults), so the design
+   system standardizes on Geist + Geist Mono from Google Fonts — a precise,
+   engineered 2026 pairing that matches the "precision instrument" brief.
+   SUBSTITUTION: flag to the team; swap in licensed binaries here if the
+   brand later adopts different faces. */
+@import url("https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap");
