@@ -127,7 +127,8 @@ regression for the one case it would have changed anything (see "Done" below).
 - **v0.9.0 release prep** (2026-07-02, base `e6cd092`, PR pending) — staged
   the release the read-only audit recommended, docs + version only (no `src/`
   changes): `Cargo.toml` 0.8.1 → 0.9.0 (+ lockfile), a dated 0.9.0
-  `CHANGELOG.md` entry covering #19–#40 with fixed link refs,
+  `CHANGELOG.md` entry covering #19–#40 with fixed link refs (extended
+  2026-07-03 to fold in the post-staging merges #42–#52),
   `KNOWN_ISSUES.md` made true at HEAD (ISSUE-003 resolved via #36, ISSUE-004
   corrected for `--experimental-aria2c`, ISSUE-005's ~90 MB corrected to the
   measured ~6.9 MB, ISSUE-006 updated for the #40 audit ignores, ISSUE-002
