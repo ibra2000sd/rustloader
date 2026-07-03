@@ -1,5 +1,6 @@
 use crate::extractor::VideoInfo;
 use crate::gui::DownloadProgressData;
+use crate::utils::config::VideoQuality;
 use std::path::PathBuf;
 
 /// Commands sent from GUI to Backend
@@ -14,6 +15,9 @@ pub enum BackendCommand {
         video_info: Box<VideoInfo>,
         output_path: PathBuf,
         format_id: Option<String>,
+        /// The user's quality choice, applied by format selection when no
+        /// explicit `format_id` is given (B-GUI-003).
+        quality: VideoQuality,
     },
     PauseDownload(String),
     ResumeDownload(String),

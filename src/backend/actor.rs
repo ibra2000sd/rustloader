@@ -4,7 +4,7 @@ use crate::downloader::{DownloadConfig, DownloadEngine};
 use crate::extractor::{Extractor, Format, HybridExtractor, VideoInfo, YtDlpExtractor};
 use crate::gui::DownloadProgressData;
 use crate::queue::{DownloadTask, EventLog, QueueManager, TaskStatus};
-use crate::utils::config::AppSettings;
+use crate::utils::config::{AppSettings, VideoQuality};
 use crate::utils::{get_app_support_dir, FileOrganizer, MetadataManager, OrganizationSettings};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -176,8 +176,9 @@ impl BackendActor {
                     video_info,
                     output_path,
                     format_id,
+                    quality,
                 } => {
-                    self.handle_start_download(*video_info, output_path, format_id)
+                    self.handle_start_download(*video_info, output_path, format_id, quality)
                         .await;
                 }
                 BackendCommand::PauseDownload(id) => {
@@ -234,11 +235,12 @@ impl BackendActor {
         video_info: VideoInfo,
         output_path: PathBuf,
         format_id: Option<String>,
+        quality: VideoQuality,
     ) {
         // Validation and setup logic ported from BackendBridge
 
         // 1. Format Selection
-        let format = match Self::select_format(&video_info, format_id) {
+        let format = match Self::select_format(&video_info, format_id, &quality) {
             Ok(f) => f,
             Err(e) => {
                 // Log it: the error otherwise only surfaces to the GUI status
@@ -320,56 +322,101 @@ impl BackendActor {
 
     /// Choose the format to download.
     ///
-    /// With an explicit `format_id`, returns that exact format. Otherwise prefers
-    /// the best single progressive (video+audio) format; if none exists — direct
-    /// media files and DASH video/audio-split sources — it falls back to the best
-    /// available format rather than failing, so the engine/yt-dlp path can still
-    /// fetch it. (Returning an error here is what previously stopped the GUI from
-    /// ever starting a download.)
-    fn select_format(video_info: &VideoInfo, format_id: Option<String>) -> Result<Format, String> {
+    /// With an explicit `format_id`, returns that exact format. Otherwise the
+    /// user's `quality` choice decides (B-GUI-003 — it used to be ignored and
+    /// the maximum resolution always won):
+    ///
+    /// - `Best`: prefers the best single progressive (video+audio) format; if
+    ///   none exists — direct media files and DASH video/audio-split sources —
+    ///   it falls back to the best available format rather than failing, so
+    ///   the engine/yt-dlp path can still fetch it. (Returning an error here
+    ///   is what previously stopped the GUI from ever starting a download.)
+    ///   This arm is the pre-B-GUI-003 behaviour, unchanged.
+    /// - `Specific(h)`: the best format with `height <= h` across ALL formats
+    ///   (DASH-split video included — a video-only pick is made sound by the
+    ///   queue's `PageFallback`, which appends `+bestaudio` to the yt-dlp
+    ///   `-f` spec it rebuilds from the chosen id). If nothing fits under the
+    ///   cap, the nearest format above it (smallest height) — never an error
+    ///   where `Best` would have succeeded.
+    /// - `Worst`: the smallest format that still has a video track.
+    ///
+    /// Either way the choice travels as a concrete format: the native engine
+    /// downloads its resolved URL, and the yt-dlp fallback re-selects it by id.
+    fn select_format(
+        video_info: &VideoInfo,
+        format_id: Option<String>,
+        quality: &VideoQuality,
+    ) -> Result<Format, String> {
         // Logic from BackendBridge::start_download
         if let Some(id) = format_id {
-            video_info
+            return video_info
                 .formats
                 .iter()
                 .find(|f| f.format_id == id)
                 .cloned()
-                .ok_or_else(|| "Format not found".to_string())
-        } else {
-            // combined format logic
-            let combined_formats: Vec<_> = video_info
-                .formats
-                .iter()
-                .filter(|f| {
-                    let has_video = f.vcodec.as_deref().unwrap_or("none") != "none";
-                    let has_audio = f.acodec.as_deref().unwrap_or("none") != "none";
-                    let not_sb = !f.format_id.starts_with("sb");
-                    has_video && has_audio && not_sb
-                })
-                .collect();
-
-            if let Some(best) = combined_formats
-                .iter()
-                .max_by_key(|f| f.width.unwrap_or(0) * f.height.unwrap_or(0))
-            {
-                Ok((*best).clone())
-            } else {
-                // No single progressive (video+audio) format. This is the common
-                // case for direct media files (a lone format with no codec info)
-                // and for DASH sources whose video and audio are split — failing
-                // here is what stopped the GUI from ever starting a download.
-                // Fall back to the best available format (by resolution) so the
-                // engine / yt-dlp path can still fetch it.
-                video_info
-                    .formats
-                    .iter()
-                    .filter(|f| !f.format_id.starts_with("sb"))
-                    .max_by_key(|f| f.width.unwrap_or(0) * f.height.unwrap_or(0))
-                    .or_else(|| video_info.formats.first())
-                    .cloned()
-                    .ok_or_else(|| "No downloadable format found".to_string())
-            }
+                .ok_or_else(|| "Format not found".to_string());
         }
+
+        fn has_video(f: &Format) -> bool {
+            f.vcodec.as_deref().unwrap_or("none") != "none"
+        }
+        fn has_audio(f: &Format) -> bool {
+            f.acodec.as_deref().unwrap_or("none") != "none"
+        }
+        fn area(f: &Format) -> u64 {
+            f.width.unwrap_or(0) as u64 * f.height.unwrap_or(0) as u64
+        }
+
+        // Storyboards are never downloadable content.
+        let pool: Vec<&Format> = video_info
+            .formats
+            .iter()
+            .filter(|f| !f.format_id.starts_with("sb"))
+            .collect();
+
+        let picked: Option<&Format> = match quality {
+            VideoQuality::Specific(h) if h.parse::<u32>().is_ok() => {
+                let cap: u32 = h.parse().expect("guarded by the match arm");
+                pool.iter()
+                    .copied()
+                    .filter(|f| f.height.unwrap_or(0) <= cap)
+                    // Prefer a progressive format over a video-only one of the
+                    // same resolution; area decides otherwise.
+                    .max_by_key(|f| (area(f), has_audio(f) && has_video(f)))
+                    .or_else(|| {
+                        // Nothing at or below the cap: nearest above it.
+                        pool.iter()
+                            .copied()
+                            .filter(|f| has_video(f))
+                            .min_by_key(|f| f.height.unwrap_or(u32::MAX))
+                    })
+            }
+            VideoQuality::Worst => pool
+                .iter()
+                .copied()
+                .filter(|f| has_video(f))
+                .min_by_key(|f| (area(f), !has_audio(f))),
+            // `Best`, and `Specific` values that aren't a pixel height (the
+            // GUI only produces numeric ones): historical behaviour.
+            _ => pool
+                .iter()
+                .copied()
+                .filter(|f| has_video(f) && has_audio(f))
+                .max_by_key(|f| area(f))
+                // No single progressive (video+audio) format. This is the
+                // common case for direct media files (a lone format with no
+                // codec info) and for DASH sources whose video and audio are
+                // split — failing here is what stopped the GUI from ever
+                // starting a download. Fall back to the best available
+                // format (by resolution) so the engine / yt-dlp path can
+                // still fetch it.
+                .or_else(|| pool.iter().copied().max_by_key(|f| area(f))),
+        };
+
+        picked
+            .or_else(|| video_info.formats.first())
+            .cloned()
+            .ok_or_else(|| "No downloadable format found".to_string())
     }
 
     async fn get_download_url(
@@ -560,7 +607,8 @@ mod tests {
     #[test]
     fn explicit_format_id_is_returned() {
         let vi = info(vec![fmt("18", Some("h264"), Some("aac"), 640, 360)]);
-        let f = BackendActor::select_format(&vi, Some("18".to_string())).unwrap();
+        let f =
+            BackendActor::select_format(&vi, Some("18".to_string()), &VideoQuality::Best).unwrap();
         assert_eq!(f.format_id, "18");
     }
 
@@ -571,7 +619,7 @@ mod tests {
             fmt("high", Some("h264"), Some("aac"), 1920, 1080),
             fmt("videoonly", Some("vp9"), Some("none"), 3840, 2160),
         ]);
-        let f = BackendActor::select_format(&vi, None).unwrap();
+        let f = BackendActor::select_format(&vi, None, &VideoQuality::Best).unwrap();
         assert_eq!(f.format_id, "high"); // best *progressive*, not the 4k video-only
     }
 
@@ -584,7 +632,8 @@ mod tests {
             url: "https://example.com/video.mp4".to_string(),
             ..Default::default()
         }]);
-        let f = BackendActor::select_format(&vi, None).expect("must pick a format, not error");
+        let f = BackendActor::select_format(&vi, None, &VideoQuality::Best)
+            .expect("must pick a format, not error");
         assert_eq!(f.format_id, "0");
     }
 
@@ -596,13 +645,96 @@ mod tests {
             fmt("video", Some("vp9"), Some("none"), 1920, 1080),
             fmt("audio", Some("none"), Some("mp4a"), 0, 0),
         ]);
-        let f = BackendActor::select_format(&vi, None).expect("must fall back, not error");
+        let f = BackendActor::select_format(&vi, None, &VideoQuality::Best)
+            .expect("must fall back, not error");
         assert_eq!(f.format_id, "video"); // best by resolution
     }
 
     #[test]
     fn empty_formats_is_an_error() {
         let vi = info(vec![]);
-        assert!(BackendActor::select_format(&vi, None).is_err());
+        assert!(BackendActor::select_format(&vi, None, &VideoQuality::Best).is_err());
+    }
+
+    // B-GUI-003 — the quality choice must constrain the selection.
+
+    fn specific(h: &str) -> VideoQuality {
+        VideoQuality::Specific(h.to_string())
+    }
+
+    /// A YouTube-shaped format list: one low progressive format plus a DASH
+    /// ladder of video-only formats and an audio-only track.
+    fn youtube_like() -> VideoInfo {
+        info(vec![
+            fmt("18", Some("h264"), Some("aac"), 640, 360),
+            fmt("135", Some("h264"), Some("none"), 854, 480),
+            fmt("136", Some("h264"), Some("none"), 1280, 720),
+            fmt("137", Some("h264"), Some("none"), 1920, 1080),
+            fmt("audio", Some("none"), Some("mp4a"), 0, 0),
+        ])
+    }
+
+    #[test]
+    fn specific_height_picks_best_format_within_cap() {
+        let vi = youtube_like();
+        for (cap, expected) in [("480", "135"), ("720", "136"), ("1080", "137")] {
+            let f = BackendActor::select_format(&vi, None, &specific(cap)).unwrap();
+            assert_eq!(f.format_id, expected, "cap {cap} must pick {expected}");
+        }
+    }
+
+    #[test]
+    fn specific_height_prefers_progressive_at_equal_resolution() {
+        let vi = info(vec![
+            fmt("progressive", Some("h264"), Some("aac"), 854, 480),
+            fmt("videoonly", Some("h264"), Some("none"), 854, 480),
+        ]);
+        let f = BackendActor::select_format(&vi, None, &specific("480")).unwrap();
+        assert_eq!(f.format_id, "progressive");
+    }
+
+    #[test]
+    fn specific_height_below_everything_picks_nearest_above() {
+        let vi = info(vec![
+            fmt("720", Some("h264"), Some("aac"), 1280, 720),
+            fmt("1080", Some("h264"), Some("aac"), 1920, 1080),
+        ]);
+        let f = BackendActor::select_format(&vi, None, &specific("480")).unwrap();
+        assert_eq!(f.format_id, "720"); // nothing <= 480: nearest above, not max
+    }
+
+    #[test]
+    fn specific_height_still_selects_a_heightless_direct_file() {
+        // Direct files carry no height; the cap must not make them unreachable.
+        let vi = info(vec![Format {
+            format_id: "0".to_string(),
+            url: "https://example.com/video.mp4".to_string(),
+            ..Default::default()
+        }]);
+        let f = BackendActor::select_format(&vi, None, &specific("480"))
+            .expect("must pick a format, not error");
+        assert_eq!(f.format_id, "0");
+    }
+
+    #[test]
+    fn non_numeric_specific_behaves_like_best() {
+        let vi = youtube_like();
+        let f = BackendActor::select_format(&vi, None, &specific("Custom")).unwrap();
+        assert_eq!(f.format_id, "18"); // best progressive, the historical pick
+    }
+
+    #[test]
+    fn worst_picks_smallest_video_format_not_audio() {
+        let vi = youtube_like();
+        let f = BackendActor::select_format(&vi, None, &VideoQuality::Worst).unwrap();
+        assert_eq!(f.format_id, "18"); // smallest with a video track, not "audio"
+    }
+
+    #[test]
+    fn explicit_format_id_outranks_quality() {
+        let vi = youtube_like();
+        let f =
+            BackendActor::select_format(&vi, Some("137".to_string()), &specific("480")).unwrap();
+        assert_eq!(f.format_id, "137");
     }
 }
