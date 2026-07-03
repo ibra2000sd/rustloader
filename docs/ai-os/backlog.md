@@ -209,6 +209,36 @@ format) while `Specific(1080)` yields 1080p — filed as an adjacent
 observation, not fixed here. Source: maintainer bug report + fix session,
 2026-07-03.
 
+### B-GUI-004 — "Best Available" gave 360p on YouTube; video-only picks downloaded silent · closed (PR open) · SMALL
+The B-GUI-003 known limitation, promoted to a fix: `select_format`'s `Best`
+arm preferred the best *progressive* (video+audio) format, and YouTube serves
+no progressive above 360p (everything higher is DASH-split) — so the DEFAULT
+quality delivered 360p while `Specific(1080)` delivered real 1080p. **Second
+finding, live at `f14acaa` during this fix's acceptance:** the DASH merge
+believed to make video-only picks whole (`PageFallback`'s
+`{id}+bestaudio/{id}/best`) only runs when the native probe FAILS — TikTok's
+session-bound URLs do fail it, but YouTube's IP-bound direct URLs probe fine
+from the extracting machine, so the native engine downloaded the lone video
+stream: at `f14acaa`, `Specific(1080)` produced a SILENT 1920×1080 file
+(ffprobe: av1 video, no audio stream). B-GUI-003's acceptance had only
+compared heights. **Fix (both, `actor.rs` only):** (1) the `Best` arm now
+selects the highest-resolution format across ALL formats — `Specific` with no
+height cap, mirroring yt-dlp's default `bv*+ba/b`; progressive still wins
+ties, heightless direct files / audio-only formats (area 0) stay pickable —
+never an error where the old arm succeeded. Deliberate behaviour change; the
+unit tests pinning best-progressive were updated. (2) `get_download_url`
+returns the PAGE URL for a video-only pick (the same move as its HLS branch),
+so the engine's probe sees HTML and routes to yt-dlp, where the existing
+`PageFallback` spec downloads video+audio and ffmpeg merges them — no engine
+or queue changes. Acceptance (real isolated runs, ffprobe on each): YouTube
+Best → 3840×1620 (the video's true max) WITH opus audio, yt-dlp `-f
+401+bestaudio/401/best` in the log; 480/720/1080 → exact heights, now WITH
+audio; TikTok Best → 1080×1920 + aac via its combined format (no forced
+split); Facebook Best → 720p + aac on the native path; a direct `.mp3` and a
+direct `.mp4` still take the native path (probed `audio/mpeg` / `video/mp4`).
+ffmpeg (a documented prerequisite) performs the merges. Source: maintainer
+report + fix session, 2026-07-03.
+
 ## P2
 
 ### F-DL-001 — Shape A: use aria2c as yt-dlp's external downloader · closed (opt-in) · SMALL (XS)

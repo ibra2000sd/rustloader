@@ -326,12 +326,15 @@ impl BackendActor {
     /// user's `quality` choice decides (B-GUI-003 — it used to be ignored and
     /// the maximum resolution always won):
     ///
-    /// - `Best`: prefers the best single progressive (video+audio) format; if
-    ///   none exists — direct media files and DASH video/audio-split sources —
-    ///   it falls back to the best available format rather than failing, so
-    ///   the engine/yt-dlp path can still fetch it. (Returning an error here
-    ///   is what previously stopped the GUI from ever starting a download.)
-    ///   This arm is the pre-B-GUI-003 behaviour, unchanged.
+    /// - `Best`: the highest-resolution format across ALL formats — DASH-split
+    ///   video included — i.e. `Specific` with no height cap, mirroring
+    ///   yt-dlp's default `bv*+ba/b`. (It used to prefer the best progressive
+    ///   format, but YouTube offers no progressive above 360p, so "Best
+    ///   Available" delivered WORSE quality than picking 1080p.) A video-only
+    ///   pick is made sound by the queue's `PageFallback` exactly as for
+    ///   `Specific`. At equal resolution a progressive format still wins, and
+    ///   sources with no resolution data (direct files, audio-only) remain
+    ///   pickable — never an error where the old `Best` succeeded.
     /// - `Specific(h)`: the best format with `height <= h` across ALL formats
     ///   (DASH-split video included — a video-only pick is made sound by the
     ///   queue's `PageFallback`, which appends `+bestaudio` to the yt-dlp
@@ -340,8 +343,10 @@ impl BackendActor {
     ///   where `Best` would have succeeded.
     /// - `Worst`: the smallest format that still has a video track.
     ///
-    /// Either way the choice travels as a concrete format: the native engine
-    /// downloads its resolved URL, and the yt-dlp fallback re-selects it by id.
+    /// Either way the choice travels as a concrete format: a complete format's
+    /// resolved URL feeds the native engine, while a video-only pick travels
+    /// as the page URL + its id so the yt-dlp path can merge in audio (see
+    /// [`Self::get_download_url`]).
     fn select_format(
         video_info: &VideoInfo,
         format_id: Option<String>,
@@ -397,20 +402,16 @@ impl BackendActor {
                 .filter(|f| has_video(f))
                 .min_by_key(|f| (area(f), !has_audio(f))),
             // `Best`, and `Specific` values that aren't a pixel height (the
-            // GUI only produces numeric ones): historical behaviour.
+            // GUI only produces numeric ones): the true best — the highest
+            // resolution across ALL formats, the same selection as
+            // `Specific` with no height cap. A video-only winner (YouTube's
+            // DASH ladder) gets audio from `PageFallback`'s `+bestaudio`;
+            // formats without resolution data (direct files, audio-only)
+            // have area 0 and are still picked when they are all there is.
             _ => pool
                 .iter()
                 .copied()
-                .filter(|f| has_video(f) && has_audio(f))
-                .max_by_key(|f| area(f))
-                // No single progressive (video+audio) format. This is the
-                // common case for direct media files (a lone format with no
-                // codec info) and for DASH sources whose video and audio are
-                // split — failing here is what stopped the GUI from ever
-                // starting a download. Fall back to the best available
-                // format (by resolution) so the engine / yt-dlp path can
-                // still fetch it.
-                .or_else(|| pool.iter().copied().max_by_key(|f| area(f))),
+                .max_by_key(|f| (area(f), has_audio(f) && has_video(f))),
         };
 
         picked
@@ -424,6 +425,20 @@ impl BackendActor {
         video_info: &VideoInfo,
         format: &Format,
     ) -> Result<String, String> {
+        // A video-only pick (DASH-split video, acodec "none") can never be
+        // made whole by the native path — its direct URL serves exactly one,
+        // silent, stream, and YouTube's IP-bound URLs probe fine so the
+        // engine happily downloads it. Hand back the page URL instead (the
+        // same move as the HLS check below): the engine's probe then routes
+        // to yt-dlp, where the queue's `PageFallback` spec
+        // (`{id}+bestaudio/{id}/best`) downloads video + audio and ffmpeg
+        // merges them.
+        let video_only = format.vcodec.as_deref().unwrap_or("none") != "none"
+            && format.acodec.as_deref().unwrap_or("none") == "none";
+        if video_only && !video_info.url.is_empty() {
+            return Ok(video_info.url.clone());
+        }
+
         let direct_url = self
             .extractor
             .get_direct_url(&video_info.url, &format.format_id)
@@ -613,14 +628,38 @@ mod tests {
     }
 
     #[test]
-    fn prefers_best_progressive_format() {
+    fn best_picks_highest_resolution_across_all_formats() {
+        // Deliberate behaviour change: Best used to prefer the best
+        // *progressive* format ("high", 1080p), but YouTube offers no
+        // progressive above 360p, so that made "Best Available" worse than
+        // Specific(1080). Best now means TRUE best: the highest resolution,
+        // video-only DASH included (PageFallback adds `+bestaudio`).
         let vi = info(vec![
             fmt("low", Some("h264"), Some("aac"), 640, 360),
             fmt("high", Some("h264"), Some("aac"), 1920, 1080),
             fmt("videoonly", Some("vp9"), Some("none"), 3840, 2160),
         ]);
         let f = BackendActor::select_format(&vi, None, &VideoQuality::Best).unwrap();
-        assert_eq!(f.format_id, "high"); // best *progressive*, not the 4k video-only
+        assert_eq!(f.format_id, "videoonly"); // the 4k, not the 1080p progressive
+    }
+
+    #[test]
+    fn best_on_youtube_shaped_ladder_picks_top_dash_rung() {
+        // The B-GUI-00x regression itself: on a YouTube-shaped list Best used
+        // to pick "18" (360p progressive); it must pick the 1080p DASH rung.
+        let f = BackendActor::select_format(&youtube_like(), None, &VideoQuality::Best).unwrap();
+        assert_eq!(f.format_id, "137");
+    }
+
+    #[test]
+    fn best_prefers_progressive_at_equal_resolution() {
+        // No pointless DASH split where a complete format is just as good.
+        let vi = info(vec![
+            fmt("videoonly", Some("h264"), Some("none"), 1280, 720),
+            fmt("progressive", Some("h264"), Some("aac"), 1280, 720),
+        ]);
+        let f = BackendActor::select_format(&vi, None, &VideoQuality::Best).unwrap();
+        assert_eq!(f.format_id, "progressive");
     }
 
     #[test]
@@ -638,15 +677,15 @@ mod tests {
     }
 
     #[test]
-    fn dash_split_falls_back_to_best_available() {
-        // No single progressive format (video-only + audio-only). Must fall back
-        // rather than fail.
+    fn dash_split_picks_the_video_track_not_an_error() {
+        // No single progressive format (video-only + audio-only). Must pick
+        // the video track rather than fail (never-fail property).
         let vi = info(vec![
             fmt("video", Some("vp9"), Some("none"), 1920, 1080),
             fmt("audio", Some("none"), Some("mp4a"), 0, 0),
         ]);
         let f = BackendActor::select_format(&vi, None, &VideoQuality::Best)
-            .expect("must fall back, not error");
+            .expect("must pick a format, not error");
         assert_eq!(f.format_id, "video"); // best by resolution
     }
 
@@ -720,7 +759,7 @@ mod tests {
     fn non_numeric_specific_behaves_like_best() {
         let vi = youtube_like();
         let f = BackendActor::select_format(&vi, None, &specific("Custom")).unwrap();
-        assert_eq!(f.format_id, "18"); // best progressive, the historical pick
+        assert_eq!(f.format_id, "137"); // same pick as Best: the true best
     }
 
     #[test]
