@@ -216,6 +216,9 @@ impl BackendActor {
                     .await;
             }
             Err(e) => {
+                // Log it: the error otherwise only surfaces to the GUI, so a
+                // non-timeout failure would be invisible to anyone reading the logs.
+                warn!("Extraction failed for {}: {}", url, e);
                 let _ = self
                     .sender
                     .send(BackendEvent::ExtractionCompleted(Err(e.to_string())))
