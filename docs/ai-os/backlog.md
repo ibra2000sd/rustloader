@@ -133,6 +133,30 @@ queue task created → segmented native download of the resolved direct URL →
 31 MB file landed + history row persisted. Source: interactive GUI test
 session, 2026-07-03.
 
+### B-DL-008 — yt-dlp fallback retried the dead direct URL instead of the page URL · closed (PR open) · SMALL
+Found live during the #48 GUI acceptance run (2026-07-03, `6ba62e8`): a TikTok
+download failed with "yt-dlp download failed" even though yt-dlp supports
+TikTok. The queue path hands the engine the extractor-**resolved direct URL**
+(`actor.rs` stores it in `updated_format.url`; `manager.rs` passes
+`task.format.url` to `engine.download()`), and sites with signed/session-bound
+media URLs (TikTok; YouTube DASH behaves the same) 403 a fresh client — the
+probe 403'd, the engine fell back to `download_via_ytdlp`, and yt-dlp's
+`[generic]` extractor got the **same dead direct URL** and 403'd identically.
+The `engine.rs` comment "yt-dlp runs on the page URL itself" was only true for
+the CLI path, whose `download()` input IS the page URL. Control cases from the
+same session: YouTube 360p progressive and a Facebook video probed fine and
+downloaded natively. **Fix:** new `PageFallback { page_url, format_spec }`
+carries the original page URL + a yt-dlp `-f` spec reproducing the chosen
+format (`{id}+bestaudio/{id}/best` for DASH-split video-only, `{id}/best`
+otherwise); `engine.download_with_fallback()` routes both yt-dlp exits (probe
+failure, non-media Content-Type) through it, `download()` delegates with
+`None` so the CLI path is byte-identical; the queue path builds the fallback
+from `task.video_info.url` + `task.format`. `YtDlpOptions.format_spec` is the
+verbatim `-f` override (outranks `quality`; `audio_only` still wins). Unit
+tests cover the selector precedence, both `PageFallback` spec shapes, and the
+fallback-target routing. Source: interactive GUI acceptance session,
+2026-07-03.
+
 ## P2
 
 ### F-DL-001 — Shape A: use aria2c as yt-dlp's external downloader · closed (opt-in) · SMALL (XS)
@@ -487,6 +511,7 @@ parsing + octet-stream→`.bin`) and the directory creation. 2026-07-02, base
 | `F-GUI-001` | Opt-in clipboard monitoring (detect copied URLs, confirm to queue) | 2026-07-02 (PR pending) |
 | `B-DL-007` | Native downloads: create missing output dir; name/ext for unknown content (Content-Disposition → URL basename → `.bin`, never `.mp4`) | 2026-07-02 (PR pending) |
 | `F-GUI-002` | Design-system foundation: token palette + Geist/Geist Mono in the Iced theme; `design-system/` committed | 2026-07-03 (PR pending) |
+| `B-DL-008` | Engine yt-dlp fallback runs on the original page URL + chosen-format spec, not the dead direct URL | 2026-07-03 (PR pending) |
 
 (Pre-`docs/ai-os` work was tracked via GitHub PRs/CHANGELOG; future items use the
 IDs above.)
