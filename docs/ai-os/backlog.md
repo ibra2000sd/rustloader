@@ -133,6 +133,28 @@ queue task created → segmented native download of the resolved direct URL →
 31 MB file landed + history row persisted. Source: interactive GUI test
 session, 2026-07-03.
 
+### B-GUI-002 — Non-Latin titles render as tofu (□): Basic shaping blocks font fallback · closed (PR open) · SMALL
+Regression from F-GUI-002/#45: bundling Geist + Geist Mono (both Latin-only)
+and making Geist the `default_font` turned every Arabic/CJK/emoji video title
+into □ boxes. Root cause verified against the vendored sources: iced 0.12.3
+defaults every `Text` widget to `Shaping::Basic`
+(`iced_core-0.12.3/src/widget/text.rs:51`), and cosmic-text 0.10.0's Basic
+path (`shape_skip`, `shape.rs`) maps all chars through the **first** matched
+font's charmap only — missing chars become glyph 0 (tofu), with no fallback
+and no Arabic joining/RTL. The system fonts ARE in the font database
+(`FontSystem::new_with_fonts` → `db.load_system_fonts()`), so
+`Shaping::Advanced` (`shape_run`) already resolves missing glyphs per-script
+via platform lists (macOS Geeza Pro/PingFang/Hiragino/Apple Color Emoji,
+equivalents on Windows/Linux). **Fix:** `theme::SHAPING_CONTENT`
+(= `Shaping::Advanced`) applied to every content-derived text site — titles
+(`download_item.rs`, `history_item.rs`), error messages (incl. the ⚠/✕/💡
+prefixes Geist also lacks), output path, clipboard-detected URL, history load
+error. Fonts unchanged: Geist stays first in the chain, Geist Mono keeps the
+numeric data. UI chrome stays on the cheaper Basic default. Known limitation:
+`TextInput` in iced 0.12 exposes no shaping option, so non-ASCII typed into
+the URL/path inputs can still tofu (revisit on the iced upgrade). Final
+acceptance is the maintainer's visual check of an Arabic/CJK title.
+
 ### B-DL-008 — yt-dlp fallback retried the dead direct URL instead of the page URL · closed (PR open) · SMALL
 Found live during the #48 GUI acceptance run (2026-07-03, `6ba62e8`): a TikTok
 download failed with "yt-dlp download failed" even though yt-dlp supports

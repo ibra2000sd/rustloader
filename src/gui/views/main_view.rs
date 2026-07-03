@@ -190,6 +190,7 @@ pub fn main_view(
                     text(url.to_string())
                         .size(12)
                         .font(theme::FONT_MONO)
+                        .shaping(theme::SHAPING_CONTENT) // URLs can carry non-ASCII (IRIs)
                         .style(iced::theme::Text::Color(theme::FG_3)),
                 ]
                 .spacing(4)

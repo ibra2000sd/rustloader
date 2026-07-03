@@ -152,6 +152,7 @@ pub fn download_item(task: &DownloadTaskUI) -> Element<'static, Message> {
     let title_row = row![
         text(&task.title)
             .size(16)
+            .shaping(theme::SHAPING_CONTENT)
             .width(Length::Fill)
             .style(theme::TEXT_PRIMARY),
         text(&display_status).size(12).style(status_color),
@@ -166,6 +167,7 @@ pub fn download_item(task: &DownloadTaskUI) -> Element<'static, Message> {
         content = content.push(
             text("⚠ Download appears stalled. Try restarting or canceling.")
                 .size(11)
+                .shaping(theme::SHAPING_CONTENT)
                 .style(iced::theme::Text::Color(theme::WARNING)),
         );
     }
@@ -186,6 +188,7 @@ pub fn download_item(task: &DownloadTaskUI) -> Element<'static, Message> {
         content = content.push(
             text(format!("✕ Error: {}{}", error_msg, retry_note))
                 .size(12)
+                .shaping(theme::SHAPING_CONTENT)
                 .style(iced::theme::Text::Color(theme::DANGER)),
         );
 
@@ -194,6 +197,7 @@ pub fn download_item(task: &DownloadTaskUI) -> Element<'static, Message> {
             row![
                 text(format!("💡 {}", recovery_hint))
                     .size(11)
+                    .shaping(theme::SHAPING_CONTENT)
                     .style(iced::theme::Text::Color(theme::TEXT_SECONDARY)),
                 Space::with_width(Length::Fill),
                 button(text("Dismiss").size(10))

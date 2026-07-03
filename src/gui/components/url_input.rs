@@ -49,6 +49,7 @@ pub fn url_input(
                 text("Warning: ").size(14).style(theme::DANGER),
                 text(error)
                     .size(14)
+                    .shaping(theme::SHAPING_CONTENT)
                     .style(iced::theme::Text::Color(theme::DANGER)),
             ]
             .spacing(4)
