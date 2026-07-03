@@ -60,6 +60,7 @@ pub fn history_view(
                     .style(iced::theme::Text::Color(theme::DANGER)),
                 text(error.to_string())
                     .size(13)
+                    .shaping(theme::SHAPING_CONTENT)
                     .style(iced::theme::Text::Color(theme::TEXT_SECONDARY)),
             ]
             .spacing(10)

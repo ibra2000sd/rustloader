@@ -86,6 +86,17 @@ pub const FONT_UI_SEMIBOLD: Font = Font {
 /// Every speed, size, ETA, %, path, and timestamp renders in Geist Mono.
 pub const FONT_MONO: Font = Font::with_name("Geist Mono");
 
+/// Shaping for content-derived text: video titles, filenames/paths, error
+/// messages, and URLs — anything whose characters we don't control.
+///
+/// Geist and Geist Mono are Latin-only. Iced's default `Shaping::Basic` maps
+/// every character through the requested font's charmap alone, so Arabic,
+/// CJK, and emoji render as tofu (□). `Shaping::Advanced` enables
+/// cosmic-text's per-script fallback to the system fonts already loaded in
+/// the font database, keeping Geist first for the glyphs it has. Latin-only
+/// UI chrome (buttons, labels) stays on the cheaper `Basic` default.
+pub const SHAPING_CONTENT: iced::widget::text::Shaping = iced::widget::text::Shaping::Advanced;
+
 /// The bundled Geist / Geist Mono binaries (OFL-1.1, `assets/fonts/OFL.txt`),
 /// registered with Iced via `Settings::fonts`. Weights follow
 /// `tokens/fonts.css`: Geist 400/500/600/700, Geist Mono 400/500/600.

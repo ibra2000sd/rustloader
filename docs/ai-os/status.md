@@ -39,6 +39,19 @@ regression for the one case it would have changed anything (see "Done" below).
 
 ## Done (recent)
 
+- **B-GUI-002 — non-Latin titles rendered as tofu (□)**
+  (2026-07-03, base `6cd8627`, PR pending) — regression from the F-GUI-002
+  fonts: Geist/Geist Mono are Latin-only and iced 0.12's default
+  `Shaping::Basic` does **no font fallback** (cosmic-text's `shape_skip` maps
+  chars through the first font's charmap only), so Arabic/CJK/emoji titles
+  became □ boxes. Fixed by applying `theme::SHAPING_CONTENT`
+  (`Shaping::Advanced` — enables cosmic-text's per-script system-font
+  fallback; the system fonts were already loaded) to all content-derived text
+  (titles, errors, paths, detected URLs). No font/bundling change; Latin UI
+  chrome keeps Basic. `TextInput` can't be fixed on iced 0.12 (no shaping
+  API). Maintainer's visual check of an Arabic/CJK title is the acceptance.
+  See backlog B-GUI-002.
+
 - **B-DL-008 — engine yt-dlp fallback ran on the dead direct URL**
   (2026-07-03, base `6ba62e8`, PR pending) — found live in the #48 GUI
   acceptance run: a TikTok download failed because its signed/session-bound

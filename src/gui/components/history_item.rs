@@ -54,6 +54,7 @@ pub fn history_item(record: &DownloadRecord) -> Element<'static, Message> {
     let title_row = row![
         text(title)
             .size(16)
+            .shaping(theme::SHAPING_CONTENT)
             .width(Length::Fill)
             .style(theme::TEXT_PRIMARY),
         text(&record.status).size(12).style(status_color),
@@ -67,6 +68,7 @@ pub fn history_item(record: &DownloadRecord) -> Element<'static, Message> {
         content = content.push(
             text(format!("✕ {error}"))
                 .size(12)
+                .shaping(theme::SHAPING_CONTENT)
                 .style(iced::theme::Text::Color(theme::DANGER)),
         );
     }
@@ -77,6 +79,7 @@ pub fn history_item(record: &DownloadRecord) -> Element<'static, Message> {
             text(record.output_path.display().to_string())
                 .size(12)
                 .font(theme::FONT_MONO)
+                .shaping(theme::SHAPING_CONTENT) // filenames inherit the title's script
                 .style(iced::theme::Text::Color(theme::TEXT_SECONDARY)),
         )
         .push(
