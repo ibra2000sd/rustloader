@@ -4,7 +4,7 @@
 # Layout (matches what the code expects at runtime):
 #   Rustloader.app/Contents/MacOS/rustloader       <- launcher script (CFBundleExecutable)
 #   Rustloader.app/Contents/MacOS/rustloader-bin   <- the real release binary
-#   Rustloader.app/Contents/Resources/bin/         <- bundled yt-dlp, ffmpeg, ffprobe
+#   Rustloader.app/Contents/Resources/bin/         <- bundled yt-dlp, ffmpeg, ffprobe, deno
 #
 # Why a launcher script: the extractor resolves the bundled yt-dlp itself
 # (src/utils/platform.rs::ytdlp_path checks Contents/Resources/bin/), but the
@@ -26,6 +26,13 @@
 # per installed file and then starts in ~1s. Resources/bin/yt-dlp is a
 # relative symlink into the onedir tree so both the app's bundled-path lookup
 # and the launcher's PATH find it under the expected name.
+#
+# Deno (single static binary, MIT) is bundled as yt-dlp's JavaScript runtime
+# (B-DL-009): YouTube's web client — which yt-dlp selects whenever cookies
+# are configured — needs a JS runtime to solve the n-challenge, and a
+# Finder-launched app has no node/deno on PATH. The launcher's PATH-prepend
+# makes the bundled deno visible to yt-dlp AND to the app's own
+# depcheck::has_js_runtime() startup check.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -58,9 +65,16 @@ for tool in ffmpeg ffprobe; do
         rm "$DEPS/$tool.zip"
     fi
 done
-chmod +x "$DEPS/ytdlp_onedir/yt-dlp_macos" "$DEPS/ffmpeg" "$DEPS/ffprobe"
+if [ ! -f "$DEPS/deno" ]; then
+    curl -fsSL -o "$DEPS/deno.zip" \
+        "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-apple-darwin.zip"
+    unzip -o -q "$DEPS/deno.zip" -d "$DEPS"
+    rm "$DEPS/deno.zip"
+fi
+chmod +x "$DEPS/ytdlp_onedir/yt-dlp_macos" "$DEPS/ffmpeg" "$DEPS/ffprobe" "$DEPS/deno"
 echo "  yt-dlp  $("$DEPS/ytdlp_onedir/yt-dlp_macos" --version)"
 echo "  ffmpeg  $("$DEPS/ffmpeg" -version | head -1 | awk '{print $3}')"
+echo "  deno    $("$DEPS/deno" --version | head -1 | awk '{print $2}')"
 
 echo "[3/6] assembling $APP"
 rm -rf "$APP"
@@ -69,7 +83,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/bin"
 cp target/release/rustloader "$APP/Contents/MacOS/rustloader-bin"
 cp -R "$DEPS/ytdlp_onedir" "$APP/Contents/Resources/bin/yt-dlp_dir"
 ln -s "yt-dlp_dir/yt-dlp_macos" "$APP/Contents/Resources/bin/yt-dlp"
-cp "$DEPS/ffmpeg" "$DEPS/ffprobe" "$APP/Contents/Resources/bin/"
+cp "$DEPS/ffmpeg" "$DEPS/ffprobe" "$DEPS/deno" "$APP/Contents/Resources/bin/"
 cp assets/icons/AppIcon.icns "$APP/Contents/Resources/"
 
 # Launcher: put the bundled tools on PATH, then exec the real binary.
@@ -118,6 +132,7 @@ echo "[4/6] verifying bundle layout"
 "$APP/Contents/MacOS/rustloader-bin" --version
 test -x "$APP/Contents/Resources/bin/yt-dlp"
 test -x "$APP/Contents/Resources/bin/ffmpeg"
+test -x "$APP/Contents/Resources/bin/deno"
 
 echo "[5/6] creating $DMG"
 STAGE="$(mktemp -d)"
