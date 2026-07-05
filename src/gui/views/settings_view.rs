@@ -13,6 +13,7 @@ pub fn settings_view(
     cookies_from_browser: &str,
     detected_browsers: &[String],
     clipboard_monitoring: bool,
+    check_updates_on_launch: bool,
 ) -> Element<'static, crate::gui::app::Message> {
     // Header with back button
     let header = row![
@@ -188,6 +189,33 @@ pub fn settings_view(
     ]
     .spacing(10);
 
+    // Updates section — same privacy-honest tone as the clipboard toggle:
+    // say exactly what leaves the machine and what never happens.
+    let updates_section = column![
+        text("Updates")
+            .size(16)
+            .style(iced::theme::Text::Color(crate::gui::theme::TEXT_PRIMARY)),
+        text(
+            "On launch, ask GitHub whether a newer Rustloader release exists and show a \
+             dismissible banner if so. This sends one request to api.github.com, so GitHub \
+             can see your IP address — nothing else is shared, and nothing downloads or \
+             installs automatically."
+        )
+        .size(13)
+        .style(iced::theme::Text::Color(crate::gui::theme::TEXT_SECONDARY)),
+        toggler(
+            Some("Check for updates on launch".to_string()),
+            check_updates_on_launch,
+            crate::gui::app::Message::CheckUpdatesToggled,
+        )
+        .width(Length::Shrink)
+        .spacing(8),
+        text("When off, no request is made. Save Settings keeps the choice; the check runs at the next launch.")
+            .size(11)
+            .style(iced::theme::Text::Color(crate::gui::theme::TEXT_SECONDARY)),
+    ]
+    .spacing(10);
+
     // Save button
     let save_button = button(text("Save Settings").size(16))
         .on_press(crate::gui::app::Message::SaveSettings)
@@ -210,6 +238,7 @@ pub fn settings_view(
                     quality_section,
                     cookies_section,
                     clipboard_section,
+                    updates_section,
                 ]
                 .spacing(24)
             )

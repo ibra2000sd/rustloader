@@ -17,6 +17,7 @@ pub fn main_view(
     output_format: &str,
     segments: usize,
     detected_url: Option<&str>,
+    update_available: Option<&str>,
 ) -> Element<'static, Message> {
     use crate::gui::theme;
 
@@ -236,12 +237,58 @@ pub fn main_view(
         )))
     });
 
+    // Update-available banner (launch-time check, utils::update_check):
+    // same non-intrusive confirm/dismiss shape as the clipboard banner.
+    // Download only opens the release page in the browser — no auto-install.
+    let update_banner = update_available.map(|version| {
+        container(
+            row![
+                column![
+                    text(format!("Update available: v{version}"))
+                        .size(14)
+                        .style(iced::theme::Text::Color(theme::FG_1)),
+                    text("Download opens the release page in your browser.")
+                        .size(12)
+                        .style(iced::theme::Text::Color(theme::FG_3)),
+                ]
+                .spacing(4)
+                .width(Length::Fill),
+                button(text("Download").size(14))
+                    .on_press(Message::OpenUpdateDownloadPage)
+                    .padding([8, 16])
+                    .style(iced::theme::Button::Custom(Box::new(theme::PrimaryButton))),
+                button(text("Skip this version").size(14))
+                    .on_press(Message::SkipUpdateVersion)
+                    .padding([8, 16])
+                    .style(iced::theme::Button::Custom(Box::new(
+                        theme::SecondaryButton
+                    ))),
+                button(text("Dismiss").size(14))
+                    .on_press(Message::DismissUpdateBanner)
+                    .padding([8, 16])
+                    .style(iced::theme::Button::Custom(Box::new(
+                        theme::SecondaryButton
+                    ))),
+            ]
+            .spacing(12)
+            .align_items(Alignment::Center),
+        )
+        .padding(16)
+        .width(Length::Fill)
+        .style(iced::theme::Container::Custom(Box::new(
+            theme::GlassContainer,
+        )))
+    });
+
     // Main content
     let mut content = column![hero_section]
         .spacing(32)
         .width(Length::Fill)
         .height(Length::Fill)
         .padding([32, 32, 32, 32]);
+    if let Some(banner) = update_banner {
+        content = content.push(banner);
+    }
     if let Some(banner) = clipboard_banner {
         content = content.push(banner);
     }

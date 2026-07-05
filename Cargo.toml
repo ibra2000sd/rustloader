@@ -43,6 +43,9 @@ tokio-util = { version = "0.7", features = ["io"] }
 # CLI argument parsing (for yt-dlp)
 which = "6.0"
 
+# Release-version comparison for the launch-time update check
+semver = "1"
+
 # Time handling
 chrono = { version = "0.4", features = ["serde"] }
 
