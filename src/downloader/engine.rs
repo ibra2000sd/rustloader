@@ -17,6 +17,7 @@ use crate::downloader::resume_guard::{
 };
 use crate::downloader::segment::{calculate_segments, download_segment, SegmentProgress};
 use crate::extractor::ytdlp::find_aria2c;
+use crate::utils::OutputFormat;
 use anyhow::Result;
 use futures::stream::{self, StreamExt};
 use reqwest::Client;
@@ -151,6 +152,11 @@ pub struct YtDlpOptions {
     pub audio_only: bool,
     /// Audio format when extracting audio (e.g. "mp3").
     pub audio_format: Option<String>,
+    /// Remux the downloaded video into this container (yt-dlp
+    /// `--remux-video`, e.g. "mp4"/"webm"/"mkv") — a lossless container
+    /// change, not a re-encode. Ignored when `audio_only` is set. `None`
+    /// (the default) keeps the source container.
+    pub remux_video: Option<String>,
     /// Download subtitles (`--write-subs --sub-langs all`).
     pub subtitles: bool,
     /// Download the whole playlist (`--yes-playlist`).
@@ -230,6 +236,13 @@ pub fn build_ytdlp_args(
         };
         args.push("-f".to_string());
         args.push(selector);
+    }
+
+    if !opts.audio_only {
+        if let Some(container) = &opts.remux_video {
+            args.push("--remux-video".to_string());
+            args.push(container.clone());
+        }
     }
 
     if let Some(bitrate) = &opts.audio_bitrate {
@@ -435,7 +448,7 @@ impl DownloadEngine {
         output_path: &Path,
         progress_tx: mpsc::Sender<DownloadProgress>,
     ) -> Result<PathBuf> {
-        self.download_with_fallback(url, None, output_path, progress_tx)
+        self.download_with_fallback(url, None, OutputFormat::Best, output_path, progress_tx)
             .await
     }
 
@@ -444,10 +457,17 @@ impl DownloadEngine {
     /// whose `url` is already a page URL (the CLI) use `download`; the queue
     /// path, whose `url` is a resolved direct URL, passes the original page
     /// URL here so a probe failure doesn't retry a dead direct URL (B-DL-008).
+    /// `output_format` is the user's container/audio choice (B-GUI-005). It
+    /// only affects the yt-dlp path (remux/extract-audio are ffmpeg
+    /// post-steps); `Best` is a strict no-op and callers that force a
+    /// conversion route to yt-dlp by handing the engine a page URL (the
+    /// actor's `get_download_url` does this), the same move as HLS and
+    /// video-only picks.
     pub async fn download_with_fallback(
         &self,
         url: &str,
         fallback: Option<PageFallback>,
+        output_format: OutputFormat,
         output_path: &Path,
         progress_tx: mpsc::Sender<DownloadProgress>,
     ) -> Result<PathBuf> {
@@ -511,7 +531,13 @@ impl DownloadEngine {
                     );
                 }
                 return self
-                    .download_via_ytdlp(ytdlp_url, format_spec, output_path, progress_tx)
+                    .download_via_ytdlp(
+                        ytdlp_url,
+                        format_spec,
+                        &output_format,
+                        output_path,
+                        progress_tx,
+                    )
                     .await;
             }
         };
@@ -531,7 +557,13 @@ impl DownloadEngine {
                 );
             }
             return self
-                .download_via_ytdlp(ytdlp_url, format_spec, output_path, progress_tx)
+                .download_via_ytdlp(
+                    ytdlp_url,
+                    format_spec,
+                    &output_format,
+                    output_path,
+                    progress_tx,
+                )
                 .await;
         }
 
@@ -882,6 +914,7 @@ impl DownloadEngine {
         &self,
         url: &str,
         format_spec: Option<&str>,
+        output_format: &OutputFormat,
         output_path: &Path,
         progress_tx: mpsc::Sender<DownloadProgress>,
     ) -> Result<PathBuf> {
@@ -912,13 +945,23 @@ impl DownloadEngine {
         // Per-download `-f` override (the PageFallback's chosen-format spec)
         // over the engine-wide options. The engine is shared across downloads
         // (Arc in QueueManager), so this must not mutate `self`.
-        let opts = match format_spec {
+        let mut opts = match format_spec {
             Some(spec) => YtDlpOptions {
                 format_spec: Some(spec.to_string()),
                 ..self.ytdlp_options.clone()
             },
             None => self.ytdlp_options.clone(),
         };
+        // The user's output-format choice (B-GUI-005), applied on top:
+        // a video container becomes a lossless `--remux-video`; an audio
+        // format becomes `-x --audio-format` via the existing audio path;
+        // `Best` changes nothing.
+        if let Some(ext) = output_format.remux_ext() {
+            opts.remux_video = Some(ext.to_string());
+        } else if let Some(fmt) = output_format.audio_ext() {
+            opts.audio_only = true;
+            opts.audio_format = Some(fmt.to_string());
+        }
         let args = build_ytdlp_args(&opts, url, &out, aria2c_available);
         debug!("🔧 [YT-DLP] Args: {:?}", args);
         let mut cmd = AsyncCommand::new(&self.ytdlp_program);
@@ -1076,7 +1119,7 @@ impl DownloadEngine {
             // differ from the caller's provisional extension). Best-effort:
             // fall back to the caller's path if discovery finds nothing
             // (e.g. playlist templates, where yt-dlp names each entry).
-            let final_path = find_ytdlp_output(output_path)
+            let final_path = find_ytdlp_output(output_path, None)
                 .await
                 .unwrap_or_else(|| output_path.to_path_buf());
             Ok(final_path)
@@ -1088,6 +1131,36 @@ impl DownloadEngine {
             // emitted with the same detail (I-3: progress contract unchanged).
             let detail = ytdlp_error_line
                 .unwrap_or_else(|| "yt-dlp download failed (no error output captured)".to_string());
+
+            // Remux failure fallback (B-GUI-005): `--remux-video` fails at the
+            // POST-processing stage when ffmpeg can't fit the source codecs
+            // into the requested container (e.g. H.264 into WebM). The media
+            // itself downloaded fine and is on disk in its original container
+            // — keep it instead of failing the whole download. Scoped to
+            // remux requests + a Postprocessing error + an actual file, so
+            // genuine download failures still fail.
+            if let (Some(target_ext), true) =
+                (output_format.remux_ext(), detail.contains("Postprocessing"))
+            {
+                // Exclude the requested container: the failed remux leaves a
+                // half-written stub with exactly that extension, and it must
+                // not shadow the original file.
+                if let Some(kept) = find_ytdlp_output(output_path, Some(target_ext)).await {
+                    let stub = kept.with_extension(target_ext);
+                    if stub != kept && tokio::fs::remove_file(&stub).await.is_ok() {
+                        debug!("🧹 [YT-DLP] Removed failed remux stub {:?}", stub);
+                    }
+                    warn!(
+                        "⚠️ [YT-DLP] Remux to {} failed ({}); keeping the original container: {:?}",
+                        target_ext, detail, kept
+                    );
+                    let mut done = DownloadProgress::new(0, 1);
+                    done.status = DownloadStatus::Completed;
+                    done.complete();
+                    let _ = progress_tx.send(done).await;
+                    return Ok(kept);
+                }
+            }
             error!("❌ [YT-DLP] Download failed: {}", detail);
             let mut failed = DownloadProgress::new(0, 1);
             failed.failed(detail.clone());
@@ -1630,7 +1703,11 @@ pub fn ytdlp_output_template(output_path: &Path) -> String {
 /// stem, newest first, skipping yt-dlp's own in-flight artifacts
 /// (`.part`/`.ytdl`/temp files). Returns `None` for playlist templates
 /// (yt-dlp names each entry itself) or when nothing matches.
-async fn find_ytdlp_output(output_path: &Path) -> Option<PathBuf> {
+/// `exclude_ext` skips files with that extension — the remux-failure
+/// fallback uses it so the half-written product of the FAILED remux (ffmpeg
+/// leaves a stub in the target container) can never shadow the original,
+/// which would otherwise win the newest-mtime pick below.
+async fn find_ytdlp_output(output_path: &Path, exclude_ext: Option<&str>) -> Option<PathBuf> {
     let name = output_path.file_name()?.to_str()?;
     if name.contains("%(") {
         return None;
@@ -1653,6 +1730,9 @@ async fn find_ytdlp_output(output_path: &Path) -> Option<PathBuf> {
             .unwrap_or("")
             .to_ascii_lowercase();
         if matches!(ext.as_str(), "part" | "ytdl" | "temp" | "tmp") {
+            continue;
+        }
+        if exclude_ext.is_some_and(|x| x.eq_ignore_ascii_case(&ext)) {
             continue;
         }
         let Ok(metadata) = entry.metadata().await else {
@@ -3131,6 +3211,128 @@ mod tests {
     }
 
     // ============================================================
+    // OUTPUT-FORMAT (B-GUI-005) TESTS
+    // ============================================================
+
+    #[test]
+    fn test_build_ytdlp_args_emits_remux_video() {
+        let opts = YtDlpOptions {
+            remux_video: Some("mp4".to_string()),
+            ..Default::default()
+        };
+        let args = build_ytdlp_args(&opts, "https://example.com/w", "out.%(ext)s", false);
+        let idx = args
+            .iter()
+            .position(|a| a == "--remux-video")
+            .expect("--remux-video must be emitted");
+        assert_eq!(args[idx + 1], "mp4");
+    }
+
+    #[test]
+    fn test_build_ytdlp_args_audio_only_suppresses_remux() {
+        // -x and --remux-video are different post-processors; an audio pick
+        // must not also ask for a video remux.
+        let opts = YtDlpOptions {
+            remux_video: Some("mp4".to_string()),
+            audio_only: true,
+            audio_format: Some("mp3".to_string()),
+            ..Default::default()
+        };
+        let args = build_ytdlp_args(&opts, "https://example.com/w", "out.%(ext)s", false);
+        assert!(!args.iter().any(|a| a == "--remux-video"));
+        assert!(args.iter().any(|a| a == "-x"));
+    }
+
+    /// Remux failure fallback: yt-dlp downloaded the media fine but ffmpeg
+    /// couldn't fit the codecs into the requested container (Postprocessing
+    /// error, non-zero exit, file on disk) — the engine must keep the
+    /// original-container file instead of failing the download.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_remux_failure_keeps_original_container() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let downloaded = tmp.path().join("out.webm");
+        // ffmpeg leaves a half-written product in the TARGET container when
+        // the remux fails; it is newer than the original and must be neither
+        // adopted nor left behind.
+        let broken_product = tmp.path().join("out.mp4");
+        let stub = tmp.path().join("fake-yt-dlp.sh");
+        std::fs::write(
+            &stub,
+            format!(
+                "#!/bin/sh\nprintf 'media' > \"{}\"\nprintf 'x' > \"{}\"\n\
+                 echo \"ERROR: Postprocessing: Could not write header (incorrect codec parameters ?)\" 1>&2\n\
+                 exit 1\n",
+                downloaded.display(),
+                broken_product.display()
+            ),
+        )
+        .expect("write stub");
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+        let engine = DownloadEngine::new(DownloadConfig::default())
+            .with_ytdlp_program(stub.to_str().expect("utf-8 path"));
+        let (tx, _rx) = mpsc::channel::<DownloadProgress>(64);
+        let output_path = tmp.path().join("out.mp4");
+
+        let saved = engine
+            .download_via_ytdlp(
+                "https://example.com/watch?v=x",
+                None,
+                &OutputFormat::Mp4,
+                &output_path,
+                tx,
+            )
+            .await
+            .expect("remux failure with a downloaded file must not fail the download");
+        assert_eq!(saved, downloaded, "must adopt the original-container file");
+        assert!(
+            !broken_product.exists(),
+            "the failed remux stub must be cleaned up"
+        );
+    }
+
+    /// The same stub failure WITHOUT a remux request stays a failure — the
+    /// keep-original fallback is scoped to remux requests only.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_postprocessing_failure_without_remux_still_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let downloaded = tmp.path().join("out.webm");
+        let stub = tmp.path().join("fake-yt-dlp.sh");
+        std::fs::write(
+            &stub,
+            format!(
+                "#!/bin/sh\nprintf 'media' > \"{}\"\n\
+                 echo \"ERROR: Postprocessing: boom\" 1>&2\nexit 1\n",
+                downloaded.display()
+            ),
+        )
+        .expect("write stub");
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+        let engine = DownloadEngine::new(DownloadConfig::default())
+            .with_ytdlp_program(stub.to_str().expect("utf-8 path"));
+        let (tx, _rx) = mpsc::channel::<DownloadProgress>(64);
+        let output_path = tmp.path().join("out.mp4");
+
+        engine
+            .download_via_ytdlp(
+                "https://example.com/watch?v=x",
+                None,
+                &OutputFormat::Best,
+                &output_path,
+                tx,
+            )
+            .await
+            .expect_err("non-remux postprocessing failure must stay a failure");
+    }
+
+    // ============================================================
     // YT-DLP FAILURE ERROR-PROPAGATION REGRESSION TEST
     // (B-DL-007/B-DL-009 follow-up: the engine used to flatten a
     // failed yt-dlp run to "yt-dlp download failed", hiding the
@@ -3169,6 +3371,7 @@ mod tests {
             .download_via_ytdlp(
                 "https://example.com/watch?v=test123",
                 None,
+                &OutputFormat::Best,
                 &output_path,
                 tx,
             )

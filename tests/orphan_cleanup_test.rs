@@ -39,6 +39,7 @@ fn make_task(id: &str, output_path: PathBuf) -> DownloadTask {
         status: TaskStatus::Queued,
         progress: None,
         added_at: Utc::now(),
+        output_format: Default::default(),
     }
 }
 

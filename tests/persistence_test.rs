@@ -38,6 +38,7 @@ async fn test_persistence_rehydration() {
             }),
             output_path: base_dir.join("test.mp4"),
             timestamp: Utc::now(),
+            output_format: Default::default(),
         },
         QueueEvent::TaskStarted {
             task_id: task_id.clone(),
@@ -125,6 +126,7 @@ async fn test_persistence_corruption_resilience() {
         format: Box::new(Format::default()),
         output_path: PathBuf::from("/tmp/video.mp4"),
         timestamp: Utc::now(),
+        output_format: Default::default(),
     };
 
     let valid_json = serde_json::to_string(&valid_event).unwrap();

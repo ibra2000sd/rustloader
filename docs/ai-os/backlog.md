@@ -266,6 +266,36 @@ failing condition: bundled yt-dlp + `--cookies-from-browser chrome` +
 Finder-equivalent PATH fails at `37d2a7d` and succeeds with only deno added.
 Source: maintainer report + diagnosis session, 2026-07-04.
 
+### B-GUI-005 — "Format" control was a dead static "MP4" label · closed (PR open) · MEDIUM
+The main view's Format tag was hardcoded text (`main_view.rs`, "static for
+now"); nothing about container/format reached the download, so files kept
+yt-dlp's native container — YouTube "Best" delivered AV1/Opus in `.webm`
+under an "MP4" label. **Fix:** a real `OutputFormat` selector
+(`utils/config.rs`): `Best` (default, "Original (Best)" — byte-identical
+no-conversion behaviour), video containers MP4/WebM/MKV mapping to yt-dlp
+`--remux-video <ext>` (lossless container change, flag verified against the
+bundled 2026.06.09), and audio MP3/M4A/Opus/FLAC/WAV mapping to the engine's
+existing `-x --audio-format` path. GUI: a `pick_list` mirroring the Quality
+selector, persisted in the settings table (`output_format` key; unknown
+values load as Best), plus a hint line stating the trade-off (remux is
+lossless; an impossible remux keeps the original container). Threading:
+`StartDownload` → `DownloadTask` → `QueueEvent::TaskAdded`
+(`#[serde(default)]`, so pre-existing event-log lines rehydrate as Best —
+I-6 untouched) → `download_with_fallback(output_format)`. A non-Best choice
+routes via the page URL (the B-GUI-004 move) so the yt-dlp path performs the
+ffmpeg post-step — the native path can't convert. Remux failures
+(Postprocessing error + file on disk) keep the original container instead of
+failing the download; audio post-failures still fail. The engine-shared
+`YtDlpOptions` is not mutated: the choice applies per invocation in
+`download_via_ytdlp` (Arc-shared engine, same rule as `format_spec`). CLI
+surface unchanged. Unit tests: label/key round-trip, one-action-per-variant,
+`--remux-video` emission (suppressed under `-x`), remux-failure keep-original
+(stub yt-dlp), non-remux post-failure still fails. Known limitation, stated
+in the UI hint: "MP4 + Best" on YouTube remuxes the AV1/VP9 best streams
+into MP4 rather than filtering to native-H.264 MP4 (which caps at ~1080p);
+WebM cannot hold H.264 sources, which is exactly the keep-original case.
+Source: maintainer report (webm file under an "MP4" label), 2026-07-05.
+
 ## P2
 
 ### F-DL-001 — Shape A: use aria2c as yt-dlp's external downloader · closed (opt-in) · SMALL (XS)

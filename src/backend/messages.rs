@@ -1,6 +1,6 @@
 use crate::extractor::VideoInfo;
 use crate::gui::DownloadProgressData;
-use crate::utils::config::VideoQuality;
+use crate::utils::config::{OutputFormat, VideoQuality};
 use std::path::PathBuf;
 
 /// Commands sent from GUI to Backend
@@ -18,6 +18,10 @@ pub enum BackendCommand {
         /// The user's quality choice, applied by format selection when no
         /// explicit `format_id` is given (B-GUI-003).
         quality: VideoQuality,
+        /// The user's output format/container choice (B-GUI-005). `Best`
+        /// keeps today's behaviour; anything else routes the download through
+        /// yt-dlp for a remux or audio extraction.
+        output_format: OutputFormat,
     },
     PauseDownload(String),
     ResumeDownload(String),

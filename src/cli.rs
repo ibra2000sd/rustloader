@@ -126,6 +126,9 @@ impl Cli {
             // The CLI's format choice is the `quality`/`audio_only` knobs;
             // the verbatim selector override is the queue path's (PageFallback).
             format_spec: None,
+            // Container remux is a GUI (B-GUI-005) knob; the CLI keeps its
+            // historical mp4/mp3 surface unchanged.
+            remux_video: None,
             audio_only,
             audio_format: if audio_only {
                 Some("mp3".to_string())

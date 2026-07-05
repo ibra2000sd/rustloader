@@ -14,6 +14,7 @@ pub fn main_view(
     is_extracting: bool,
     url_error: Option<&str>,
     quality: &str,
+    output_format: &str,
     segments: usize,
     detected_url: Option<&str>,
 ) -> Element<'static, Message> {
@@ -77,15 +78,24 @@ pub fn main_view(
                 )
                 .padding([8, 12])
                 .style(iced::theme::Container::Custom(Box::new(InfoTagStyle))),
-                // Format tag (static for now - could be made selectable)
+                // Format selector (B-GUI-005 — used to be a dead static
+                // "MP4" label while files kept the source container)
                 container(
                     column![
                         text("Format")
                             .size(11)
                             .style(iced::theme::Text::Color(theme::FG_3)),
-                        text("MP4")
-                            .size(12)
-                            .style(iced::theme::Text::Color(theme::FG_1)),
+                        pick_list(
+                            crate::utils::OutputFormat::ALL
+                                .iter()
+                                .map(|f| f.label().to_string())
+                                .collect::<Vec<_>>(),
+                            Some(output_format.to_string()),
+                            Message::OutputFormatChanged
+                        )
+                        .text_size(12)
+                        .padding([6, 10])
+                        .width(iced::Length::Fixed(140.0)),
                     ]
                     .spacing(4)
                 )
@@ -115,6 +125,12 @@ pub fn main_view(
                 .style(iced::theme::Container::Custom(Box::new(InfoTagStyle))),
             ]
             .spacing(12),
+            // Honest trade-off hint for the selected format (B-GUI-005):
+            // conversions happen after download via ffmpeg; MP4 on YouTube
+            // means remuxing the (usually AV1/VP9) best streams, and an
+            // impossible remux keeps the original container instead of
+            // failing.
+            format_hint(output_format),
         ]
         .spacing(20),
     )
@@ -250,5 +266,29 @@ impl iced::widget::container::StyleSheet for InfoTagStyle {
             },
             ..Default::default()
         }
+    }
+}
+
+/// One-line explanation of what the selected output format will do, shown
+/// under the controls row. Empty for the no-conversion default.
+fn format_hint(output_format: &str) -> Element<'static, Message> {
+    use crate::gui::theme;
+    use crate::utils::OutputFormat;
+
+    let hint = match OutputFormat::from_label(output_format) {
+        Some(OutputFormat::Best) | None => "",
+        Some(OutputFormat::Mp4) | Some(OutputFormat::Webm) | Some(OutputFormat::Mkv) => {
+            "Container is changed losslessly after download (no re-encode); \
+             if the source codecs don't fit, the original container is kept."
+        }
+        Some(_) => "Audio only — extracts and converts the sound track; no video.",
+    };
+    if hint.is_empty() {
+        Space::with_height(iced::Length::Fixed(0.0)).into()
+    } else {
+        text(hint)
+            .size(11)
+            .style(iced::theme::Text::Color(theme::FG_3))
+            .into()
     }
 }
