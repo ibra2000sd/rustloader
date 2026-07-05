@@ -2,6 +2,7 @@
 #![allow(dead_code, unused_imports, unused_variables, unused_mut)]
 
 use crate::backend::{BackendActor, BackendCommand, BackendEvent};
+use crate::bridge::{self, BridgeEvent, BridgeRequest};
 use crate::database::{initialize_database, DatabaseManager, DownloadRecord};
 use crate::extractor::VideoInfo;
 use crate::gui::clipboard;
@@ -14,6 +15,7 @@ use crate::utils::update_check::{self, UpdateInfo};
 
 use anyhow::Result;
 use iced::{executor, Application, Command, Element, Subscription, Theme};
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::runtime::Runtime;
@@ -65,6 +67,19 @@ pub struct RustloaderApp {
     clipboard_monitoring: bool,
     clipboard_watch: ClipboardWatch,
     detected_url: Option<String>,
+
+    // Browser bridge (F-EXT-001, opt-in, default OFF). While enabled, a
+    // subscription runs a loopback-only HTTP server (src/bridge) the paired
+    // extension posts download requests to. `bridge_active` holds the
+    // request whose extraction is in flight (its quality/format override the
+    // defaults, and its temp cookie file is deleted when extraction ends);
+    // `bridge_pending` queues requests that arrive while one is running.
+    browser_bridge: bool,
+    bridge_token: Option<String>,
+    bridge_port: Option<u16>,
+    bridge_error: Option<String>,
+    bridge_active: Option<BridgeRequest>,
+    bridge_pending: VecDeque<BridgeRequest>,
 
     // Launch-time update check (utils::update_check; opt-out, notify-only).
     // `update_available` drives a dismissible banner whose Download button
@@ -230,8 +245,13 @@ pub enum Message {
     OutputFormatChanged(String),
     CookiesFromBrowserChanged(String),
     ClipboardMonitoringToggled(bool),
+    BrowserBridgeToggled(bool),
+    CopyBridgeToken,
     SaveSettings,
     SettingsSaved(Result<(), String>),
+
+    // Browser bridge (F-EXT-001)
+    BridgeEventReceived(BridgeEvent),
 
     // Clipboard monitoring (opt-in)
     ClipboardTick,      // Poll timer fired; check the clipboard for a new URL
@@ -248,6 +268,97 @@ pub enum Message {
 
     // System
     Tick, // For periodic UI updates
+}
+
+impl RustloaderApp {
+    /// Kick off extraction for a bridge request (same add path as the
+    /// Download button — I-2: the GUI only sends commands). The request is
+    /// held in `bridge_active` so `ExtractionCompleted` can apply its
+    /// quality/format and clean up its cookie file.
+    fn start_bridge_request(&mut self, req: BridgeRequest) {
+        self.is_extracting = true;
+        self.status_message = format!("Extracting (from browser): {}", req.url);
+        let _ = self.backend_sender.try_send(BackendCommand::ExtractInfo {
+            url: req.url.clone(),
+            cookies_file: req.cookies_file.clone(),
+        });
+        self.bridge_active = Some(req);
+    }
+
+    /// Called when an extraction finishes (success or failure): delete the
+    /// active bridge request's temp cookie file, then start the next queued
+    /// bridge request if the app is idle.
+    fn finish_bridge_request(&mut self) {
+        if let Some(req) = self.bridge_active.take() {
+            if let Some(file) = req.cookies_file {
+                let _ = std::fs::remove_file(file);
+            }
+        }
+        if !self.is_extracting {
+            if let Some(next) = self.bridge_pending.pop_front() {
+                self.start_bridge_request(next);
+            }
+        }
+    }
+}
+
+/// The browser-bridge subscription: bind the loopback listener, report the
+/// port, then forward every accepted download request to the GUI. The
+/// listener lives inside this future, so removing the subscription (toggle
+/// OFF) closes the port; per-connection work is spawned and time-bounded in
+/// `bridge::serve`.
+fn bridge_subscription(token: String) -> Subscription<BridgeEvent> {
+    iced::subscription::channel("browser-bridge", 32, move |mut output| async move {
+        use futures::SinkExt;
+
+        let listener = match bridge::bind().await {
+            Ok(l) => l,
+            Err(e) => {
+                let _ = output
+                    .send(BridgeEvent::Failed(format!(
+                        "could not bind a bridge port ({}): {e}",
+                        bridge::BRIDGE_PORTS
+                            .iter()
+                            .map(|p| p.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )))
+                    .await;
+                return std::future::pending().await;
+            }
+        };
+        let port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
+        let _ = output.send(BridgeEvent::Started(port)).await;
+
+        let (tx, mut rx) = mpsc::channel::<BridgeRequest>(32);
+        let serve = bridge::serve(listener, token, bridge::cookie_dir(), tx);
+        futures::pin_mut!(serve);
+        loop {
+            tokio::select! {
+                // serve() never returns while the listener is alive; the arm
+                // exists so the accept loop is polled inside THIS future
+                // (dropping the subscription must drop the listener).
+                _ = &mut serve => return std::future::pending().await,
+                received = rx.recv() => match received {
+                    Some(request) => {
+                        let _ = output.send(BridgeEvent::Request(request)).await;
+                    }
+                    None => return std::future::pending().await,
+                },
+            }
+        }
+    })
+}
+
+/// Map a bridge quality string ("Best" / "Worst" / a height like "1080")
+/// onto [`VideoQuality`]; anything unparsable falls back to `Best`.
+fn bridge_quality(s: &str) -> VideoQuality {
+    match s {
+        "Best" | "best" => VideoQuality::Best,
+        "Worst" | "worst" => VideoQuality::Worst,
+        h if h.parse::<u32>().is_ok() => VideoQuality::Specific(h.to_string()),
+        _ => VideoQuality::Best,
+    }
 }
 
 impl Application for RustloaderApp {
@@ -276,6 +387,10 @@ impl Application for RustloaderApp {
         if let Ok(loaded_settings) = rt.block_on(load_settings_from_db(&db_manager)) {
             settings = loaded_settings;
         }
+
+        // Bridge cookie files are per-request temporaries; clear leftovers
+        // from crashed sessions before the server can write new ones.
+        let _ = std::fs::remove_dir_all(bridge::cookie_dir());
 
         // Update-check bookkeeping (not part of AppSettings): the ETag of the
         // last up-to-date answer and any "Skip this version" choice. Both
@@ -336,6 +451,12 @@ impl Application for RustloaderApp {
             clipboard_monitoring: settings.clipboard_monitoring,
             clipboard_watch: ClipboardWatch::new(),
             detected_url: None,
+            browser_bridge: settings.browser_bridge,
+            bridge_token: settings.bridge_token.clone(),
+            bridge_port: None,
+            bridge_error: None,
+            bridge_active: None,
+            bridge_pending: VecDeque::new(),
             check_updates_on_launch: settings.check_updates_on_launch,
             update_available: None,
             update_skip_version,
@@ -398,9 +519,10 @@ impl Application for RustloaderApp {
 
                     // Send extract command to backend
                     let url = self.url_input.clone();
-                    let _ = self
-                        .backend_sender
-                        .try_send(BackendCommand::ExtractInfo { url });
+                    let _ = self.backend_sender.try_send(BackendCommand::ExtractInfo {
+                        url,
+                        cookies_file: None,
+                    });
                 }
                 Command::none()
             }
@@ -452,6 +574,23 @@ impl Application for RustloaderApp {
                                 self.status_message =
                                     format!("Starting download: {}", video_info.title);
 
+                                // A bridge-initiated extraction may carry its
+                                // own quality/format choice; anything absent
+                                // or unparsable falls back to the settings.
+                                let (quality, output_format) = match &self.bridge_active {
+                                    Some(req) => (
+                                        req.quality
+                                            .as_deref()
+                                            .map(bridge_quality)
+                                            .unwrap_or_else(|| self.quality.clone()),
+                                        req.output_format
+                                            .as_deref()
+                                            .map(OutputFormat::from_key)
+                                            .unwrap_or_else(|| self.output_format.clone()),
+                                    ),
+                                    None => (self.quality.clone(), self.output_format.clone()),
+                                };
+
                                 // Send start command
                                 let _ =
                                     self.backend_sender.try_send(BackendCommand::StartDownload {
@@ -461,8 +600,8 @@ impl Application for RustloaderApp {
                                         // one honouring the quality choice
                                         // (B-GUI-003 — it used to be ignored).
                                         format_id: None,
-                                        quality: self.quality.clone(),
-                                        output_format: self.output_format.clone(),
+                                        quality,
+                                        output_format,
                                     });
                             }
                             Err(e) => {
@@ -470,6 +609,12 @@ impl Application for RustloaderApp {
                                 self.status_message = "Extraction failed".to_string();
                             }
                         }
+                        // Extraction over (either way): the bridge request's
+                        // temp cookie file is no longer needed — the download
+                        // stage uses the engine's settings-derived cookies
+                        // (Phase-1 limit, see the design doc). Then serve the
+                        // next queued bridge request, if any.
+                        self.finish_bridge_request();
                     }
                     BackendEvent::DownloadStarted {
                         task_id,
@@ -640,6 +785,7 @@ impl Application for RustloaderApp {
                     // Trigger extraction for the URL
                     let _ = self.backend_sender.try_send(BackendCommand::ExtractInfo {
                         url: self.url_input.clone(),
+                        cookies_file: None,
                     });
                 }
                 Command::none()
@@ -843,6 +989,66 @@ impl Application for RustloaderApp {
                 Command::none()
             }
 
+            Message::BrowserBridgeToggled(enabled) => {
+                self.browser_bridge = enabled;
+                if enabled {
+                    // First enable ever: mint the pairing token. It persists
+                    // via Save Settings so the extension stays paired.
+                    if self.bridge_token.is_none() {
+                        self.bridge_token = Some(bridge::generate_token());
+                    }
+                    self.status_message =
+                        "Browser bridge starting — pair the extension with the token below"
+                            .to_string();
+                } else {
+                    // The subscription (and with it the listener) is dropped
+                    // by the next `subscription()` pass; nothing is reachable
+                    // on the port after that.
+                    self.bridge_port = None;
+                    self.bridge_error = None;
+                    self.status_message = "Browser bridge stopped".to_string();
+                }
+                Command::none()
+            }
+
+            Message::CopyBridgeToken => {
+                if let Some(token) = &self.bridge_token {
+                    match clipboard::set_clipboard_content(token) {
+                        Ok(()) => self.status_message = "Pairing token copied".to_string(),
+                        Err(e) => {
+                            self.status_message = format!("Could not copy token: {e}");
+                        }
+                    }
+                }
+                Command::none()
+            }
+
+            Message::BridgeEventReceived(event) => {
+                match event {
+                    BridgeEvent::Started(port) => {
+                        self.bridge_port = Some(port);
+                        self.bridge_error = None;
+                    }
+                    BridgeEvent::Failed(e) => {
+                        self.bridge_port = None;
+                        self.bridge_error = Some(e);
+                    }
+                    BridgeEvent::Request(req) => {
+                        // Non-intrusive: a status-bar note, and the normal
+                        // extract → auto-download path (I-2). If an
+                        // extraction is already running, queue it.
+                        self.status_message =
+                            format!("URL received from browser extension: {}", req.url);
+                        if self.is_extracting || self.bridge_active.is_some() {
+                            self.bridge_pending.push_back(req);
+                        } else {
+                            self.start_bridge_request(req);
+                        }
+                    }
+                }
+                Command::none()
+            }
+
             Message::ClipboardTick => {
                 if self.clipboard_monitoring {
                     // Read errors are ignored silently: a transient clipboard
@@ -868,9 +1074,10 @@ impl Application for RustloaderApp {
                     // (I-2: GUI never drives the engine directly).
                     self.is_extracting = true;
                     self.status_message = "Extracting video information...".to_string();
-                    let _ = self
-                        .backend_sender
-                        .try_send(BackendCommand::ExtractInfo { url });
+                    let _ = self.backend_sender.try_send(BackendCommand::ExtractInfo {
+                        url,
+                        cookies_file: None,
+                    });
                 }
                 Command::none()
             }
@@ -960,6 +1167,8 @@ impl Application for RustloaderApp {
                     clipboard_monitoring: self.clipboard_monitoring,
                     output_format: self.output_format.clone(),
                     check_updates_on_launch: self.check_updates_on_launch,
+                    browser_bridge: self.browser_bridge,
+                    bridge_token: self.bridge_token.clone(),
                 };
 
                 // Save settings to database. The result is surfaced (see
@@ -1052,15 +1261,22 @@ impl Application for RustloaderApp {
         // toggle is ON, poll the clipboard every 2s (`iced::time::every`,
         // tokio backend). Turning the toggle OFF removes the subscription
         // entirely — no timer runs and the clipboard is never read.
+        let mut subscriptions = vec![backend_events];
         if self.clipboard_monitoring {
-            Subscription::batch([
-                backend_events,
+            subscriptions.push(
                 iced::time::every(std::time::Duration::from_secs(2))
                     .map(|_| Message::ClipboardTick),
-            ])
-        } else {
-            backend_events
+            );
         }
+        // Browser bridge (opt-in): while the toggle is ON, this subscription
+        // owns the loopback listener; toggling OFF drops the future and with
+        // it the listener — nothing stays bound to the port.
+        if self.browser_bridge {
+            if let Some(token) = self.bridge_token.clone() {
+                subscriptions.push(bridge_subscription(token).map(Message::BridgeEventReceived));
+            }
+        }
+        Subscription::batch(subscriptions)
     }
 
     fn theme(&self) -> Self::Theme {
@@ -1182,6 +1398,10 @@ impl Application for RustloaderApp {
                     &self.cookie_browser_options,
                     self.clipboard_monitoring,
                     self.check_updates_on_launch,
+                    self.browser_bridge,
+                    self.bridge_token.as_deref(),
+                    self.bridge_port,
+                    self.bridge_error.as_deref(),
                 )
             }
             View::History => {
@@ -1303,6 +1523,19 @@ async fn load_settings_from_db(db_manager: &DatabaseManager) -> Result<AppSettin
         }
     }
 
+    // Load browser-bridge toggle + pairing token (absent => default OFF)
+    if let Some(value) = db_manager.get_setting("browser_bridge").await? {
+        if let Ok(val) = value.parse::<bool>() {
+            settings.browser_bridge = val;
+        }
+    }
+    if let Some(value) = db_manager.get_setting("bridge_token").await? {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            settings.bridge_token = Some(trimmed.to_string());
+        }
+    }
+
     Ok(settings)
 }
 
@@ -1355,6 +1588,17 @@ async fn save_settings_to_db(db_manager: &DatabaseManager, settings: &AppSetting
         )
         .await?;
 
+    db_manager
+        .save_setting("browser_bridge", &settings.browser_bridge.to_string())
+        .await?;
+
+    db_manager
+        .save_setting(
+            "bridge_token",
+            settings.bridge_token.as_deref().unwrap_or(""),
+        )
+        .await?;
+
     Ok(())
 }
 
@@ -1390,6 +1634,10 @@ mod settings_tests {
             // OFF is the non-default, so a successful reload proves the
             // opt-out actually persists.
             check_updates_on_launch: false,
+            // ON + a token are the non-defaults for the browser bridge
+            // (F-EXT-001): reloading them proves pairing survives a restart.
+            browser_bridge: true,
+            bridge_token: Some("deadbeefdeadbeefdeadbeefdeadbeef".to_string()),
             ..AppSettings::default()
         };
 
@@ -1410,6 +1658,11 @@ mod settings_tests {
         assert_eq!(loaded.segments, 12);
         assert!(loaded.clipboard_monitoring);
         assert!(!loaded.check_updates_on_launch);
+        assert!(loaded.browser_bridge);
+        assert_eq!(
+            loaded.bridge_token.as_deref(),
+            Some("deadbeefdeadbeefdeadbeefdeadbeef")
+        );
 
         std::fs::remove_file(&db_path).ok();
     }

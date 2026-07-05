@@ -57,6 +57,18 @@ pub struct AppSettings {
     /// machine's IP address; opt-out in Settings. Defaults ON.
     #[serde(default = "default_check_updates_on_launch")]
     pub check_updates_on_launch: bool,
+
+    /// Opt-in browser-integration bridge (F-EXT-001): when true, the GUI
+    /// runs a loopback-only HTTP server the paired browser extension posts
+    /// download requests to. Defaults OFF.
+    #[serde(default)]
+    pub browser_bridge: bool,
+
+    /// Pairing token for the browser bridge, generated on first enable and
+    /// persisted so the extension stays paired across restarts. Shown in
+    /// Settings; never sent anywhere by the app.
+    #[serde(default)]
+    pub bridge_token: Option<String>,
 }
 
 fn default_check_updates_on_launch() -> bool {
@@ -81,6 +93,8 @@ impl Default for AppSettings {
             clipboard_monitoring: false,
             output_format: OutputFormat::Best,
             check_updates_on_launch: true,
+            browser_bridge: false,
+            bridge_token: None,
         }
     }
 }

@@ -1,0 +1,119 @@
+// Rustloader Companion — bridge client (F-EXT-001 Phase 1).
+// SPDX-License-Identifier: MIT (same license as rustloader itself).
+//
+// Talks to the loopback bridge inside the running Rustloader app
+// (src/bridge/mod.rs). Protocol: docs/browser-integration-design.md §5.
+
+// Keep in sync with BRIDGE_PORTS in src/bridge/mod.rs.
+export const BRIDGE_PORTS = [46150, 46151, 46152, 46153, 46154];
+
+const PING_TIMEOUT_MS = 1500;
+
+/** Fetch with a hard timeout (the bridge is local; anything slow is absent). */
+async function fetchWithTimeout(url, options = {}, timeoutMs = PING_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Ping one port. Resolves to `{port, version, paired}` when a Rustloader
+ * bridge answers there, or `null` for anything else (other app, no listener).
+ * Never sends the token anywhere except this loopback origin.
+ */
+export async function ping(port, token) {
+  try {
+    const headers = token ? { Authorization: `Bearer ${token}` } : {};
+    const resp = await fetchWithTimeout(
+      `http://127.0.0.1:${port}/api/v1/ping`,
+      { headers },
+    );
+    if (!resp.ok) return null;
+    const body = await resp.json();
+    if (body.app !== "rustloader") return null;
+    return { port, version: body.version, paired: body.paired === true };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Find the port Rustloader's bridge is listening on: the cached port first,
+ * then the whole range in parallel. Resolves to a ping result or `null`.
+ */
+export async function discover(token) {
+  const { bridge_port: cached } = await chrome.storage.local.get("bridge_port");
+  if (cached) {
+    const hit = await ping(cached, token);
+    if (hit) return hit;
+  }
+  const results = await Promise.all(BRIDGE_PORTS.map((p) => ping(p, token)));
+  const found = results.find((r) => r !== null) ?? null;
+  if (found) await chrome.storage.local.set({ bridge_port: found.port });
+  return found;
+}
+
+/**
+ * POST a download request. `payload` is the /api/v1/download body
+ * (url, cookies, quality, output_format — see the design doc).
+ *
+ * Resolves to `{ok: true}` or `{ok: false, reason}` where reason is one of
+ * "not_running" | "unpaired" | "rejected" — plus a human `message`.
+ */
+export async function sendDownload(payload) {
+  const { bridge_token: token } = await chrome.storage.local.get("bridge_token");
+  if (!token) {
+    return {
+      ok: false,
+      reason: "unpaired",
+      message: "Not paired: open the extension options and paste the token from Rustloader's Settings.",
+    };
+  }
+  const found = await discover(token);
+  if (!found) {
+    return {
+      ok: false,
+      reason: "not_running",
+      message: "Rustloader isn't reachable. Launch it and switch on Settings → Browser Integration.",
+    };
+  }
+  try {
+    const resp = await fetchWithTimeout(
+      `http://127.0.0.1:${found.port}/api/v1/download`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(payload),
+      },
+      8000,
+    );
+    if (resp.status === 202) return { ok: true };
+    if (resp.status === 401 || resp.status === 403) {
+      return {
+        ok: false,
+        reason: "unpaired",
+        message: "Rustloader rejected the token — re-copy it from Settings → Browser Integration.",
+      };
+    }
+    let detail = `HTTP ${resp.status}`;
+    try {
+      detail = (await resp.json()).error ?? detail;
+    } catch {
+      // non-JSON error body; keep the status text
+    }
+    return { ok: false, reason: "rejected", message: `Rustloader refused the request: ${detail}` };
+  } catch {
+    return {
+      ok: false,
+      reason: "not_running",
+      message: "Rustloader stopped responding while sending the request.",
+    };
+  }
+}
