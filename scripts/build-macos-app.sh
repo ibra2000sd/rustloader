@@ -2,15 +2,17 @@
 # Build a standalone UNIVERSAL (x86_64 + arm64) macOS Rustloader.app + .dmg.
 #
 # Layout (matches what the code expects at runtime):
-#   Rustloader.app/Contents/MacOS/rustloader       <- launcher script (CFBundleExecutable)
-#   Rustloader.app/Contents/MacOS/rustloader-bin   <- universal release binary (lipo)
+#   Rustloader.app/Contents/MacOS/Rustloader       <- universal release binary
+#                                                     (lipo), CFBundleExecutable
 #   Rustloader.app/Contents/Resources/bin/         <- bundled yt-dlp, ffmpeg, ffprobe, deno
 #
-# Why a launcher script: the extractor resolves the bundled yt-dlp itself
-# (src/utils/platform.rs::ytdlp_path checks Contents/Resources/bin/), but the
-# download engine spawns `yt-dlp` by name (src/downloader/engine.rs) and yt-dlp
-# in turn finds `ffmpeg` on PATH. Finder launches apps with a minimal PATH, so
-# the launcher prepends Contents/Resources/bin before exec'ing the binary.
+# The Rust binary is the CFBundleExecutable directly — no shell launcher. The
+# PATH-prepend the launcher used to do (Finder launches apps with a minimal
+# PATH; yt-dlp is spawned by name and finds ffmpeg/deno on PATH) lives in
+# main.rs::setup_bundled_tools_path(), which puts Contents/Resources/bin on
+# PATH before anything spawns. The binary is named "Rustloader" (capital R)
+# because macOS derives the app-menu title (About/Quit …) from the process
+# name.
 #
 # Universal strategy per binary:
 #   rustloader      cargo build --release for x86_64-apple-darwin AND
@@ -39,12 +41,12 @@
 # invocation on an Intel Mac. The onedir build pays that scan once per
 # installed file and then starts in ~1s. Resources/bin/yt-dlp is a relative
 # symlink into the onedir tree so both the app's bundled-path lookup and the
-# launcher's PATH find it under the expected name.
+# PATH lookup find it under the expected name.
 #
 # Deno (single static binary, MIT) is bundled as yt-dlp's JavaScript runtime
 # (B-DL-009): YouTube's web client — which yt-dlp selects whenever cookies
 # are configured — needs a JS runtime to solve the n-challenge, and a
-# Finder-launched app has no node/deno on PATH. The launcher's PATH-prepend
+# Finder-launched app has no node/deno on PATH. The main.rs PATH-prepend
 # makes the bundled deno visible to yt-dlp AND to the app's own
 # depcheck::has_js_runtime() startup check.
 
@@ -118,24 +120,12 @@ echo "[3/7] assembling $APP"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/bin"
 
-cp target/universal/rustloader "$APP/Contents/MacOS/rustloader-bin"
+cp target/universal/rustloader "$APP/Contents/MacOS/Rustloader"
 cp -R "$DEPS/ytdlp_onedir" "$APP/Contents/Resources/bin/yt-dlp_dir"
 ln -s "yt-dlp_dir/yt-dlp_macos" "$APP/Contents/Resources/bin/yt-dlp"
 cp "$UNI/ffmpeg" "$UNI/ffprobe" "$UNI/deno" "$APP/Contents/Resources/bin/"
 cp assets/icons/AppIcon.icns "$APP/Contents/Resources/"
-
-# Launcher: put the bundled tools on PATH, then exec the real binary. The
-# ${PATH:-…} fallback matters when the binary is invoked with an empty
-# environment: yt-dlp shells out to system tools (e.g. /usr/bin/security for
-# Chrome cookie decryption), so /usr/bin must stay reachable.
-cat > "$APP/Contents/MacOS/rustloader" << 'EOF'
-#!/bin/sh
-DIR="$(cd "$(dirname "$0")" && pwd)"
-export PATH="$DIR/../Resources/bin:${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}"
-exec "$DIR/rustloader-bin" "$@"
-EOF
-chmod +x "$APP/Contents/MacOS/rustloader" "$APP/Contents/MacOS/rustloader-bin" \
-    "$APP/Contents/Resources/bin/"*
+chmod +x "$APP/Contents/MacOS/Rustloader" "$APP/Contents/Resources/bin/"*
 
 cat > "$APP/Contents/Info.plist" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -155,7 +145,7 @@ cat > "$APP/Contents/Info.plist" << EOF
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleExecutable</key>
-    <string>rustloader</string>
+    <string>Rustloader</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>LSMinimumSystemVersion</key>
@@ -170,14 +160,14 @@ EOF
 echo "APPL????" > "$APP/Contents/PkgInfo"
 
 echo "[4/7] asserting every bundled tool is universal"
-assert_universal "$APP/Contents/MacOS/rustloader-bin"
+assert_universal "$APP/Contents/MacOS/Rustloader"
 assert_universal "$APP/Contents/Resources/bin/deno"
 assert_universal "$APP/Contents/Resources/bin/ffmpeg"
 assert_universal "$APP/Contents/Resources/bin/ffprobe"
 assert_universal "$APP/Contents/Resources/bin/yt-dlp_dir/yt-dlp_macos"
 
 echo "[5/7] verifying bundle layout (native slice)"
-"$APP/Contents/MacOS/rustloader-bin" --version
+"$APP/Contents/MacOS/Rustloader" --version
 test -x "$APP/Contents/Resources/bin/yt-dlp"
 
 echo "[6/7] creating $DMG"

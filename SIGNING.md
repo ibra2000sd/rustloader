@@ -15,8 +15,7 @@ xattr -dr com.apple.quarantine /Applications/Rustloader.app
 
 | Path | What it is |
 |---|---|
-| `Contents/MacOS/rustloader` | launcher **shell script** (CFBundleExecutable) |
-| `Contents/MacOS/rustloader-bin` | the Rust binary (universal) |
+| `Contents/MacOS/Rustloader` | the Rust binary (universal, CFBundleExecutable) |
 | `Contents/Resources/bin/deno` | JS runtime — V8 **JIT** |
 | `Contents/Resources/bin/ffmpeg`, `ffprobe` | static binaries |
 | `Contents/Resources/bin/yt-dlp_dir/` | PyInstaller onedir tree (~100 Mach-O dylibs/so) |
@@ -44,7 +43,7 @@ codesign --force --options runtime --timestamp --sign "$ID" \
     Rustloader.app/Contents/Resources/bin/ffmpeg \
     Rustloader.app/Contents/Resources/bin/ffprobe
 codesign --force --options runtime --timestamp --sign "$ID" \
-    Rustloader.app/Contents/MacOS/rustloader-bin
+    Rustloader.app/Contents/MacOS/Rustloader
 
 # finally the bundle itself
 codesign --force --options runtime --timestamp --sign "$ID" Rustloader.app
@@ -66,17 +65,17 @@ ordering pitfalls with nested trees like PyInstaller's.)
   `com.apple.security.cs.disable-library-validation` — PyInstaller loads its
   own dylibs at runtime. If everything is signed with the same Team ID,
   library validation may pass without the latter; test.
-- **rustloader-bin / ffmpeg / ffprobe**: none expected.
+- **Rustloader / ffmpeg / ffprobe**: none expected.
 
-### Known consideration: the launcher is a shell script
+### Resolved: no shell-script launcher anymore
 
-`CFBundleExecutable` points at a POSIX shell script (it prepends
-`Resources/bin` to PATH). Script-main-executable apps can be signed and
-notarized (the script is sealed in the bundle's resource envelope; Platypus
-apps ship this way), but `--options runtime` only applies to Mach-O. If
-notarization or a future macOS version objects, the clean fix is moving the
-PATH-prepend into `main.rs` (prepend the bundle's `Resources/bin` to `PATH`
-at startup) and pointing `CFBundleExecutable` straight at the Rust binary.
+Earlier bundles pointed `CFBundleExecutable` at a POSIX shell launcher that
+prepended `Resources/bin` to PATH before exec'ing the real binary — a shape
+notarization can object to (`--options runtime` only applies to Mach-O).
+That PATH setup now lives in `main.rs::setup_bundled_tools_path()` and
+`CFBundleExecutable` points straight at the Rust binary
+(`Contents/MacOS/Rustloader`), so every executable in the bundle is a
+Mach-O and signs with the hardened runtime normally.
 
 ## 2. Notarize + staple
 
