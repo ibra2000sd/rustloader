@@ -584,6 +584,21 @@ Source: internal audit 2026-06-30.
 
 ## P3 / later
 
+### F-EXT-001 — Browser-extension integration (extension → local bridge) · open · design-complete
+IDM-style browser extension hands a URL (+ page cookies/headers + quality/
+format) to the running rustloader. Design spike **complete 2026-07-05**
+(base `f6de70a`): recommended bridge is a **loopback-only HTTP server inside
+the app + pairing token** (native messaging rejected: rustloader has no IPC a
+stdio host could forward into, so that path degenerates into building the
+same server *plus* per-browser host manifests). `rustloader://` scheme and
+single-instance handling deferred to a late phase (winit ≤0.30 lacks macOS
+`application:openURLs:`). Phase 1 = bridge + Chrome MV3 context-menu
+extension, app-running-only. Full design, protocol, security model, and
+phased plan: [`docs/browser-integration-design.md`](../browser-integration-design.md).
+This is the non-MITM complement to F-EXTRACT-001 and the CHANGELOG's
+"Browser extension integration (v1.0.0)" plan. Implementation not started —
+awaiting maintainer sign-off on the design.
+
 ### F-EXTRACT-001 — Proxy-capture spike (res-downloader style) · open · investigate-first
 Exploratory spike for a local-proxy media capture ("any page that plays video",
 no extractor). Heavy: requires a system proxy + a local CA certificate in the
