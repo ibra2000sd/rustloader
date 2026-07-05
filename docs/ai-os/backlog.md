@@ -239,6 +239,33 @@ direct `.mp4` still take the native path (probed `audio/mpeg` / `video/mp4`).
 ffmpeg (a documented prerequisite) performs the merges. Source: maintainer
 report + fix session, 2026-07-03.
 
+### B-DL-009 — .app + cookies: no JS runtime → zero formats, flattened to the generic error · closed (PR open) · SMALL
+Diagnosed read-only 2026-07-04 on the installed 0.9.0 `.app`: with the GUI's
+persisted `cookies_from_browser=chrome`, every YouTube extraction failed as
+"Unable to process this URL. Please try a different video", while terminal
+runs worked. Root cause is a three-factor combination, NOT a missing bundled
+yt-dlp (that was found, unquarantined, and executable — a full no-PATH
+`env -i` download succeeded): (1) the GUI applies the persisted cookie source
+to every extraction (`actor.rs`), unlike the CLI (flags only); (2) with
+cookies, yt-dlp (2026.06.09) uses YouTube's authenticated web client, whose
+formats need a JS runtime for the n-challenge — Finder PATH has no node/deno
+(they live in `~/.nvm`/`~/.deno`), so yt-dlp reported "n challenge solving
+failed … Only images are available" → `ERROR: Requested format is not
+available` at `--dump-json` time; (3) `make_error_user_friendly` matched
+"unavailable" but not "not available" (and "timeout" but not "timed out"), so
+the real error flattened to the generic fallback. **Fix (two halves):** the
+.app build (`scripts/build-macos-app.sh`, PR #55 branch) now bundles Deno
+into `Contents/Resources/bin/` — the launcher's PATH-prepend makes it visible
+to both yt-dlp and `depcheck::has_js_runtime()`, completing the self-contained
+bundle (yt-dlp + ffmpeg/ffprobe + JS runtime); and `error.rs` adds a
+format-specific arm ("format" + "not available" → a no-downloadable-formats
+message naming the JS-runtime/cookies angle, checked before the generic
+not-available arm) plus "timed out" alongside "timeout" and plain "not
+available" alongside "unavailable", unit-tested. Verified against the exact
+failing condition: bundled yt-dlp + `--cookies-from-browser chrome` +
+Finder-equivalent PATH fails at `37d2a7d` and succeeds with only deno added.
+Source: maintainer report + diagnosis session, 2026-07-04.
+
 ## P2
 
 ### F-DL-001 — Shape A: use aria2c as yt-dlp's external downloader · closed (opt-in) · SMALL (XS)

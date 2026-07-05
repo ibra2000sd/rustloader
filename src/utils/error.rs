@@ -49,11 +49,23 @@ pub fn make_error_user_friendly(error: &str) -> String {
     } else if error_lower.contains("network")
         || error_lower.contains("connection")
         || error_lower.contains("timeout")
+        || error_lower.contains("timed out")
         || error_lower.contains("dns")
         || error_lower.contains("resolve")
     {
         "Unable to connect. Please check your internet connection".to_string()
+    } else if error_lower.contains("format") && error_lower.contains("not available") {
+        // yt-dlp's "Requested format is not available": on YouTube this is
+        // usually every real format having been skipped because the
+        // n-challenge could not be solved (no JS runtime available to
+        // yt-dlp), not a wrong quality choice. Checked before the generic
+        // not-available arm so it doesn't read as "video removed".
+        "No downloadable formats were found — the video may need a JavaScript runtime \
+         (bundled with the app) or a different quality; try again or disable cookies \
+         for this site"
+            .to_string()
     } else if error_lower.contains("unavailable")
+        || error_lower.contains("not available")
         || error_lower.contains("not found")
         || error_lower.contains("removed")
     {
@@ -87,6 +99,41 @@ mod tests {
         assert_eq!(
             make_error_user_friendly("some totally unexpected thing"),
             "Unable to process this URL. Please try a different video"
+        );
+    }
+
+    #[test]
+    fn friendly_maps_format_not_available_to_formats_message() {
+        // The B-DL-009 shape: yt-dlp's real stderr when the n-challenge fails
+        // and every real format is skipped (GUI sees it wrapped by
+        // RustloaderError::ExtractionError).
+        let raw = "Failed to extract video info: ERROR: [youtube] hJsRd6dRyr0: \
+                   Requested format is not available. Use --list-formats for a \
+                   list of available formats";
+        let msg = make_error_user_friendly(raw);
+        assert!(
+            msg.contains("No downloadable formats"),
+            "format errors must not flatten to the generic message: {msg}"
+        );
+    }
+
+    #[test]
+    fn friendly_maps_timed_out_to_network_message() {
+        // The bounded-run error says "timed out", not "timeout"
+        // (src/extractor/ytdlp.rs::run_bounded).
+        assert!(make_error_user_friendly(
+            "yt-dlp extraction timed out after 60s (subprocess killed)"
+        )
+        .contains("check your internet"));
+    }
+
+    #[test]
+    fn friendly_maps_plain_not_available_to_unavailable_message() {
+        // Without the word "format", "not available" reads as the video being
+        // gone — same bucket as "unavailable".
+        assert_eq!(
+            make_error_user_friendly("this video is not available"),
+            "This video is not available or has been removed"
         );
     }
 }
