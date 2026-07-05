@@ -247,6 +247,26 @@ detected (mirror `find_ytdlp` detection; do NOT bundle — aria2 is GPL-2.0, see
 `adr/0002`). Gated on B-DOC-001 (license posture); landed after it.
 Source: internal audit 2026-06-30.
 
+### B-DL-010 — Engine flattened yt-dlp download failures to "yt-dlp download failed" · closed (PR open) · SMALL
+Found during B-DL-009 verification (B-DL-009 is tracked on the PR #56
+branch): `download_via_ytdlp` (`engine.rs`) returned
+`Err(anyhow!("yt-dlp download failed"))` on a non-zero yt-dlp exit,
+discarding the `ERROR:` stderr line its own reader task had already captured,
+logged, and sent as a `Failed` progress event. Downstream the CLI runs
+`make_error_user_friendly` on that flattened string (`cli.rs`, B-DL-007), so
+a download-stage yt-dlp failure could only ever surface as the generic
+"Unable to process this URL" — the detailed patterns added in B-DL-009 never
+saw the real text. **Fix:** the stderr reader task now returns the detected
+`ERROR:` line; the failure arm carries it in both the terminal `Failed`
+progress event (I-3 contract unchanged — same event, better detail) and the
+returned `Err`, falling back to "yt-dlp download failed (no error output
+captured)" when yt-dlp exits non-zero without printing one. Test seam: the
+spawned program name is a `DownloadEngine` field (`"yt-dlp"` everywhere;
+`#[cfg(test)]` override), so the unix-gated regression test
+`test_ytdlp_failure_carries_stderr_error_line` drives the real process path
+with a stub script — no PATH mutation. Source: B-DL-009 fix session,
+2026-07-05.
+
 **Correction (2026-07-01 implementation) — the progress-contract assumption
 above was wrong, verified empirically, not assumed:** live-smoke-tested
 `yt-dlp --downloader aria2c` against both an HLS stream and a direct HTTP file,

@@ -355,6 +355,9 @@ pub struct DownloadEngine {
     client: Client,
     config: DownloadConfig,
     ytdlp_options: YtDlpOptions,
+    /// Program the yt-dlp path spawns. Always `"yt-dlp"` (resolved via PATH,
+    /// unchanged behaviour) except in tests, which point it at a stub script.
+    ytdlp_program: String,
 }
 
 /// Upper bound on establishing a connection (TCP + TLS handshake) for the
@@ -394,6 +397,7 @@ impl DownloadEngine {
             client,
             config,
             ytdlp_options: YtDlpOptions::default(),
+            ytdlp_program: "yt-dlp".to_string(),
         }
     }
 
@@ -401,6 +405,15 @@ impl DownloadEngine {
     /// (builder-style). Defaults preserve the engine's historical behaviour.
     pub fn with_ytdlp_options(mut self, options: YtDlpOptions) -> Self {
         self.ytdlp_options = options;
+        self
+    }
+
+    /// Test-only: swap the spawned yt-dlp program for a stub so the yt-dlp
+    /// path's process handling can be exercised without a real yt-dlp or
+    /// PATH mutation.
+    #[cfg(test)]
+    fn with_ytdlp_program(mut self, program: &str) -> Self {
+        self.ytdlp_program = program.to_string();
         self
     }
 
@@ -908,7 +921,7 @@ impl DownloadEngine {
         };
         let args = build_ytdlp_args(&opts, url, &out, aria2c_available);
         debug!("🔧 [YT-DLP] Args: {:?}", args);
-        let mut cmd = AsyncCommand::new("yt-dlp");
+        let mut cmd = AsyncCommand::new(&self.ytdlp_program);
         cmd.args(&args);
         // Combine stderr and stdout to capture all output
         cmd.stderr(Stdio::piped());
@@ -933,6 +946,11 @@ impl DownloadEngine {
 
                 debug!("📖 [YT-DLP] Starting stderr reader...");
                 let mut line_count = 0;
+                // The detected ERROR line, returned to the caller so the
+                // engine's failure `Err` carries yt-dlp's real message
+                // instead of a flattened "yt-dlp download failed"
+                // (B-DL-007/B-DL-009 error-surfacing).
+                let mut error_line: Option<String> = None;
 
                 while let Ok(Some(line)) = lines.next_line().await {
                     line_count += 1;
@@ -944,6 +962,7 @@ impl DownloadEngine {
                         let mut p = DownloadProgress::new(100, 1);
                         p.status = DownloadStatus::Failed(line.clone());
                         let _ = progress_for_reader.send(p).await;
+                        error_line = Some(line);
                         break;
                     }
 
@@ -978,6 +997,7 @@ impl DownloadEngine {
                     "📖 [YT-DLP] Stderr reader finished. Read {} lines total",
                     line_count
                 );
+                error_line
             });
             debug!("✅ [YT-DLP] tokio::spawn returned, reader task is now running");
             Some(handle)
@@ -1032,11 +1052,17 @@ impl DownloadEngine {
             }
         };
 
-        // Give the reader task a moment to finish reading any buffered output
-        if let Some(handle) = reader_handle {
+        // Give the reader task a moment to finish reading any buffered output,
+        // and collect the ERROR line it detected (if any) for the failure arm.
+        let ytdlp_error_line = if let Some(handle) = reader_handle {
             debug!("⏳ [YT-DLP] Waiting for stderr reader to finish...");
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
-        }
+            match tokio::time::timeout(std::time::Duration::from_secs(2), handle).await {
+                Ok(Ok(line)) => line,
+                _ => None,
+            }
+        } else {
+            None
+        };
         debug!("🔚 [YT-DLP] Process exited with: {:?}", status.code());
         if status.success() {
             info!("✅ [YT-DLP] Download successful");
@@ -1055,11 +1081,18 @@ impl DownloadEngine {
                 .unwrap_or_else(|| output_path.to_path_buf());
             Ok(final_path)
         } else {
-            error!("❌ [YT-DLP] Download failed");
+            // Carry yt-dlp's own ERROR line (already captured by the stderr
+            // reader) so callers — and the friendly-error mapper downstream —
+            // see the real cause, not a flattened "yt-dlp download failed"
+            // (B-DL-007/B-DL-009). The terminal Failed progress event is still
+            // emitted with the same detail (I-3: progress contract unchanged).
+            let detail = ytdlp_error_line
+                .unwrap_or_else(|| "yt-dlp download failed (no error output captured)".to_string());
+            error!("❌ [YT-DLP] Download failed: {}", detail);
             let mut failed = DownloadProgress::new(0, 1);
-            failed.failed("yt-dlp failed".to_string());
+            failed.failed(detail.clone());
             let _ = progress_tx.send(failed).await;
-            Err(anyhow::anyhow!("yt-dlp download failed"))
+            Err(anyhow::anyhow!("{}", detail))
         }
     }
 
@@ -3094,6 +3127,70 @@ mod tests {
         assert!(
             !sidecar_path(&output_path).exists(),
             "resume sidecar (keyed to the provisional name) must be cleaned up"
+        );
+    }
+
+    // ============================================================
+    // YT-DLP FAILURE ERROR-PROPAGATION REGRESSION TEST
+    // (B-DL-007/B-DL-009 follow-up: the engine used to flatten a
+    // failed yt-dlp run to "yt-dlp download failed", hiding the
+    // ERROR line the stderr reader had already captured)
+    // ============================================================
+
+    /// Uses a stub yt-dlp (a shell script, hence unix-only — same gating as
+    /// the extractor's bounded-run tests) that prints a realistic ERROR line
+    /// and exits non-zero. The engine's returned `Err` and its terminal
+    /// `Failed` progress event must both carry that line verbatim so the
+    /// friendly-error mapper downstream can classify it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_ytdlp_failure_carries_stderr_error_line() {
+        use std::os::unix::fs::PermissionsExt;
+
+        const ERROR_LINE: &str = "ERROR: [youtube] test123: Requested format is not available. \
+                                  Use --list-formats for a list of available formats";
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let stub = tmp.path().join("fake-yt-dlp.sh");
+        std::fs::write(
+            &stub,
+            format!("#!/bin/sh\necho \"{ERROR_LINE}\" 1>&2\nexit 1\n"),
+        )
+        .expect("write stub");
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod stub");
+
+        let engine = DownloadEngine::new(DownloadConfig::default())
+            .with_ytdlp_program(stub.to_str().expect("utf-8 stub path"));
+        let (tx, mut rx) = mpsc::channel::<DownloadProgress>(64);
+        let output_path = tmp.path().join("out.mp4");
+
+        let err = engine
+            .download_via_ytdlp(
+                "https://example.com/watch?v=test123",
+                None,
+                &output_path,
+                tx,
+            )
+            .await
+            .expect_err("stub exits non-zero, download must fail");
+
+        assert!(
+            err.to_string()
+                .contains("Requested format is not available"),
+            "engine error must carry yt-dlp's ERROR line, got: {err}"
+        );
+
+        let mut terminal_failed_detail = None;
+        while let Ok(p) = rx.try_recv() {
+            if let DownloadStatus::Failed(msg) = p.status {
+                terminal_failed_detail = Some(msg);
+            }
+        }
+        let detail = terminal_failed_detail.expect("a Failed progress event must be emitted");
+        assert!(
+            detail.contains("Requested format is not available"),
+            "terminal Failed progress must carry the ERROR line, got: {detail}"
         );
     }
 }
