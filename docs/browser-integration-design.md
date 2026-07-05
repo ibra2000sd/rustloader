@@ -194,6 +194,14 @@ range). JSON bodies. All endpoints except `/ping` require
 → `200 {"app":"rustloader","api":1,"version":"0.9.0"}`
 Used for port discovery and "app is running" state. Reveals presence only.
 
+### `GET /api/v1/pair` (no token; implemented in Phase 2)
+→ `200 {"token":"<pairing token>"}` **exactly once** while the single-use
+~120 s pairing window (§8.2) is armed from the app's Settings "Pair" button;
+`403 {"error":"pairing window is not open"}` otherwise (never armed, already
+consumed, or expired). The Host/loopback rules apply as on every endpoint. A
+web page cannot read the response cross-origin (no CORS headers → opaque
+response); at worst it burns the window and the user re-arms.
+
 ### `POST /api/v1/download`
 ```jsonc
 {
