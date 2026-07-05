@@ -8,7 +8,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Planned
-- Browser extension integration (v1.0.0)
+- Browser integration next phases: media sniffing in the extension,
+  per-task download-stage cookies, Firefox/Edge packaging (see
+  `docs/browser-integration-design.md`)
+
+---
+
+## [0.10.0] - 2026-07-06
+
+The browser-integration release: right-click a page or link in Chrome and
+send it — with the page's cookies — straight to the running Rustloader app.
+Phase 1 of F-EXT-001 (design: `docs/browser-integration-design.md`).
+
+### ✨ Added
+- **Browser-integration bridge** (#63): a loopback-only HTTP server inside
+  the app that accepts download requests from a paired browser extension.
+  **OFF by default** — nothing listens until the Settings → Browser
+  Integration toggle is switched on, which generates a pairing token. Binds
+  to `127.0.0.1` only, on the first free port in 46150–46154.
+- **Chrome companion extension** (`extension/chrome/`, #63): a Manifest V3
+  extension adding a right-click **"Download with Rustloader"** item to
+  pages and links. It sends the URL plus the current page's cookies to the
+  bridge, so logged-in / age-gated content extracts correctly — and without
+  the app needing macOS Keychain access for Chrome cookies. Ships as a
+  `rustloader-chrome-extension-v*.zip` release asset (load unpacked; no
+  store listing in Phase 1).
+
+### 🔒 Security model (bridge)
+The bridge binds to the loopback interface only — no request ever leaves
+the machine, and no remote host can reach it. Every request must carry the
+128-bit pairing token, verified with a constant-time compare, and the
+`Host` header is checked to block DNS-rebinding tricks; request bodies are
+size-capped (413 on overflow), and malformed or unauthorized requests get
+explicit 401/403/422 responses. Cookies received from the extension are
+written to per-request temp files with `0600` permissions in Netscape
+format and passed to extraction through the existing single cookie path
+(invariant I-7).
+
+### 📌 Known Phase-1 limitation
+Bridge-supplied cookies apply to the **extraction** stage; the yt-dlp
+*download* stage still uses the cookies configured in Settings. Per-task
+download-stage cookies are a Phase-2 decision.
 
 ---
 

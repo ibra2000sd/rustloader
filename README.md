@@ -214,6 +214,42 @@ format, clip, subtitle, playlist, and cookie flags):
 cargo run --release -- "https://www.youtube.com/watch?v=VIDEO_ID"
 ```
 
+### Browser integration (beta)
+
+Send a page or link from Chrome straight to Rustloader with a right-click —
+including the page's cookies, so logged-in / age-gated content extracts
+correctly.
+
+**Privacy first:** this is **OFF by default**. When enabled, the app listens
+on `127.0.0.1` (loopback) only — nothing ever leaves your machine, and no
+other computer can reach it. Every request must present the pairing token
+you copy out of Settings.
+
+**Setup:**
+
+1. In Rustloader: **Settings → Browser Integration** → switch on
+   **Browser integration (local bridge)**. A pairing token appears — copy
+   it. Press **Save Settings** so it survives a restart.
+2. Get the extension: download `rustloader-chrome-extension-v*.zip` from the
+   [latest release](https://github.com/ibra2000sd/rustloader/releases/latest)
+   and unzip it — or use `extension/chrome/` from a source checkout.
+3. In Chrome: open `chrome://extensions`, switch on **Developer mode**, click
+   **Load unpacked**, and select the unzipped extension folder.
+4. Right-click the extension → **Options** → paste the token → **Save**,
+   then **Test connection**. You should see
+   "Paired with Rustloader … on port 4615x".
+5. With Rustloader running: right-click any page or link →
+   **Download with Rustloader**. The download appears in Rustloader's queue.
+
+<!-- TODO(screenshots): Settings toggle + token, extension Options page,
+     context-menu item. To be added by the maintainer. -->
+
+Beta notes: the app must already be running; Chrome/Chromium only (Firefox
+and Edge are later phases); bridge cookies apply to extraction, while the
+yt-dlp download stage still uses the cookies configured in Settings. Details:
+[`extension/chrome/README.md`](extension/chrome/README.md) and
+[`docs/browser-integration-design.md`](docs/browser-integration-design.md).
+
 ---
 
 ## ⚙️ Configuration
