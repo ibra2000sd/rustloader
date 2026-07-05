@@ -584,7 +584,7 @@ Source: internal audit 2026-06-30.
 
 ## P3 / later
 
-### F-EXT-001 — Browser-extension integration (extension → local bridge) · open · design-complete
+### F-EXT-001 — Browser-extension integration (extension → local bridge) · in-progress (Phase 1 PR open) · design-complete
 IDM-style browser extension hands a URL (+ page cookies/headers + quality/
 format) to the running rustloader. Design spike **complete 2026-07-05**
 (base `f6de70a`): recommended bridge is a **loopback-only HTTP server inside
@@ -596,8 +596,18 @@ single-instance handling deferred to a late phase (winit ≤0.30 lacks macOS
 extension, app-running-only. Full design, protocol, security model, and
 phased plan: [`docs/browser-integration-design.md`](../browser-integration-design.md).
 This is the non-MITM complement to F-EXTRACT-001 and the CHANGELOG's
-"Browser extension integration (v1.0.0)" plan. Implementation not started —
-awaiting maintainer sign-off on the design.
+"Browser extension integration (v1.0.0)" plan.
+**Phase 1 built (PR open, 2026-07-05):** `src/bridge/` (loopback-only
+hand-rolled HTTP server, ports 46150–46154, 128-bit token with constant-time
+compare, Host-header check, 401/403/413/422 paths, Netscape cookie-file
+writer → `CookieConfig{file}` per I-7), OFF-by-default Settings toggle +
+token UI, `ExtractInfo` gained an optional per-request `cookies_file`, and
+`extension/chrome/` (MV3: context menu + cookies + bridge client + pairing
+options page; no sniffer yet). Verified end-to-end with a real
+`POST /api/v1/download` (with cookies) → extraction → download with audio
+(ffprobe: h264+aac). Phase-1 limit: bridge cookies apply to extraction; the
+yt-dlp *download* path still uses settings-derived cookies (per-task engine
+cookies would touch queue/engine internals — a Phase-2 decision).
 
 ### F-EXTRACT-001 — Proxy-capture spike (res-downloader style) · open · investigate-first
 Exploratory spike for a local-proxy media capture ("any page that plays video",

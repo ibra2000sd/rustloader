@@ -46,6 +46,10 @@ which = "6.0"
 # Release-version comparison for the launch-time update check
 semver = "1"
 
+# Random bytes for the browser-bridge pairing token (F-EXT-001). Already in
+# the dependency tree transitively (via uuid v4); pinned to the 0.2 line.
+getrandom = "0.2"
+
 # Time handling
 chrono = { version = "0.4", features = ["serde"] }
 

@@ -169,8 +169,8 @@ impl BackendActor {
 
         while let Some(cmd) = self.receiver.recv().await {
             match cmd {
-                BackendCommand::ExtractInfo { url } => {
-                    self.handle_extract_info(url).await;
+                BackendCommand::ExtractInfo { url, cookies_file } => {
+                    self.handle_extract_info(url, cookies_file).await;
                 }
                 BackendCommand::StartDownload {
                     video_info,
@@ -215,10 +215,32 @@ impl BackendActor {
         }
     }
 
-    async fn handle_extract_info(&self, url: String) {
+    async fn handle_extract_info(&self, url: String, cookies_file: Option<PathBuf>) {
         let _ = self.sender.send(BackendEvent::ExtractionStarted).await;
 
-        match self.extractor.extract_info(&url).await {
+        // A per-request cookies file (browser-bridge, F-EXT-001) gets a
+        // one-off extractor carrying exactly those cookies; everything else
+        // uses the settings-derived extractor built at startup. Construction
+        // is cheap (a yt-dlp path probe); the cookie flags still come only
+        // from `CookieConfig` (I-7).
+        let extractor: Arc<HybridExtractor> = match cookies_file {
+            Some(file) => match YtDlpExtractor::new() {
+                Ok(ytdlp) => {
+                    let cookies = crate::utils::CookieConfig::new(None, Some(file));
+                    Arc::new(HybridExtractor::new(
+                        Vec::new(),
+                        Arc::new(ytdlp.with_cookies(cookies)),
+                    ))
+                }
+                Err(e) => {
+                    warn!("bridge extraction: yt-dlp unavailable ({e}); using default extractor");
+                    self.extractor.clone()
+                }
+            },
+            None => self.extractor.clone(),
+        };
+
+        match extractor.extract_info(&url).await {
             Ok(info) => {
                 let _ = self
                     .sender

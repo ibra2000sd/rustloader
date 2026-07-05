@@ -68,7 +68,10 @@ async fn downloads_at_selected_quality() {
 
     // 1. Extract — the same command the GUI sends.
     cmd_tx
-        .send(BackendCommand::ExtractInfo { url: url.clone() })
+        .send(BackendCommand::ExtractInfo {
+            url: url.clone(),
+            cookies_file: None,
+        })
         .await
         .expect("send ExtractInfo");
     let video_info = loop {

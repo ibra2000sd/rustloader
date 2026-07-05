@@ -8,6 +8,11 @@ use std::path::PathBuf;
 pub enum BackendCommand {
     ExtractInfo {
         url: String,
+        /// Per-request cookie override: a Netscape-format cookies.txt (the
+        /// browser-bridge writes one from extension-supplied cookies,
+        /// F-EXT-001). `None` = the extractor's settings-derived cookies.
+        /// Applied via `CookieConfig { file }` (invariant I-7).
+        cookies_file: Option<std::path::PathBuf>,
     },
     StartDownload {
         // Boxed: VideoInfo is large; boxing keeps the enum variants similar in

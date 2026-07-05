@@ -6,6 +6,7 @@ use iced::widget::{
 use iced::{Alignment, Element, Length};
 
 /// Create the settings view
+#[allow(clippy::too_many_arguments)]
 pub fn settings_view(
     download_location: &str,
     max_concurrent: usize,
@@ -14,6 +15,10 @@ pub fn settings_view(
     detected_browsers: &[String],
     clipboard_monitoring: bool,
     check_updates_on_launch: bool,
+    browser_bridge: bool,
+    bridge_token: Option<&str>,
+    bridge_port: Option<u16>,
+    bridge_error: Option<&str>,
 ) -> Element<'static, crate::gui::app::Message> {
     // Header with back button
     let header = row![
@@ -216,6 +221,88 @@ pub fn settings_view(
     ]
     .spacing(10);
 
+    // Browser integration (F-EXT-001) — same privacy-honest tone as the
+    // clipboard/updates toggles: say exactly what runs and who can reach it.
+    let bridge_status: Element<'static, crate::gui::app::Message> = if browser_bridge {
+        if let Some(err) = bridge_error {
+            text(format!("Bridge error: {err}"))
+                .size(11)
+                .style(iced::theme::Text::Color(crate::gui::theme::TEXT_SECONDARY))
+                .into()
+        } else if let Some(port) = bridge_port {
+            text(format!("Listening on 127.0.0.1:{port}"))
+                .size(11)
+                .font(crate::gui::theme::FONT_MONO)
+                .style(iced::theme::Text::Color(crate::gui::theme::TEXT_SECONDARY))
+                .into()
+        } else {
+            text("Starting…")
+                .size(11)
+                .style(iced::theme::Text::Color(crate::gui::theme::TEXT_SECONDARY))
+                .into()
+        }
+    } else {
+        text("Off — nothing is listening.")
+            .size(11)
+            .style(iced::theme::Text::Color(crate::gui::theme::TEXT_SECONDARY))
+            .into()
+    };
+
+    let mut bridge_section = column![
+        text("Browser Integration")
+            .size(16)
+            .style(iced::theme::Text::Color(crate::gui::theme::TEXT_PRIMARY)),
+        text(
+            "Let the Rustloader browser extension send downloads here. This runs a local \
+             server on this computer only (127.0.0.1 — never reachable from the network), \
+             and only an extension paired with the token below can use it. Nothing is \
+             sent anywhere."
+        )
+        .size(13)
+        .style(iced::theme::Text::Color(crate::gui::theme::TEXT_SECONDARY)),
+        toggler(
+            Some("Browser integration (local bridge)".to_string()),
+            browser_bridge,
+            crate::gui::app::Message::BrowserBridgeToggled,
+        )
+        .width(Length::Shrink)
+        .spacing(8),
+        bridge_status,
+    ]
+    .spacing(10);
+
+    if browser_bridge {
+        if let Some(token) = bridge_token {
+            bridge_section = bridge_section.push(
+                column![
+                    text("Pairing token — paste it into the extension's options page:")
+                        .size(13)
+                        .style(iced::theme::Text::Color(crate::gui::theme::TEXT_SECONDARY)),
+                    row![
+                        text(token.to_string())
+                            .size(14)
+                            .font(crate::gui::theme::FONT_MONO)
+                            .style(iced::theme::Text::Color(crate::gui::theme::TEXT_PRIMARY)),
+                        button(text("Copy").size(13))
+                            .on_press(crate::gui::app::Message::CopyBridgeToken)
+                            .padding([6, 12])
+                            .style(iced::theme::Button::Custom(Box::new(
+                                crate::gui::theme::SecondaryButton
+                            ))),
+                    ]
+                    .spacing(12)
+                    .align_items(Alignment::Center),
+                ]
+                .spacing(8),
+            );
+        }
+    }
+    let bridge_section = bridge_section.push(
+        text("Takes effect immediately; Save Settings keeps it (and the token) for next launch.")
+            .size(11)
+            .style(iced::theme::Text::Color(crate::gui::theme::TEXT_SECONDARY)),
+    );
+
     // Save button
     let save_button = button(text("Save Settings").size(16))
         .on_press(crate::gui::app::Message::SaveSettings)
@@ -239,6 +326,7 @@ pub fn settings_view(
                     cookies_section,
                     clipboard_section,
                     updates_section,
+                    bridge_section,
                 ]
                 .spacing(24)
             )
