@@ -40,6 +40,7 @@ async fn test_execution_concurrency_limit() {
             status: rustloader::queue::TaskStatus::Queued,
             progress: None,
             added_at: Utc::now(),
+            output_format: Default::default(),
         };
         qm.add_task(task).await.unwrap();
     }
@@ -105,6 +106,7 @@ async fn test_fsm_transitions() {
         status: rustloader::queue::TaskStatus::Queued,
         progress: None,
         added_at: Utc::now(),
+        output_format: Default::default(),
     };
     qm.add_task(task).await.unwrap();
 

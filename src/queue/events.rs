@@ -23,6 +23,11 @@ pub enum QueueEvent {
         format: Box<Format>,
         output_path: PathBuf,
         timestamp: DateTime<Utc>,
+        /// The user's output-format choice (B-GUI-005). `serde(default)` so
+        /// pre-existing event-log lines (which lack the field) rehydrate as
+        /// `Best` — I-6's corruption tolerance is untouched.
+        #[serde(default)]
+        output_format: crate::utils::OutputFormat,
     },
     /// A task started downloading
     TaskStarted {

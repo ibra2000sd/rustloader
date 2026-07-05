@@ -12,6 +12,7 @@ use crate::downloader::resume_guard::{remove_sidecar, sidecar_path};
 use crate::downloader::{DownloadEngine, DownloadProgress, PageFallback};
 use crate::extractor::{Format, VideoInfo};
 use crate::utils::error::RustloaderError;
+use crate::utils::OutputFormat;
 use crate::utils::{ContentType, FileOrganizer, MetadataManager, VideoMetadata};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -44,6 +45,8 @@ pub struct DownloadTask {
     pub status: TaskStatus,
     pub progress: Option<DownloadProgress>,
     pub added_at: DateTime<Utc>,
+    /// The user's output-format choice for this download (B-GUI-005).
+    pub output_format: OutputFormat,
 }
 
 /// Task status
@@ -105,6 +108,7 @@ impl QueueManager {
                     format,
                     output_path,
                     timestamp,
+                    output_format,
                 } => {
                     // Create task with fully restored format
                     tasks.insert(
@@ -117,6 +121,7 @@ impl QueueManager {
                             status: TaskStatus::Queued,
                             progress: None,
                             added_at: timestamp,
+                            output_format,
                         },
                     );
                 }
@@ -191,6 +196,7 @@ impl QueueManager {
         let log_video_info = task.video_info.clone();
         let log_format = task.format.clone();
         let log_output_path = task.output_path.clone();
+        let task_output_format = task.output_format.clone();
 
         // Add to queue
         {
@@ -223,6 +229,7 @@ impl QueueManager {
                 format: Box::new(log_format),
                 output_path: log_output_path,
                 timestamp: Utc::now(),
+                output_format: task_output_format,
             })
             .await
         {
@@ -671,6 +678,7 @@ impl QueueManager {
         let task_id = task.id.clone();
         let output_path = task.output_path.clone();
         let url = task.format.url.clone();
+        let output_format = task.output_format.clone();
 
         // `url` above is the extractor-RESOLVED direct URL, not the page the
         // user pasted. If the native path can't serve it (signed/session-bound
@@ -843,6 +851,7 @@ impl QueueManager {
             let download_task = engine.download_with_fallback(
                 &url,
                 page_fallback,
+                output_format,
                 &output_path,
                 progress_tx.clone(),
             );
@@ -1205,6 +1214,7 @@ impl DownloadTask {
             status: TaskStatus::Queued,
             progress: None,
             added_at: Utc::now(),
+            output_format: OutputFormat::Best,
         }
     }
 }

@@ -9,7 +9,7 @@ use crate::gui::clipboard_monitor::ClipboardWatch;
 use std::time::Instant;
 // DownloadProgressData defined below
 use crate::queue::TaskStatus;
-use crate::utils::config::{AppSettings, VideoQuality};
+use crate::utils::config::{AppSettings, OutputFormat, VideoQuality};
 
 use anyhow::Result;
 use iced::{executor, Application, Command, Element, Subscription, Theme};
@@ -49,6 +49,7 @@ pub struct RustloaderApp {
     max_concurrent: usize,
     segments_per_download: usize,
     quality: VideoQuality,
+    output_format: OutputFormat,
     /// Browser to read cookies from for authenticated sites (yt-dlp
     /// `--cookies-from-browser`); empty = none.
     cookies_from_browser: String,
@@ -216,6 +217,7 @@ pub enum Message {
     MaxConcurrentChanged(usize),
     SegmentsChanged(usize),
     QualityChanged(String),
+    OutputFormatChanged(String),
     CookiesFromBrowserChanged(String),
     ClipboardMonitoringToggled(bool),
     SaveSettings,
@@ -296,6 +298,7 @@ impl Application for RustloaderApp {
             max_concurrent: settings.max_concurrent,
             segments_per_download: settings.segments,
             quality: settings.quality,
+            output_format: settings.output_format,
             cookies_from_browser: settings.cookies_from_browser.clone().unwrap_or_default(),
             cookie_browser_options: crate::utils::cookies::detect_browsers(),
             clipboard_monitoring: settings.clipboard_monitoring,
@@ -395,6 +398,7 @@ impl Application for RustloaderApp {
                                         // (B-GUI-003 — it used to be ignored).
                                         format_id: None,
                                         quality: self.quality.clone(),
+                                        output_format: self.output_format.clone(),
                                     });
                             }
                             Err(e) => {
@@ -749,6 +753,13 @@ impl Application for RustloaderApp {
                 Command::none()
             }
 
+            Message::OutputFormatChanged(label) => {
+                // Unknown labels can't come from the pick_list, but degrade
+                // to Best rather than panicking if they somehow do.
+                self.output_format = OutputFormat::from_label(&label).unwrap_or(OutputFormat::Best);
+                Command::none()
+            }
+
             Message::CookiesFromBrowserChanged(value) => {
                 self.cookies_from_browser = value;
                 Command::none()
@@ -824,6 +835,7 @@ impl Application for RustloaderApp {
                     },
                     cookies_file: None,
                     clipboard_monitoring: self.clipboard_monitoring,
+                    output_format: self.output_format.clone(),
                 };
 
                 // Save settings to database. The result is surfaced (see
@@ -1030,6 +1042,7 @@ impl Application for RustloaderApp {
                     self.is_extracting,
                     self.url_error.as_deref(),
                     &quality_str,
+                    self.output_format.label(),
                     self.segments_per_download,
                     self.detected_url.as_deref(),
                 )
@@ -1152,6 +1165,11 @@ async fn load_settings_from_db(db_manager: &DatabaseManager) -> Result<AppSettin
         }
     }
 
+    // Load output format (absent/unknown => Best, i.e. no conversion)
+    if let Some(value) = db_manager.get_setting("output_format").await? {
+        settings.output_format = OutputFormat::from_key(&value);
+    }
+
     Ok(settings)
 }
 
@@ -1191,6 +1209,10 @@ async fn save_settings_to_db(db_manager: &DatabaseManager, settings: &AppSetting
             "clipboard_monitoring",
             &settings.clipboard_monitoring.to_string(),
         )
+        .await?;
+
+    db_manager
+        .save_setting("output_format", settings.output_format.as_key())
         .await?;
 
     Ok(())
@@ -1252,7 +1274,7 @@ mod settings_tests {
     // used to be flattened to "Custom" on save and loaded back as Best.
     #[tokio::test]
     async fn specific_quality_round_trips_through_db() {
-        use crate::utils::config::VideoQuality;
+        use crate::utils::config::{OutputFormat, VideoQuality};
 
         let dir = std::env::temp_dir().join(format!("rl-quality-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

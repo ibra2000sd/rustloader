@@ -4,7 +4,7 @@ use crate::downloader::{DownloadConfig, DownloadEngine};
 use crate::extractor::{Extractor, Format, HybridExtractor, VideoInfo, YtDlpExtractor};
 use crate::gui::DownloadProgressData;
 use crate::queue::{DownloadTask, EventLog, QueueManager, TaskStatus};
-use crate::utils::config::{AppSettings, VideoQuality};
+use crate::utils::config::{AppSettings, OutputFormat, VideoQuality};
 use crate::utils::{get_app_support_dir, FileOrganizer, MetadataManager, OrganizationSettings};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -177,9 +177,16 @@ impl BackendActor {
                     output_path,
                     format_id,
                     quality,
+                    output_format,
                 } => {
-                    self.handle_start_download(*video_info, output_path, format_id, quality)
-                        .await;
+                    self.handle_start_download(
+                        *video_info,
+                        output_path,
+                        format_id,
+                        quality,
+                        output_format,
+                    )
+                    .await;
                 }
                 BackendCommand::PauseDownload(id) => {
                     let _ = self.queue_manager.pause_task(&id).await;
@@ -236,6 +243,7 @@ impl BackendActor {
         output_path: PathBuf,
         format_id: Option<String>,
         quality: VideoQuality,
+        output_format: OutputFormat,
     ) {
         // Validation and setup logic ported from BackendBridge
 
@@ -253,7 +261,10 @@ impl BackendActor {
         };
 
         // 2. Get Direct URL
-        let download_url = match self.get_download_url(&video_info, &format).await {
+        let download_url = match self
+            .get_download_url(&video_info, &format, &output_format)
+            .await
+        {
             Ok(url) => url,
             Err(e) => {
                 // Log it: same reasoning as the format-selection arm above.
@@ -277,6 +288,7 @@ impl BackendActor {
             status: TaskStatus::Queued,
             progress: None,
             added_at: Utc::now(),
+            output_format,
         };
 
         // 4. Add to Queue
@@ -424,6 +436,7 @@ impl BackendActor {
         &self,
         video_info: &VideoInfo,
         format: &Format,
+        output_format: &OutputFormat,
     ) -> Result<String, String> {
         // A video-only pick (DASH-split video, acodec "none") can never be
         // made whole by the native path — its direct URL serves exactly one,
@@ -436,6 +449,15 @@ impl BackendActor {
         let video_only = format.vcodec.as_deref().unwrap_or("none") != "none"
             && format.acodec.as_deref().unwrap_or("none") == "none";
         if video_only && !video_info.url.is_empty() {
+            return Ok(video_info.url.clone());
+        }
+
+        // An explicit output format (B-GUI-005) needs ffmpeg post-processing
+        // (remux or audio extraction), which only the yt-dlp path performs —
+        // the native engine would download the direct URL bytes and skip the
+        // conversion entirely. Same page-URL move as the video-only branch:
+        // the engine's probe sees HTML and routes to yt-dlp.
+        if !output_format.is_best() && !video_info.url.is_empty() {
             return Ok(video_info.url.clone());
         }
 

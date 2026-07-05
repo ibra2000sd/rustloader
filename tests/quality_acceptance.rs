@@ -96,6 +96,7 @@ async fn downloads_at_selected_quality() {
             output_path,
             format_id: None,
             quality,
+            output_format: Default::default(),
         })
         .await
         .expect("send StartDownload");
