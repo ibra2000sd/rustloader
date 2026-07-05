@@ -50,6 +50,17 @@ pub struct AppSettings {
     /// conversion.
     #[serde(default)]
     pub output_format: OutputFormat,
+
+    /// Once per launch, ask GitHub whether a newer release exists and show a
+    /// dismissible banner if so (notify-only — nothing downloads or installs).
+    /// The check is a single request to api.github.com, so GitHub sees the
+    /// machine's IP address; opt-out in Settings. Defaults ON.
+    #[serde(default = "default_check_updates_on_launch")]
+    pub check_updates_on_launch: bool,
+}
+
+fn default_check_updates_on_launch() -> bool {
+    true
 }
 
 impl Default for AppSettings {
@@ -69,6 +80,7 @@ impl Default for AppSettings {
             cookies_file: None,
             clipboard_monitoring: false,
             output_format: OutputFormat::Best,
+            check_updates_on_launch: true,
         }
     }
 }

@@ -650,6 +650,26 @@ call); (4) a Windows `.ico` if/when Windows bundle packaging exists (macOS
 `AppIcon.icns` already ships; no Windows packaging is in the repo today).
 A full-fidelity web-shell (Tauri) migration is a separate strategic decision.
 
+### F-UPD-001 — Launch-time update check + non-intrusive banner (no auto-install) · closed (PR open) · SMALL-MEDIUM
+On launch, one async GET to the GitHub `releases/latest` API (which already
+excludes drafts/pre-releases) with a `User-Agent` and, when stored, an
+`If-None-Match` ETag so up-to-date launches get a free `304`. The tag is
+compared to `CARGO_PKG_VERSION` with real semver ordering (`semver` crate —
+"0.10.0" beats "0.9.0", "1.0.0-rc.1" does not beat "1.0.0"); only strictly
+newer shows a dismissible banner on the Downloads view (same shape as the
+F-GUI-001 clipboard banner) with **Download** (opens the release `html_url`
+in the browser — the app never fetches/replaces its own binary; Sparkle/
+axoupdater is a later step), **Skip this version** (persisted), and
+**Dismiss**. Every failure — offline, timeout, 403/429 rate limit, parse
+error, 304 — is a silent debug-logged no-op; the check is an iced
+`Command::perform` off `new()`, so startup never waits on it. A Settings
+toggle "Check for updates on launch" (**default ON**, persisted, with a
+privacy-honest note that the check contacts GitHub) gates it; when OFF no
+request is made (unit-tested against a local listener, alongside semver
+compare + parse + graceful-failure tests in `src/utils/update_check.rs`).
+GUI/utils-only — no engine/format/quality change. 2026-07-05, base
+`61bca94`, PR pending.
+
 ### `B-DL-007` — native download output handling (naming + missing dir)
 
 Two pre-ship smoke findings in the native download path, both in

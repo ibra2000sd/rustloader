@@ -9,6 +9,7 @@ pub mod error;
 pub mod metadata;
 pub mod organizer;
 pub mod platform;
+pub mod update_check;
 
 // Re-export for convenience
 pub use bundle_paths::{

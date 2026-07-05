@@ -10,6 +10,7 @@ use std::time::Instant;
 // DownloadProgressData defined below
 use crate::queue::TaskStatus;
 use crate::utils::config::{AppSettings, OutputFormat, VideoQuality};
+use crate::utils::update_check::{self, UpdateInfo};
 
 use anyhow::Result;
 use iced::{executor, Application, Command, Element, Subscription, Theme};
@@ -64,6 +65,15 @@ pub struct RustloaderApp {
     clipboard_monitoring: bool,
     clipboard_watch: ClipboardWatch,
     detected_url: Option<String>,
+
+    // Launch-time update check (utils::update_check; opt-out, notify-only).
+    // `update_available` drives a dismissible banner whose Download button
+    // opens the release page in the browser — the app never self-updates.
+    check_updates_on_launch: bool,
+    update_available: Option<UpdateInfo>,
+    /// Version the user chose "Skip this version" for (persisted); a check
+    /// result matching it stays silent.
+    update_skip_version: Option<String>,
 
     // Flags
     is_extracting: bool,
@@ -228,6 +238,14 @@ pub enum Message {
     ConfirmDetectedUrl, // User accepted the detected URL — queue it
     DismissDetectedUrl, // User declined the detected URL
 
+    // Update check (launch-time, opt-out)
+    UpdateCheckCompleted(Option<UpdateInfo>), // None covers every no-op case
+    OpenUpdateDownloadPage,                   // Open the release page in the browser
+    DismissUpdateBanner,                      // Hide the banner for this run
+    SkipUpdateVersion,                        // Never offer this version again
+    UpdateSkipSaved(Result<(), String>),
+    CheckUpdatesToggled(bool),
+
     // System
     Tick, // For periodic UI updates
 }
@@ -258,6 +276,20 @@ impl Application for RustloaderApp {
         if let Ok(loaded_settings) = rt.block_on(load_settings_from_db(&db_manager)) {
             settings = loaded_settings;
         }
+
+        // Update-check bookkeeping (not part of AppSettings): the ETag of the
+        // last up-to-date answer and any "Skip this version" choice. Both
+        // absent on first run.
+        let update_etag = rt
+            .block_on(db_manager.get_setting("update_check_etag"))
+            .ok()
+            .flatten()
+            .filter(|s| !s.is_empty());
+        let update_skip_version = rt
+            .block_on(db_manager.get_setting("update_skip_version"))
+            .ok()
+            .flatten()
+            .filter(|s| !s.is_empty());
 
         // Initialize Backend Actor
         let (cmd_tx, cmd_rx) = mpsc::channel(100);
@@ -304,11 +336,43 @@ impl Application for RustloaderApp {
             clipboard_monitoring: settings.clipboard_monitoring,
             clipboard_watch: ClipboardWatch::new(),
             detected_url: None,
+            check_updates_on_launch: settings.check_updates_on_launch,
+            update_available: None,
+            update_skip_version,
             is_extracting: false,
             url_error: None,
         };
 
-        (app, Command::none())
+        // Fire the once-per-launch update check as an async Command so
+        // startup never waits on the network; when the toggle is OFF,
+        // `check_if_enabled` returns immediately without any request. Every
+        // failure resolves to None (silent, debug-logged in the module).
+        let enabled = settings.check_updates_on_launch;
+        let db_for_etag = Arc::clone(&app.db_manager);
+        let update_check_cmd = Command::perform(
+            async move {
+                let outcome = update_check::check_if_enabled(
+                    enabled,
+                    update_check::LATEST_RELEASE_URL,
+                    env!("CARGO_PKG_VERSION"),
+                    update_etag,
+                )
+                .await?;
+                // Persist the validator only for up-to-date answers, so a
+                // pending update keeps re-fetching a full 200 (and re-offers
+                // the banner) on later launches; up-to-date launches get a
+                // free 304 instead.
+                if outcome.update.is_none() {
+                    if let Some(etag) = &outcome.etag {
+                        let _ = db_for_etag.save_setting("update_check_etag", etag).await;
+                    }
+                }
+                outcome.update
+            },
+            Message::UpdateCheckCompleted,
+        );
+
+        (app, update_check_cmd)
     }
 
     fn title(&self) -> String {
@@ -816,6 +880,65 @@ impl Application for RustloaderApp {
                 Command::none()
             }
 
+            Message::UpdateCheckCompleted(update) => {
+                // None (failure, 304, up to date, opted out) stays silent —
+                // no status message, no banner. A version the user skipped
+                // stays silent too.
+                if let Some(info) = update {
+                    if self.update_skip_version.as_deref() != Some(info.version.as_str()) {
+                        self.update_available = Some(info);
+                    }
+                }
+                Command::none()
+            }
+
+            Message::OpenUpdateDownloadPage => {
+                // Deliberately just the release page in the browser — the
+                // app never fetches or replaces its own binary.
+                if let Some(info) = &self.update_available {
+                    let _ = open::that(&info.html_url);
+                }
+                Command::none()
+            }
+
+            Message::DismissUpdateBanner => {
+                self.update_available = None;
+                Command::none()
+            }
+
+            Message::SkipUpdateVersion => {
+                if let Some(info) = self.update_available.take() {
+                    self.update_skip_version = Some(info.version.clone());
+                    let db_manager = Arc::clone(&self.db_manager);
+                    return Command::perform(
+                        async move {
+                            db_manager
+                                .save_setting("update_skip_version", &info.version)
+                                .await
+                                .map_err(|e| e.to_string())
+                        },
+                        Message::UpdateSkipSaved,
+                    );
+                }
+                Command::none()
+            }
+
+            Message::UpdateSkipSaved(result) => {
+                // Worst case the skip only lasts this run; never a user-facing
+                // error for a background nicety.
+                if let Err(e) = result {
+                    tracing::debug!("failed to persist skipped update version: {e}");
+                }
+                Command::none()
+            }
+
+            Message::CheckUpdatesToggled(enabled) => {
+                // The check runs at launch, so the new value applies from the
+                // next start; Save Settings persists it.
+                self.check_updates_on_launch = enabled;
+                Command::none()
+            }
+
             Message::SaveSettings => {
                 let settings = AppSettings {
                     download_location: PathBuf::from(&self.download_location),
@@ -836,6 +959,7 @@ impl Application for RustloaderApp {
                     cookies_file: None,
                     clipboard_monitoring: self.clipboard_monitoring,
                     output_format: self.output_format.clone(),
+                    check_updates_on_launch: self.check_updates_on_launch,
                 };
 
                 // Save settings to database. The result is surfaced (see
@@ -1045,6 +1169,7 @@ impl Application for RustloaderApp {
                     self.output_format.label(),
                     self.segments_per_download,
                     self.detected_url.as_deref(),
+                    self.update_available.as_ref().map(|u| u.version.as_str()),
                 )
             }
             View::Settings => {
@@ -1056,6 +1181,7 @@ impl Application for RustloaderApp {
                     &self.cookies_from_browser,
                     &self.cookie_browser_options,
                     self.clipboard_monitoring,
+                    self.check_updates_on_launch,
                 )
             }
             View::History => {
@@ -1170,6 +1296,13 @@ async fn load_settings_from_db(db_manager: &DatabaseManager) -> Result<AppSettin
         settings.output_format = OutputFormat::from_key(&value);
     }
 
+    // Load update-check opt-out (absent/unparsable => default ON)
+    if let Some(value) = db_manager.get_setting("check_updates_on_launch").await? {
+        if let Ok(val) = value.parse::<bool>() {
+            settings.check_updates_on_launch = val;
+        }
+    }
+
     Ok(settings)
 }
 
@@ -1215,6 +1348,13 @@ async fn save_settings_to_db(db_manager: &DatabaseManager, settings: &AppSetting
         .save_setting("output_format", settings.output_format.as_key())
         .await?;
 
+    db_manager
+        .save_setting(
+            "check_updates_on_launch",
+            &settings.check_updates_on_launch.to_string(),
+        )
+        .await?;
+
     Ok(())
 }
 
@@ -1247,6 +1387,9 @@ mod settings_tests {
             segments: 12,
             cookies_from_browser: Some("firefox".to_string()),
             clipboard_monitoring: true,
+            // OFF is the non-default, so a successful reload proves the
+            // opt-out actually persists.
+            check_updates_on_launch: false,
             ..AppSettings::default()
         };
 
@@ -1266,6 +1409,7 @@ mod settings_tests {
         assert_eq!(loaded.max_concurrent, 7);
         assert_eq!(loaded.segments, 12);
         assert!(loaded.clipboard_monitoring);
+        assert!(!loaded.check_updates_on_launch);
 
         std::fs::remove_file(&db_path).ok();
     }
