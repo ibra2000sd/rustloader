@@ -100,20 +100,37 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     
     steps:
+      # Checkout first: it needs the directory to itself; the downloaded
+      # artifacts and the extension zip are created after it.
+      - name: Checkout code
+        uses: actions/checkout@v4
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
-        
+
+      # Zip only the extension files (zip from inside the directory, so the
+      # archive root is the extension itself — Load-unpacked-able after
+      # extraction). -x '.*' keeps dotfiles/metadata out. $GITHUB_REF_NAME is
+      # used as an env var (not ${{ }} interpolation) per workflow-injection
+      # guidance.
+      - name: Package Chrome extension
+        run: |
+          (cd extension/chrome && zip -r "$GITHUB_WORKSPACE/rustloader-chrome-extension-${GITHUB_REF_NAME}.zip" . -x '.*' -x '*/.*')
+          unzip -l "rustloader-chrome-extension-${GITHUB_REF_NAME}.zip"
+          unzip -p "rustloader-chrome-extension-${GITHUB_REF_NAME}.zip" manifest.json | head -5
+
       - name: Generate checksums
         run: |
-          sha256sum */rustloader-* > SHA256SUMS.txt
+          sha256sum */rustloader-*.tar.gz */rustloader-*.zip rustloader-chrome-extension-*.zip > SHA256SUMS.txt
           cat SHA256SUMS.txt
-          
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
           files: |
             */rustloader-*.tar.gz
             */rustloader-*.zip
+            rustloader-chrome-extension-*.zip
             SHA256SUMS.txt
           generate_release_notes: true
           # Hyphenated tags (v0.9.0-rc.1, v1.0.0-beta) publish as pre-releases,

@@ -112,9 +112,13 @@ jobs:
           if [ "$RUNNER_OS" = "Windows" ]; then bin=target/release/rustloader.exe; fi
           out="$("$bin" --version)"
           echo "--version output: $out"
+          # Expect the version Cargo.toml declares (same extraction as
+          # scripts/build-macos-app.sh) — a hardcoded string here broke the
+          # v0.9.0 -> v0.10.0 bump on every OS.
+          want="$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)"
           case "$out" in
-            *0.9.0*) echo "version OK" ;;
-            *) echo "FAIL: expected 0.9.0 in --version output" >&2; exit 1 ;;
+            *"$want"*) echo "version OK ($want)" ;;
+            *) echo "FAIL: expected $want in --version output" >&2; exit 1 ;;
           esac
 
       - name: 'Smoke: real download via the native segmented engine'
