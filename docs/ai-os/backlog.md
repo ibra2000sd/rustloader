@@ -584,7 +584,7 @@ Source: internal audit 2026-06-30.
 
 ## P3 / later
 
-### F-EXT-001 — Browser-extension integration (extension → local bridge) · in-progress (Phase 1 PR open) · design-complete
+### F-EXT-001 — Browser-extension integration (extension → local bridge) · Phase 1 shipped-pending-tag (v0.10.0) · design-complete
 IDM-style browser extension hands a URL (+ page cookies/headers + quality/
 format) to the running rustloader. Design spike **complete 2026-07-05**
 (base `f6de70a`): recommended bridge is a **loopback-only HTTP server inside
@@ -608,6 +608,13 @@ options page; no sniffer yet). Verified end-to-end with a real
 (ffprobe: h264+aac). Phase-1 limit: bridge cookies apply to extraction; the
 yt-dlp *download* path still uses settings-derived cookies (per-task engine
 cookies would touch queue/engine internals — a Phase-2 decision).
+**Phase 1 shipped-pending-tag (2026-07-06):** the Phase-1 PR merged as **#63**
+(`92ba58f` on main); release staging PR **#64** bumps to v0.10.0, ships the
+extension as a `rustloader-chrome-extension-v<version>.zip` release asset,
+adds the README "Browser integration (beta)" section and `RELEASING.md`, and
+carries the outreach draft (`docs/drafts/`). Ships to users when the
+maintainer merges #64 and pushes the `v0.10.0` tag. Remaining phases (sniffer,
+download-stage cookies, Firefox/Edge) stay open under this item.
 
 ### F-EXTRACT-001 — Proxy-capture spike (res-downloader style) · open · investigate-first
 Exploratory spike for a local-proxy media capture ("any page that plays video",
