@@ -118,6 +118,22 @@ pub fn log_dir() -> PathBuf {
     }
 }
 
+/// The bundled-tools directory (`Contents/Resources/bin`) when running from
+/// a macOS .app bundle, i.e. when the executable sits in `Contents/MacOS/`.
+///
+/// Returns `None` outside a bundle — dev builds, release archives, CLI runs,
+/// and every non-macOS layout — so callers' bundle handling is a natural
+/// no-op there.
+pub fn bundled_bin_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let exe_dir = exe.parent()?;
+    if !exe_dir.ends_with("MacOS") {
+        return None;
+    }
+    let bin = exe_dir.parent()?.join("Resources").join("bin");
+    bin.is_dir().then_some(bin)
+}
+
 /// Returns the path to yt-dlp executable
 pub fn ytdlp_path() -> Option<PathBuf> {
     // 1. Check if bundled (relative to executable)
@@ -170,6 +186,14 @@ pub fn exe_extension() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_bundled_bin_dir_is_none_outside_a_bundle() {
+        // Test binaries run from target/…/deps, never Contents/MacOS, so the
+        // bundle detection must report "not bundled" (the PATH-prepend in
+        // main() relies on this to stay a no-op for dev/CLI runs).
+        assert_eq!(bundled_bin_dir(), None);
+    }
 
     #[test]
     fn test_app_data_dir_exists_or_creatable() {

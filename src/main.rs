@@ -11,6 +11,11 @@ use rustloader::gui;
 use std::process::Command;
 
 fn main() -> Result<()> {
+    // Must run before anything reads PATH or spawns a subprocess (the yt-dlp
+    // probe and depcheck below, the download engine later), and before any
+    // thread exists (`env::set_var` is only sound single-threaded).
+    setup_bundled_tools_path();
+
     let cli = Cli::parse();
 
     // Initialize logging
@@ -65,6 +70,34 @@ fn main() -> Result<()> {
     })?;
 
     Ok(())
+}
+
+/// Prepend the .app bundle's `Contents/Resources/bin` (yt-dlp, ffmpeg,
+/// ffprobe, deno) to `PATH` when running from the macOS bundle.
+///
+/// The extractor resolves the bundled yt-dlp by path
+/// (`platform::ytdlp_path`), but the download engine spawns `yt-dlp` by name,
+/// yt-dlp finds `ffmpeg` and a JS runtime (deno, for YouTube's n-challenge)
+/// on PATH, and `depcheck::has_js_runtime()` checks PATH too. Finder launches
+/// apps with a minimal PATH — and possibly none at all — so a bare launch
+/// falls back to the standard system directories: yt-dlp shells out to system
+/// tools (e.g. `/usr/bin/security` for Chrome cookie decryption), so those
+/// must stay reachable.
+///
+/// Outside a bundle (dev build, release archive, CLI) `bundled_bin_dir()` is
+/// `None` and this is a no-op.
+fn setup_bundled_tools_path() {
+    let Some(bin_dir) = rustloader::utils::platform::bundled_bin_dir() else {
+        return;
+    };
+    let base = std::env::var_os("PATH")
+        .filter(|path| !path.is_empty())
+        .unwrap_or_else(|| "/usr/bin:/bin:/usr/sbin:/sbin".into());
+    let paths = std::iter::once(bin_dir).chain(std::env::split_paths(&base));
+    match std::env::join_paths(paths) {
+        Ok(joined) => std::env::set_var("PATH", joined),
+        Err(e) => eprintln!("WARNING: cannot put the bundled tools on PATH: {e}"),
+    }
 }
 
 /// Locate yt-dlp, then emit (non-blocking) dependency health warnings.

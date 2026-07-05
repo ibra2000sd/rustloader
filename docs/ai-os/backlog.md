@@ -266,6 +266,26 @@ failing condition: bundled yt-dlp + `--cookies-from-browser chrome` +
 Finder-equivalent PATH fails at `37d2a7d` and succeeds with only deno added.
 Source: maintainer report + diagnosis session, 2026-07-04.
 
+### B-PKG-001 — .app menu bar read "rustloader-bin"; shell launcher replaced by in-binary PATH setup · closed (PR open) · SMALL
+The universal .app (#58) pointed `CFBundleExecutable` at a shell launcher
+(`Contents/MacOS/rustloader`) that prepended `Resources/bin` to PATH and
+exec'd `rustloader-bin`; macOS derives the app-menu title from the process
+name, so the menu bar read "About/Quit **rustloader-bin**". The script-as-
+main-executable shape was also SIGNING.md's known notarization risk. **Fix:**
+the launcher's PATH logic moved into `main.rs::setup_bundled_tools_path()` —
+the first statement in `main()`, before any PATH read or subprocess spawn: if
+`platform::bundled_bin_dir()` finds `Contents/Resources/bin` next to the
+executable (new helper, same bundle detection as `ytdlp_path`), it is
+prepended to PATH, with the launcher's `${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}`
+fallback preserved for no-environment launches (keeps `/usr/bin/security`
+reachable for Chrome cookie decryption). Outside a bundle the helper returns
+`None` and startup is untouched (dev/CLI/Linux/Windows no-op, unit-tested).
+`scripts/build-macos-app.sh` now installs the Rust binary directly as
+`Contents/MacOS/Rustloader` (capital R — the process name is the menu title)
+and `CFBundleExecutable=Rustloader`; the launcher heredoc is gone. SIGNING.md
+updated (all-Mach-O bundle; the shell-launcher caveat is resolved).
+Source: maintainer report, 2026-07-05.
+
 ### B-GUI-005 — "Format" control was a dead static "MP4" label · closed (PR open) · MEDIUM
 The main view's Format tag was hardcoded text (`main_view.rs`, "static for
 now"); nothing about container/format reached the download, so files kept
