@@ -89,6 +89,21 @@
       #status.error {
         color: #c0392b;
       }
+      footer {
+        margin-top: 10px;
+        padding-top: 8px;
+        border-top: 1px solid #ddd;
+        text-align: right;
+      }
+      #open-options {
+        background: none;
+        border: none;
+        color: #1565c0;
+        font-size: 12px;
+        padding: 0;
+        cursor: pointer;
+        text-decoration: underline;
+      }
     </style>
   </head>
   <body>
@@ -128,6 +143,9 @@
       are spotted as the page requests them.
     </p>
     <p id="status" hidden></p>
+    <footer>
+      <button id="open-options">⚙ Settings / Pair</button>
+    </footer>
     <script type="module" src="popup.js"></script>
   </body>
 </html>
