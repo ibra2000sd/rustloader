@@ -189,6 +189,18 @@ media at all. Positioning over a moving/resizing player is a layout-tracking
 problem (scroll, resize, fullscreen, PiP). Robust-ish on simple sites,
 degrades unpredictably on exactly the sophisticated players people use most.
 
+> **Update (2026-07-06): investigated empirically and rejected.** A
+> read-only spike instrumented the sniffer's dropped frame fields and a
+> per-frame `<video>` census on 5 real sites (13 detections): **zero**
+> detections could be identity-mapped to a visible player — every observed
+> player is MSE (`blob:` src ≠ detected manifest URL), and the
+> maintainer's actual target sites add a cross-origin SecurityError
+> (player in an embedded iframe). Best achievable grade was a fragile
+> timing correlation, at a measured 9–12 MutationObserver callbacks/s.
+> Full evidence and the do-not-relitigate verdict:
+> [`spike-overlay-a-findings.md`](spike-overlay-a-findings.md). Strategy
+> (b) is the deliberate ceiling.
+
 ### (b) One fixed-corner affordance per tab, shown only when the sniffer has detections
 
 A single fixed-position pill in a screen corner, rendered only when the
