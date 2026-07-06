@@ -41,6 +41,7 @@ async fn test_execution_concurrency_limit() {
             progress: None,
             added_at: Utc::now(),
             output_format: Default::default(),
+            insecure_tls: false,
         };
         qm.add_task(task).await.unwrap();
     }
@@ -107,6 +108,7 @@ async fn test_fsm_transitions() {
         progress: None,
         added_at: Utc::now(),
         output_format: Default::default(),
+        insecure_tls: false,
     };
     qm.add_task(task).await.unwrap();
 

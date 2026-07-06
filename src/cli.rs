@@ -146,6 +146,9 @@ impl Cli {
             // this is `false`, so the resolved args are unchanged from
             // before this option existed.
             use_aria2c: self.experimental_aria2c,
+            // The per-download unsafe-TLS opt-in is a GUI surface only in
+            // this PR; the CLI has no flag for it.
+            no_check_certificates: false,
         }
     }
 

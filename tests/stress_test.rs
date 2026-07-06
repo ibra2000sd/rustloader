@@ -67,6 +67,7 @@ fn create_dummy_task(id: &str, base_dir: &std::path::Path) -> DownloadTask {
         progress: None,
         added_at: Utc::now(),
         output_format: Default::default(),
+        insecure_tls: false,
     }
 }
 

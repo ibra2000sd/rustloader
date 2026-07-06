@@ -53,6 +53,11 @@ pub struct RustloaderApp {
     segments_per_download: usize,
     quality: VideoQuality,
     output_format: OutputFormat,
+    /// Per-download "Ignore certificate errors (unsafe)" opt-in. In-memory
+    /// only (never persisted — no global setting by design) and one-shot: it
+    /// applies to the next manually started download, then resets to false.
+    /// Bridge-initiated downloads never use it.
+    insecure_tls: bool,
     /// Browser to read cookies from for authenticated sites (yt-dlp
     /// `--cookies-from-browser`); empty = none.
     cookies_from_browser: String,
@@ -247,6 +252,7 @@ pub enum Message {
     SegmentsChanged(usize),
     QualityChanged(String),
     OutputFormatChanged(String),
+    InsecureTlsToggled(bool),
     CookiesFromBrowserChanged(String),
     ClipboardMonitoringToggled(bool),
     BrowserBridgeToggled(bool),
@@ -454,6 +460,7 @@ impl Application for RustloaderApp {
             segments_per_download: settings.segments,
             quality: settings.quality,
             output_format: settings.output_format,
+            insecure_tls: false,
             cookies_from_browser: settings.cookies_from_browser.clone().unwrap_or_default(),
             cookie_browser_options: crate::utils::cookies::detect_browsers(),
             clipboard_monitoring: settings.clipboard_monitoring,
@@ -600,6 +607,16 @@ impl Application for RustloaderApp {
                                     None => (self.quality.clone(), self.output_format.clone()),
                                 };
 
+                                // The unsafe-TLS opt-in is one-shot and
+                                // manual-only: bridge-initiated downloads
+                                // never inherit the checkbox (a webpage-
+                                // adjacent surface must not request insecure
+                                // TLS), and the checkbox resets after use so
+                                // it can't linger as a de-facto global.
+                                let insecure_tls =
+                                    self.insecure_tls && self.bridge_active.is_none();
+                                self.insecure_tls = false;
+
                                 // Send start command
                                 let _ =
                                     self.backend_sender.try_send(BackendCommand::StartDownload {
@@ -611,6 +628,7 @@ impl Application for RustloaderApp {
                                         format_id: None,
                                         quality,
                                         output_format,
+                                        insecure_tls,
                                     });
                             }
                             Err(e) => {
@@ -976,6 +994,11 @@ impl Application for RustloaderApp {
                 // Unknown labels can't come from the pick_list, but degrade
                 // to Best rather than panicking if they somehow do.
                 self.output_format = OutputFormat::from_label(&label).unwrap_or(OutputFormat::Best);
+                Command::none()
+            }
+
+            Message::InsecureTlsToggled(enabled) => {
+                self.insecure_tls = enabled;
                 Command::none()
             }
 
@@ -1423,6 +1446,7 @@ impl Application for RustloaderApp {
                     self.url_error.as_deref(),
                     &quality_str,
                     self.output_format.label(),
+                    self.insecure_tls,
                     self.segments_per_download,
                     self.detected_url.as_deref(),
                     self.update_available.as_ref().map(|u| u.version.as_str()),

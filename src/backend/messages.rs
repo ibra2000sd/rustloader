@@ -27,6 +27,9 @@ pub enum BackendCommand {
         /// keeps today's behaviour; anything else routes the download through
         /// yt-dlp for a remux or audio extraction.
         output_format: OutputFormat,
+        /// Per-download "Ignore certificate errors (unsafe)" opt-in. Only the
+        /// GUI checkbox sets this — bridge/extension requests never do.
+        insecure_tls: bool,
     },
     PauseDownload(String),
     ResumeDownload(String),

@@ -47,6 +47,10 @@ pub struct DownloadTask {
     pub added_at: DateTime<Utc>,
     /// The user's output-format choice for this download (B-GUI-005).
     pub output_format: OutputFormat,
+    /// Per-download "Ignore certificate errors (unsafe)" opt-in: this task
+    /// (and any retry/resume of it) runs on an insecure-TLS engine copy.
+    /// Never a global default; bridge requests never set it.
+    pub insecure_tls: bool,
 }
 
 /// Task status
@@ -109,6 +113,7 @@ impl QueueManager {
                     output_path,
                     timestamp,
                     output_format,
+                    insecure_tls,
                 } => {
                     // Create task with fully restored format
                     tasks.insert(
@@ -122,6 +127,7 @@ impl QueueManager {
                             progress: None,
                             added_at: timestamp,
                             output_format,
+                            insecure_tls,
                         },
                     );
                 }
@@ -197,6 +203,7 @@ impl QueueManager {
         let log_format = task.format.clone();
         let log_output_path = task.output_path.clone();
         let task_output_format = task.output_format.clone();
+        let task_insecure_tls = task.insecure_tls;
 
         // Add to queue
         {
@@ -230,6 +237,7 @@ impl QueueManager {
                 output_path: log_output_path,
                 timestamp: Utc::now(),
                 output_format: task_output_format,
+                insecure_tls: task_insecure_tls,
             })
             .await
         {
@@ -712,8 +720,19 @@ impl QueueManager {
         // task.status = TaskStatus::Downloading;
         // self.update_task_in_queue(task.clone()).await;
 
-        // Clone engine for the task
-        let engine = Arc::clone(&self.engine);
+        // Clone engine for the task. A flagged task gets its own
+        // insecure-TLS engine copy (native client + yt-dlp args) — the
+        // shared engine is never mutated, so unflagged tasks keep full
+        // certificate validation.
+        let engine = if task.insecure_tls {
+            warn!(
+                "⚠️ [QUEUE] Task {} runs with TLS certificate validation DISABLED (per-download opt-in)",
+                task_id
+            );
+            Arc::new(self.engine.with_insecure_tls())
+        } else {
+            Arc::clone(&self.engine)
+        };
         let active_downloads = Arc::clone(&self.active_downloads);
         let queue = Arc::clone(&self.queue);
         // Clone for progress handler to update active_downloads snapshot
@@ -1215,6 +1234,7 @@ impl DownloadTask {
             progress: None,
             added_at: Utc::now(),
             output_format: OutputFormat::Best,
+            insecure_tls: false,
         }
     }
 }

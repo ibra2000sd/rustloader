@@ -100,6 +100,7 @@ async fn downloads_at_selected_quality() {
             format_id: None,
             quality,
             output_format: Default::default(),
+            insecure_tls: false,
         })
         .await
         .expect("send StartDownload");
