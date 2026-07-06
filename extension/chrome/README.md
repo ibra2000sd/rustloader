@@ -54,16 +54,31 @@ With Rustloader running:
   seeing response content-types so media can be detected. Nothing is
   altered, redirected, or sent anywhere; matching URLs are kept per-tab and
   discarded when you navigate away or close the tab.
+- `scripting` — used ONLY by the experimental, **off-by-default** in-page
+  download button (below). While the option is off, no content script is
+  registered and no extension code runs in any page.
 - `http://127.0.0.1/*` — talking to the app's loopback bridge.
 
-No page scripts, no analytics.
+No page scripts unless you switch the experimental in-page button on; no
+analytics either way.
+
+## Experimental: in-page download button (off by default)
+
+Options → **In-page download button** shows a small corner pill on pages
+where the sniffer detected media (and nothing anywhere else). Clicking it
+lists the same items as the popup; Download goes through the same local
+bridge. The page-side script holds no token and reads nothing from the page
+— it only renders what the extension's service worker sends it. Design and
+threat model: [`docs/browser-integration-overlay-design.md`](../../docs/browser-integration-overlay-design.md).
+This is a prototype pending a maintainer decision; it may be removed.
 
 ## Development
 
-The sniffer's URL/content-type filtering is a pure module with node tests:
+The sniffer's URL/content-type filtering and the overlay's visibility
+decision are pure modules with node tests:
 
 ```
-node --test extension/chrome/media-filter.test.js
+node --test extension/chrome/media-filter.test.js extension/chrome/overlay-logic.test.js
 ```
 
 (`package.json` here only marks the directory as ES modules for node; Chrome

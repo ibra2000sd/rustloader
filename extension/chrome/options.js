@@ -5,6 +5,7 @@ import { autoPair, discover } from "./bridge-client.js";
 
 const tokenInput = document.getElementById("token");
 const statusBox = document.getElementById("status");
+const overlayToggle = document.getElementById("overlay-enabled");
 
 function showStatus(kind, message) {
   statusBox.className = kind;
@@ -12,11 +13,10 @@ function showStatus(kind, message) {
 }
 
 async function load() {
-  const { bridge_token, last_error } = await chrome.storage.local.get([
-    "bridge_token",
-    "last_error",
-  ]);
+  const { bridge_token, last_error, overlay_enabled } =
+    await chrome.storage.local.get(["bridge_token", "last_error", "overlay_enabled"]);
   if (bridge_token) tokenInput.value = bridge_token;
+  overlayToggle.checked = overlay_enabled === true;
   if (last_error) {
     showStatus("warn", `Last error: ${last_error}`);
     await chrome.storage.local.remove("last_error");
@@ -37,6 +37,12 @@ document.getElementById("auto-pair").addEventListener("click", async () => {
   } else {
     showStatus("warn", result.message);
   }
+});
+
+// The gated overlay prototype (overlay-host.js reacts to this key by
+// registering/unregistering the content script).
+overlayToggle.addEventListener("change", async () => {
+  await chrome.storage.local.set({ overlay_enabled: overlayToggle.checked });
 });
 
 document.getElementById("toggle-visibility").addEventListener("click", () => {
