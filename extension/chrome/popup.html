@@ -1,0 +1,133 @@
+<!doctype html>
+<!-- Rustloader Companion — toolbar popup (F-EXT-001 Phase 2).
+     SPDX-License-Identifier: MIT (same license as rustloader itself). -->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      body {
+        font: 13px/1.4 system-ui, sans-serif;
+        width: 360px;
+        margin: 0;
+        padding: 12px;
+        color: #222;
+      }
+      h1 {
+        font-size: 14px;
+        margin: 0 0 8px;
+      }
+      .controls {
+        display: flex;
+        gap: 8px;
+        margin-bottom: 10px;
+      }
+      .controls label {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        font-size: 11px;
+        color: #555;
+        flex: 1;
+      }
+      select {
+        padding: 4px;
+      }
+      #list {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        max-height: 320px;
+        overflow-y: auto;
+      }
+      .item {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        border: 1px solid #ddd;
+        border-radius: 6px;
+        padding: 6px 8px;
+      }
+      .kind {
+        font-size: 10px;
+        font-weight: 600;
+        text-transform: uppercase;
+        color: #fff;
+        background: #2e7d32;
+        border-radius: 4px;
+        padding: 2px 5px;
+        flex-shrink: 0;
+      }
+      .kind.hls, .kind.dash {
+        background: #1565c0;
+      }
+      .name {
+        flex: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        direction: rtl; /* ellipsis on the left, filename end visible */
+        text-align: left;
+      }
+      button {
+        padding: 4px 10px;
+        border: 1px solid #2e7d32;
+        background: #2e7d32;
+        color: #fff;
+        border-radius: 5px;
+        cursor: pointer;
+        flex-shrink: 0;
+      }
+      button:disabled {
+        opacity: 0.6;
+        cursor: default;
+      }
+      #empty, #status {
+        color: #666;
+        font-size: 12px;
+        margin: 6px 0;
+      }
+      #status.error {
+        color: #c0392b;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Media detected on this page</h1>
+    <div class="controls">
+      <label
+        >Quality
+        <select id="quality">
+          <option value="">App default</option>
+          <option value="Best">Best</option>
+          <option value="2160">2160p</option>
+          <option value="1440">1440p</option>
+          <option value="1080">1080p</option>
+          <option value="720">720p</option>
+          <option value="480">480p</option>
+          <option value="Worst">Worst</option>
+        </select>
+      </label>
+      <label
+        >Format
+        <select id="format">
+          <option value="">App default</option>
+          <option value="mp4">MP4</option>
+          <option value="webm">WebM</option>
+          <option value="mkv">MKV</option>
+          <option value="mp3">MP3 (audio)</option>
+          <option value="m4a">M4A (audio)</option>
+          <option value="opus">Opus (audio)</option>
+          <option value="flac">FLAC (audio)</option>
+          <option value="wav">WAV (audio)</option>
+        </select>
+      </label>
+    </div>
+    <div id="list"></div>
+    <p id="empty" hidden>
+      Nothing detected yet. Play the video, then reopen this popup — streams
+      are spotted as the page requests them.
+    </p>
+    <p id="status" hidden></p>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

@@ -34,11 +34,17 @@
   <h1>Rustloader Companion</h1>
   <p>
     Pair this extension with the Rustloader app running on this computer.
-    In Rustloader, open <strong>Settings → Browser Integration</strong>,
-    switch the bridge on, and copy the pairing token here.
+    In Rustloader, open <strong>Settings → Browser Integration</strong> and
+    switch the bridge on. Then either pair automatically (click
+    <strong>Pair</strong> in Rustloader, then the button below within
+    120&nbsp;seconds) or copy the pairing token by hand.
   </p>
 
-  <label for="token">Pairing token</label>
+  <div class="row">
+    <button id="auto-pair" type="button">Pair automatically</button>
+  </div>
+
+  <label for="token">Pairing token (manual fallback)</label>
   <input type="password" id="token" autocomplete="off"
          placeholder="paste the token from Rustloader's Settings" />
   <div class="row">

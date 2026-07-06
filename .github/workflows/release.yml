@@ -115,7 +115,7 @@ jobs:
       # guidance.
       - name: Package Chrome extension
         run: |
-          (cd extension/chrome && zip -r "$GITHUB_WORKSPACE/rustloader-chrome-extension-${GITHUB_REF_NAME}.zip" . -x '.*' -x '*/.*')
+          (cd extension/chrome && zip -r "$GITHUB_WORKSPACE/rustloader-chrome-extension-${GITHUB_REF_NAME}.zip" . -x '.*' -x '*/.*' -x '*.test.js' -x 'package.json')
           unzip -l "rustloader-chrome-extension-${GITHUB_REF_NAME}.zip"
           unzip -p "rustloader-chrome-extension-${GITHUB_REF_NAME}.zip" manifest.json | head -5
 
