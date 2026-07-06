@@ -658,6 +658,20 @@ affordance on Failed cards would need a new event variant to persist the
 flag mutation (today: Reset Task + tick the checkbox); extraction-stage TLS
 failures are not covered by the flag (it rides StartDownload, after
 extraction succeeds).
+**In-page overlay — design note, decision pending (2026-07-06, base
+`f6dc559`):** an IDM-style floating download cue on the page itself is NOT
+part of the phased plan; it would be the extension's first `content_scripts`
+injection into arbitrary pages (threat-model + store-review delta). A
+decision doc —
+[`docs/browser-integration-overlay-design.md`](../browser-integration-overlay-design.md)
+— analyses the delta (isolated world, token-never-in-content-script rule, CWS
+"sensitive execution permissions" / AMO "unexpected changes to web content"
+policies, fetched 2026-07-06) and three placement strategies; recommends a
+single fixed-corner affordance gated on sniffer detections (strategy b),
+prototyped OFF-by-default behind an `overlay_enabled` option via dynamic
+`chrome.scripting` registration (nothing injected while off), removable in
+one revert, and NOT store-shipped unless promoted. Kill/promote criteria in
+the doc §7. Maintainer verdict needed before this becomes a roadmap phase.
 
 ### F-EXTRACT-001 — Proxy-capture spike (res-downloader style) · open · investigate-first
 Exploratory spike for a local-proxy media capture ("any page that plays video",
