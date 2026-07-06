@@ -861,31 +861,35 @@ Regression tests cover the extension-derivation matrix (incl. Content-Dispositio
 parsing + octet-stream→`.bin`) and the directory creation. 2026-07-02, base
 `68c0ee0`, PR pending.
 
-### B-DOC-003 — Segments control: real but unexplained (size-capped, native-path-only, not quality) · open · SMALL
+### B-DOC-003 — Segments control: real but unexplained (size-capped, native-path-only, not quality) · closed (PR open) · SMALL
 Clarification recorded from the 2026-07-06 first-use session — the control
-works as designed; what's missing is that none of the design is surfaced to
-the user. Verified flow at `f4c7834`: the Settings slider
-(`src/gui/views/settings_view.rs:103`, range 4–32) →
+works as designed; what was missing is that none of the design was surfaced
+to the user. One record correction: there are **two** Segments sliders, both
+range 4–32 and both wired to the same `Message::SegmentsChanged` — the
+Settings one this entry originally cited
+(`src/gui/views/settings_view.rs:103`, "Segments per download") **and** the
+main download view's info tag (`src/gui/views/main_view.rs:121`, "Segments"
+— the one the first-use session actually saw). Verified flow:
 `Message::SegmentsChanged` (`src/gui/app.rs:976`) → persisted as
 `AppSettings.segments` (`app.rs:1200`, settings-table key `"segments"`) →
 `DownloadConfig { segments: settings.segments }` (`src/backend/actor.rs:73`)
 → `calculate_segments(file_size, self.config.segments, output_path)`
-(`src/downloader/engine.rs:652`). **Wired, not decorative.** Three unsurfaced
-truths: (a) `calculate_segments` (`src/downloader/segment.rs:352`) caps the
-value by file size — 1 segment under 10 MB, ≤4 under 50 MB, ≤16 under
-500 MB, the full slider value only at ≥500 MB — so a setting of 32 rarely
-means 32; (b) it applies only to the native segmented engine — the yt-dlp
-path (`engine.rs:948` `download_via_ytdlp`) never reads `config.segments`
-(its progress events hardcode `DownloadProgress::new(100, 1)` /
-`segments_completed = 0`), so yt-dlp/HLS downloads — most browser-caught
-`.m3u8` — ignore the slider entirely; (c) it governs parallel-connection
-download speed, not video quality (quality is the separate Quality selector,
-B-GUI-003/B-GUI-004). The settings row today is a bare label + number
-(`settings_view.rs:94-106`) with no hint. **Fix shape (docs/UI copy only,
-not done here):** a hint/tooltip line next to the slider stating (a)–(c),
-in the same hint-line style B-GUI-005 added for the Format selector. The
-capping logic itself is behaving as designed and is explicitly NOT proposed
-for change here.
+(`src/downloader/engine.rs:652`). **Wired, not decorative.** Three previously
+unsurfaced truths: (a) `calculate_segments` (`src/downloader/segment.rs:352`)
+caps the value by file size — 1 segment under 10 MB, ≤4 under 50 MB, ≤16
+under 500 MB, the full slider value only at ≥500 MB — so a setting of 32
+rarely means 32; (b) it applies only to the native segmented engine — the
+yt-dlp path (`engine.rs:948` `download_via_ytdlp`) never reads
+`config.segments`, so yt-dlp/HLS downloads — most browser-caught `.m3u8` —
+ignore the slider entirely; (c) it governs parallel-connection count, not
+video quality. **Fix (UI copy only):** always-visible hint lines in the
+B-GUI-005 `format_hint` style at both surfaces — under the main view's
+info-tag row (size 11 `FG_3`) and under the Settings slider (size 11
+`TEXT_SECONDARY`) — each stating (a)–(c) without overclaiming speed. A hover
+tooltip was considered (iced 0.12.1 ships `iced::widget::tooltip`) and
+rejected: the confusion is a discoverability problem, and hover-only text
+stays undiscovered. Slider range, default (16), and the capping logic are
+unchanged. 2026-07-06, base `f3eb07d`, PR pending.
 
 ## Recently closed
 

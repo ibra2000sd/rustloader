@@ -129,6 +129,17 @@ pub fn main_view(
                 .style(iced::theme::Container::Custom(Box::new(InfoTagStyle))),
             ]
             .spacing(12),
+            // Segments explainer (B-DOC-003): on first use the control reads
+            // as a quality knob. It is an upper bound on parallel connections
+            // for the native direct downloader only — size-capped in
+            // calculate_segments, never read by the yt-dlp path.
+            text(
+                "Segments: parallel connections for direct downloads — an upper limit; \
+                 small files automatically use fewer. YouTube/streaming (yt-dlp) downloads \
+                 don't use it, and it doesn't affect quality."
+            )
+            .size(11)
+            .style(iced::theme::Text::Color(theme::FG_3)),
             // Per-download TLS escape hatch (first-use feedback, 2026-07-06:
             // a CDN with a hostname-mismatched cert). One-shot and honestly
             // labelled unsafe — never a persisted or global setting, and
