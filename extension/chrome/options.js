@@ -1,7 +1,7 @@
 // Rustloader Companion — options page logic (F-EXT-001 Phase 1).
 // SPDX-License-Identifier: MIT (same license as rustloader itself).
 
-import { discover } from "./bridge-client.js";
+import { autoPair, discover } from "./bridge-client.js";
 
 const tokenInput = document.getElementById("token");
 const statusBox = document.getElementById("status");
@@ -22,6 +22,22 @@ async function load() {
     await chrome.storage.local.remove("last_error");
   }
 }
+
+document.getElementById("auto-pair").addEventListener("click", async () => {
+  showStatus("ok", "Looking for a Rustloader pairing window…");
+  const result = await autoPair();
+  if (result.ok) {
+    const { bridge_token } = await chrome.storage.local.get("bridge_token");
+    if (bridge_token) tokenInput.value = bridge_token;
+    showStatus(
+      "ok",
+      `Paired with Rustloader ${result.version} on port ${result.port}. ` +
+        "Right-click a page or use the toolbar popup to download.",
+    );
+  } else {
+    showStatus("warn", result.message);
+  }
+});
 
 document.getElementById("toggle-visibility").addEventListener("click", () => {
   const hidden = tokenInput.type === "password";

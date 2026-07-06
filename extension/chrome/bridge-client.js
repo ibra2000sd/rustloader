@@ -58,6 +58,51 @@ export async function discover(token) {
 }
 
 /**
+ * Auto-pair via the app's single-use pairing window (GET /api/v1/pair):
+ * works only while the user has clicked "Pair" in Rustloader's Settings
+ * within the last ~120 s. Probes the whole port range; a port must first
+ * identify itself as rustloader via /ping before we trust its /pair.
+ *
+ * Resolves to `{ok: true, port, version}` (token saved to storage.local) or
+ * `{ok: false, reason: "not_running"|"window_closed", message}`.
+ */
+export async function autoPair() {
+  const pings = await Promise.all(BRIDGE_PORTS.map((p) => ping(p)));
+  const found = pings.find((r) => r !== null);
+  if (!found) {
+    return {
+      ok: false,
+      reason: "not_running",
+      message:
+        "Rustloader isn't reachable. Launch it and switch on Settings → Browser Integration.",
+    };
+  }
+  try {
+    const resp = await fetchWithTimeout(
+      `http://127.0.0.1:${found.port}/api/v1/pair`,
+    );
+    if (resp.ok) {
+      const body = await resp.json();
+      if (typeof body.token === "string" && body.token.length > 0) {
+        await chrome.storage.local.set({
+          bridge_token: body.token,
+          bridge_port: found.port,
+        });
+        return { ok: true, port: found.port, version: found.version };
+      }
+    }
+  } catch {
+    // Fall through to the window-closed message.
+  }
+  return {
+    ok: false,
+    reason: "window_closed",
+    message:
+      "Rustloader is running, but no pairing window is open. In Rustloader: Settings → Browser Integration → Pair, then click this within 120 seconds. (Older app versions need a manual token paste.)",
+  };
+}
+
+/**
  * POST a download request. `payload` is the /api/v1/download body
  * (url, cookies, quality, output_format — see the design doc).
  *
