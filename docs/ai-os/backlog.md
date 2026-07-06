@@ -687,6 +687,21 @@ strategy (a) investigated and ruled infeasible — evidence:
 open under this item: Phase 3 (Firefox/Edge, Chrome Web Store + AMO
 publishing), download-stage cookies for cookie-gated direct media, and the
 TLS follow-ups above.**
+**Per-tab capture pause built (PR open, 2026-07-07; base `b646f72`;
+extension v0.4.0):** the sniffer previously observed every page with no way
+to switch it off for one. A popup toggle ("Pause capture on this tab")
+pauses detection for that tab: a `paused-<tabId>` flag in `storage.session`,
+checked by a pure `shouldCapture` gate (`capture-gate.js`, node-tested)
+inside the sniffer's serialised write chain; pausing discards the tab's
+detections (badge, popup list, and overlay all clear — the overlay's only
+feed is that same list), and the existing main_frame reset removes the flag,
+so a reload/navigation re-enables capture. No new permissions.
+**Follow-up (open): persistent per-site exclusion** — an origin blocklist in
+`storage.local`, managed from the options page, surviving reloads/sessions
+until removed. The `shouldCapture` gate already accepts
+`pageOrigin`/`excludedOrigins` for it; wiring needs the page origin at
+detection time (the sniffer sees media-request URLs, not the tab's URL —
+likely track the last main_frame origin per tab) plus options-page UI.
 
 ### F-EXT-002 — No in-app path to the extension: no install guidance, no browser detection · open · MEDIUM
 First-use gap surfaced by the 2026-07-06 real-world session — an unbuilt

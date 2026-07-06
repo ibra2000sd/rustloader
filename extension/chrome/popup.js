@@ -14,6 +14,12 @@ const emptyEl = document.getElementById("empty");
 const statusEl = document.getElementById("status");
 const qualityEl = document.getElementById("quality");
 const formatEl = document.getElementById("format");
+const pauseRowEl = document.getElementById("pause-row");
+const pauseToggleEl = document.getElementById("pause-capture");
+
+// The default play-the-video hint lives in popup.html; keep it around so a
+// re-render after pause/resume can restore it over the paused-state text.
+const defaultEmptyText = emptyEl.textContent;
 
 document.getElementById("open-options").addEventListener("click", () => {
   chrome.runtime.openOptionsPage();
@@ -80,17 +86,37 @@ async function download(item, tab, button) {
 async function showEmpty() {
   emptyEl.hidden = false;
   const reason = await emptyStateText();
-  if (reason) emptyEl.textContent = reason;
+  emptyEl.textContent = reason ?? defaultEmptyText;
 }
 
 async function render() {
+  listEl.replaceChildren();
+  emptyEl.hidden = true;
+
   const tab = await activeTab();
   if (!tab || tab.id == null) {
     await showEmpty();
     return;
   }
+
+  // The pause toggle only makes sense where the sniffer listens (http/https
+  // — its webRequest filter); on chrome:// and friends keep it hidden.
+  const pausable = /^https?:\/\//i.test(tab.url ?? "");
+  pauseRowEl.hidden = !pausable;
+
   const key = `tab-${tab.id}`;
-  const stored = await chrome.storage.session.get(key);
+  const pausedKey = `paused-${tab.id}`;
+  const stored = await chrome.storage.session.get([key, pausedKey]);
+  const paused = stored[pausedKey] === true;
+  pauseToggleEl.checked = paused;
+
+  if (paused) {
+    emptyEl.hidden = false;
+    emptyEl.textContent =
+      "Capture is paused on this tab. Untick below to resume, or reload the page — a reload re-enables it automatically.";
+    return;
+  }
+
   const items = stored[key] ?? [];
 
   if (items.length === 0) {
@@ -120,5 +146,28 @@ async function render() {
     listEl.append(row);
   }
 }
+
+// Pause/resume goes through the service worker (sniffer.js), not a direct
+// storage write: the worker applies it inside its serialised
+// storage.session chain, so it can't interleave with an in-flight
+// detection. Pausing discards the tab's current detections (badge, popup
+// list, and overlay all clear); reload re-enables capture on its own.
+pauseToggleEl.addEventListener("change", async () => {
+  const tab = await activeTab();
+  if (!tab || tab.id == null) return;
+  pauseToggleEl.disabled = true;
+  try {
+    await chrome.runtime.sendMessage({
+      type: "sniffer-set-paused",
+      tabId: tab.id,
+      paused: pauseToggleEl.checked,
+    });
+  } catch {
+    // Worker unreachable (extension reloading); the re-render below shows
+    // whatever state actually stuck.
+  }
+  pauseToggleEl.disabled = false;
+  await render();
+});
 
 render();
