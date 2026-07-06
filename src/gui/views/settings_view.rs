@@ -104,6 +104,16 @@ pub fn settings_view(
                 crate::gui::app::Message::SegmentsChanged(v as usize)
             })
             .width(Length::Fill),
+            // B-DOC-003: honest scope note — size-capped, native-path-only,
+            // not quality.
+            text(
+                "Parallel connections per direct download. An upper limit — small files \
+                 automatically use fewer (the full value applies only above 500 MB). \
+                 YouTube/streaming (yt-dlp) downloads don't use it, and it doesn't affect \
+                 video quality."
+            )
+            .size(11)
+            .style(iced::theme::Text::Color(crate::gui::theme::TEXT_SECONDARY)),
         ]
         .spacing(8),
     ]
