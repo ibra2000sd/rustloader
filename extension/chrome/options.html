@@ -55,6 +55,17 @@
 
   <div id="status" role="status"></div>
 
+  <h2 style="font-size:1.05rem; margin-top:2rem;">Experimental</h2>
+  <label style="font-weight:400; display:flex; gap:0.5rem; align-items:baseline;">
+    <input type="checkbox" id="overlay-enabled" />
+    <span>
+      <strong>In-page download button</strong> — show a small corner button on
+      pages where media is detected. Off by default; switching it on lets the
+      extension draw on web pages (it still reads nothing from them, and
+      downloads go through the same local bridge as the popup).
+    </span>
+  </label>
+
   <p class="hint">
     Everything stays on this computer: the token and any cookies are only
     ever sent to Rustloader at <code>127.0.0.1</code>, never to the network.

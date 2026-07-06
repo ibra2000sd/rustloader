@@ -9,6 +9,10 @@
 import { sendDownload } from "./bridge-client.js";
 import { collectCookies } from "./cookies.js";
 import "./sniffer.js";
+// Gated overlay prototype (OFF by default) — registers/serves the in-page
+// overlay only while the options-page toggle is on. Removing this import
+// (plus the overlay* files) removes the feature entirely.
+import "./overlay-host.js";
 
 const MENU_ID = "rustloader-download";
 
