@@ -27,10 +27,22 @@ Evidence discipline used throughout: every claim is tagged
 - **[docs]** Chrome's `webRequest.onHeadersReceived` details object DOES
   expose `frameId`, `parentFrameId`, `frameType`, `documentId` (optional),
   and `initiator` (developer.chrome.com/docs/extensions/reference/api/webRequest,
-  fetched 2026-07-06). Per the docs: frameId "0 indicates that the request
-  happens in the main frame; a positive value indicates the ID of a subframe
-  … Frame IDs are unique within a tab." So the frameId plumbing strategy (a)
+  fetched 2026-07-06, re-verified same day). Per the docs: frameId "0
+  indicates that the request happens in the main frame; a positive value
+  indicates the ID of a subframe in which the request happens." `frameType`
+  and `documentId` are the current names, both added in Chrome 106 — the
+  probe records `null` where absent. So the frameId plumbing strategy (a)
   would need is *available*; today's sniffer simply drops it.
+- **[docs]** Cross-origin frame access is measurable, not guessable: per
+  MDN's same-origin-policy page (fetched 2026-07-06), a cross-origin
+  `window.top` is itself readable, but `location.href` on it is write-only;
+  per the HTML spec's cross-origin property rules
+  (html.spec.whatwg.org/multipage/nav-history-apis.html, fetched
+  2026-07-06), reading a non-allowlisted property throws a
+  **"SecurityError" DOMException** (`CrossOriginPropertyFallback`). The
+  probe therefore *attempts* `window.top.location.href` in every frame and
+  records the caught error verbatim, rather than inferring reachability
+  from origin strings.
 - **[docs]** `webNavigation.getAllFrames({tabId})` returns the full frame
   tree (frameId, parentFrameId, url, documentId, frameType) but requires the
   `webNavigation` permission the shipped extension does not carry
@@ -61,18 +73,31 @@ only). Worker side: logs every sub-frame document response and every
 media-classified response **with the frame fields the sniffer drops**;
 `media-filter.js` is a verbatim copy from `a0a45ea` so probe detections ≡
 shipped-sniffer detections. Page side: an `all_frames: true` census script
-reporting, per frame: origin, is-top, top-reachability, `<video>` elements
-(src vs `blob:`, geometry, open-shadow placement). Join key:
-`sender.frameId` (DOM side) ↔ `details.frameId` (network side). Dump: click
-the probe's toolbar icon → JSON in the probe's service-worker console.
+reporting, per frame: origin, is-top, the **measured** result of a
+cross-origin `window.top.location.href` read (caught SecurityError recorded
+verbatim), `<video>` elements (`currentSrc`/resolved `src` vs `blob:`,
+geometry, open-shadow placement), and a 30-second MutationObserver counter
+(callbacks + mutation records on the full document) that turns the
+"standing perf tax" claim into a measured rate. Join key: `sender.frameId`
+(DOM side) ↔ `details.frameId` (network side).
 
-The probe stops scanning after ~30 s per page. It bounds its own cost and
-therefore does **not** measure strategy (a)'s standing MutationObserver tax;
-that stays an estimate (§6).
+**The probe grades itself.** At dump time (toolbar click) the worker joins
+each sniffer-positive detection to its frame's census and emits a
+machine-decided grade — `DIRECT` / `FRAME_SCOPED` / `TIMING_ONLY` /
+`UNMAPPABLE`, defined precisely in the header of
+`spike/overlay-a-probe/probe-worker.js` — plus one copyable summary line
+per site (`SITE_VERDICT <host>: {…}`) and `MUTOBS` perf lines. The human
+step is "copy the verdict line", not "interpret raw frames"; the raw JSON
+is still dumped for auditing surprising grades.
 
-## 3. Ibrahim's per-site raw observations — **[observed]**
+The probe stops scanning (and disconnects its MutationObserver) ~30 s after
+page load, so its own footprint is bounded; the `MUTOBS` rate it reports is
+the measured cost a *permanent* observer would keep paying (§6).
 
-> _Pending. Paste each dump verbatim under its site heading, plus the
+## 3. Ibrahim's per-site observations — **[observed]**
+
+> _Pending. Paste each site's `SITE_VERDICT` + `MUTOBS` lines verbatim
+> under its heading (full JSON only where a grade looked wrong), plus the
 > one-line "what I visually saw" note._
 
 ### 3.1 YouTube watch page
@@ -93,6 +118,9 @@ _pending_
 ### 3.6 Ibrahim's actual target site (name: ___ )
 _pending_
 
+### 3.7 Idle media-free page (MutationObserver cost baseline)
+_pending — `MUTOBS` lines only_
+
 ## 4. The truth table — the deliverable
 
 | Site | Sniffer detected a downloadable URL? | `<video>` visible — which frame? | Detection ↔ player mappable? (by what signal) | Button positionable over the player? |
@@ -104,14 +132,22 @@ _pending_
 | Shadow-DOM player | _pending_ | _pending_ | _pending_ | _pending_ |
 | Ibrahim's target site | _pending_ | _pending_ | _pending_ | _pending_ |
 
-Column 4 ("mappable") is graded, not boolean:
-- **direct** — a detected URL string-matches a `<video src>`/`<source>`.
-- **frame-scoped** — detection's `frameId` matches a frame whose census
-  shows exactly one player (blob src is fine; the *frame* is the join).
-- **timing-only** — nothing but temporal correlation links them (weak;
-  breaks with two players or a preloading page).
-- **unmappable** — detection exists but no frame/DOM signal ties it to a
-  visible player.
+Columns 2–4 are filled directly from each site's machine-emitted
+`SITE_VERDICT` line — the probe computes the grades; no human or AI
+interpretation sits between the data and the table. The grades (decided by
+`gradeDetection()` in `spike/overlay-a-probe/probe-worker.js`, definitions
+in its header):
+- **DIRECT** — detected URL equals a `<video>` `currentSrc`/resolved `src`
+  in the same frame, and that frame is top or same-origin-reachable →
+  anchorable.
+- **FRAME_SCOPED** — the detection's frame has a `<video>` but its measured
+  `window.top` read threw (cross-origin child) → anchorable only to the
+  `<iframe>` box, not the player.
+- **TIMING_ONLY** — reachable frame, `<video>` present, but src is
+  `blob:`/MSE so no URL identity → association rests on timing/frameId
+  correlation only → fragile.
+- **UNMAPPABLE** — detection's frame shows no `<video>` at all (or no
+  census arrived) → corner pill is the only option.
 
 ## 5. Verdict — one of three, evidence first
 
@@ -135,16 +171,17 @@ triggers:_
 
 ## 6. Honest cost note (standing tax of a real strategy-(a) build)
 
-_To be finalised with observed numbers where available._ Structurally
+_Measured numbers land here from the `MUTOBS` lines (site 7 gives the
+idle-page baseline; sites 1–6 give real-player rates)._ Structurally
 certain even before data: **[inference]** a real (a) needs (1) a
-MutationObserver on every page for the whole page lifetime (the probe's
-30-second window is a convenience the real feature doesn't get), (2)
-`allFrames: true` injection — one content-script instance per iframe on
-every page, ad iframes included (the probe's per-frame reports will show
-how many instances that actually is on real pages — see `frameReports` key
-counts), and (3) scroll/resize/fullscreen re-anchoring listeners. None of
-this exists in the shipped (b), whose content script does nothing at all
-until the worker pushes state.
+MutationObserver on every page for the whole page lifetime (the probe
+disconnects at 30 s; the reported rate is what a permanent observer would
+keep paying), (2) `allFrames: true` injection — one content-script instance
+per iframe on every page, ad iframes included (the per-site
+`framesWithVideo=M/F` denominators show how many instances that is on real
+pages), and (3) scroll/resize/fullscreen re-anchoring listeners, which the
+probe does not model at all. None of this exists in the shipped (b), whose
+content script does nothing until the worker pushes state.
 
 ## 7. What to delete / keep
 
