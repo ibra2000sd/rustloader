@@ -8,9 +8,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Planned
-- Browser integration next phases: media sniffing in the extension,
-  per-task download-stage cookies, Firefox/Edge packaging (see
+- Browser integration next phases: per-task download-stage cookies,
+  Firefox/Edge packaging and store submission (see
   `docs/browser-integration-design.md`)
+
+---
+
+## [0.11.0] - 2026-07-06
+
+The "IDM feel" release: the Chrome extension now *finds* media for you.
+Phase 2 of F-EXT-001 — the extension sniffs streams as pages play them,
+counts them on a per-tab badge, and lists them in a popup with
+quality/format choices; pairing with the app is one click. Plus a
+per-download escape hatch for bad-certificate hosts, and extension polish
+(icons, Settings/Pair discoverability).
+
+### ✨ Added
+- **Media sniffer in the extension** (#66): the service worker observes
+  responses (observe-only `webRequest`, no blocking) and detects playable
+  media — HLS/DASH manifests, direct video/audio files — while filtering
+  out per-segment noise. Detections are kept per tab (in-memory
+  `storage.session`, capped, cleared on navigation/close) and surfaced as
+  a **badge count** on the toolbar icon.
+- **Detection popup with quality/format selection** (#66): click the
+  toolbar icon to see the tab's detected streams and send one to the app —
+  with a quality/format choice — through the same authenticated bridge
+  path as the context menu.
+- **One-click pairing** (#65, #66): Settings → Browser Integration exposes
+  a **Pair** button that opens a single-use, 120-second pairing window
+  (`GET /api/v1/pair`); the extension fetches the token automatically —
+  manual token paste remains as the fallback.
+- **Per-download "Ignore certificate errors (unsafe)"** (#68): an
+  off-by-default, per-download checkbox for hosts with broken TLS. It is
+  one-shot — the flag rides only that `StartDownload`, self-resets after
+  use, and is **never** inherited by bridge-initiated downloads.
+- **Optional in-page corner overlay** (#70, extension v0.3.0): an
+  OFF-by-default "download detected media" pill in the page corner, gated
+  behind an options toggle; nothing is injected into any page while the
+  toggle is off (dynamic `chrome.scripting` registration). Note: a true
+  IDM-style icon **over the player** was investigated and found
+  infeasible — MSE players expose only `blob:` srcs that can never be
+  identity-matched to sniffed manifest URLs, and embedded players sit in
+  cross-origin iframes (see `docs/spike-overlay-a-findings.md`). The
+  corner pill is the deliberate ceiling, not an unfinished feature.
+- **Extension icons + Settings/Pair link** (#67): real toolbar/management
+  icons (no more default puzzle placeholder) and a popup footer link
+  straight to the options page for pairing.
+
+### 🔒 Security notes
+- The sniffer is **observe-only**: MV3 `webRequest` without blocking;
+  detected URLs never leave the machine except as a download request the
+  user explicitly clicks, through the existing token-authenticated
+  loopback bridge.
+- The corner overlay's content script holds **no token**, never talks to
+  `127.0.0.1`, and reads no page content; it renders worker-pushed state
+  and can only request downloads of URLs the sniffer already recorded for
+  its own tab.
+- The insecure-TLS flag is deliberately scoped to a single explicit
+  download and never persists as a default or crosses the bridge.
 
 ---
 
