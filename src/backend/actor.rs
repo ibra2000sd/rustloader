@@ -178,6 +178,7 @@ impl BackendActor {
                     format_id,
                     quality,
                     output_format,
+                    insecure_tls,
                 } => {
                     self.handle_start_download(
                         *video_info,
@@ -185,6 +186,7 @@ impl BackendActor {
                         format_id,
                         quality,
                         output_format,
+                        insecure_tls,
                     )
                     .await;
                 }
@@ -266,6 +268,7 @@ impl BackendActor {
         format_id: Option<String>,
         quality: VideoQuality,
         output_format: OutputFormat,
+        insecure_tls: bool,
     ) {
         // Validation and setup logic ported from BackendBridge
 
@@ -311,6 +314,7 @@ impl BackendActor {
             progress: None,
             added_at: Utc::now(),
             output_format,
+            insecure_tls,
         };
 
         // 4. Add to Queue

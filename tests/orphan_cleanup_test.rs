@@ -40,6 +40,7 @@ fn make_task(id: &str, output_path: PathBuf) -> DownloadTask {
         progress: None,
         added_at: Utc::now(),
         output_format: Default::default(),
+        insecure_tls: false,
     }
 }
 

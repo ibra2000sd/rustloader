@@ -637,6 +637,27 @@ engine-level settings cookies fixed at startup. Public/URL-tokenized media
 (the common sniffed case) works end-to-end today. Fixing cookie-gated media
 means per-task cookie plumbing through StartDownload/queue/engine — high
 blast radius, deliberately NOT done; options reported to the maintainer.
+**First-use findings (2026-07-06, real-world session):** three fixes from the
+first non-maintainer use. (1) The extension had no icons (no `icons` key, no
+`action.default_icon` — gray letter tile in Chrome) and (2) pairing was
+undiscoverable (left-click opens the MV3 popup; Options hides behind
+right-click) — both fixed in **PR #67** (extension v0.2.1: icons derived from
+`assets/icons/`, popup footer "⚙ Settings / Pair" + unpaired/unreachable
+empty-state text). (3) A bridge-sniffed HLS master from a CDN with a
+hostname-mismatched certificate failed in yt-dlp with `[SSL:
+CERTIFICATE_VERIFY_FAILED]` — correct default, fixed with a per-download
+"Ignore certificate errors (unsafe)" opt-in (**PR #68**: one-shot GUI
+checkbox → `StartDownload.insecure_tls` → persisted on the task via
+`TaskAdded` `serde(default)`; flagged tasks run an insecure-TLS engine copy —
+`--no-check-certificates` on the yt-dlp path, `danger_accept_invalid_certs`
+per-task client on the native path; bridge requests never set it).
+**Follow-ups (open):** an extension-side passthrough of the TLS opt-in needs
+its own design (a webpage-adjacent surface auto-requesting insecure TLS is a
+different threat model); a TLS-aware "Retry ignoring certificate errors"
+affordance on Failed cards would need a new event variant to persist the
+flag mutation (today: Reset Task + tick the checkbox); extraction-stage TLS
+failures are not covered by the flag (it rides StartDownload, after
+extraction succeeds).
 
 ### F-EXTRACT-001 — Proxy-capture spike (res-downloader style) · open · investigate-first
 Exploratory spike for a local-proxy media capture ("any page that plays video",
@@ -656,6 +677,21 @@ run unattended, not fabricated. Findings:
 [`docs/ai-os/spikes/F-EXTRACT-001-phase0-findings.md`](spikes/F-EXTRACT-001-phase0-findings.md);
 decision record: [`adr/0004-proxy-capture-mitm.md`](adr/0004-proxy-capture-mitm.md)
 (Proposed, gated). Entry stays **open** — Phase-0 records go/no-go only.
+
+### B-REL-001 — v0.10.0 universal-dmg build observations (2026-07-06) · open · notes
+Four observations from the manual universal-dmg build/verification session
+(tag `61ba62d`), none blocking that release. (1) CLI `-f mp4` produced a
+`.webm` (yt-dlp merged AV1+Opus and the mp4 preference didn't force a remux)
+— worth deciding whether the CLI should imply `--remux-video mp4`. (2) The
+dmg's **arm64 slices have never been runtime-tested**: CI's macos-latest
+smoke runs on an arm64 runner but builds natively and uses pip yt-dlp — it
+never executes the lipo'd binary or the bundled arm64 tools; the build
+machine is x86_64 and cannot. (3) `cargo` warns `block v0.1.6` (transitive)
+"will be rejected by a future version of Rust". (4) `scripts/build-macos-app.sh`
+caches tool downloads in `target/bundle-deps/` and skips the fetch when the
+cache exists — a rebuild weeks later silently ships a stale yt-dlp despite
+the "latest" URL; proposed fix (not done): version-check or cache-bust the
+yt-dlp cache in the script.
 
 ### B-DL-003 (optional) — Reconsider the 1800s yt-dlp download timeout · open · SMALL
 `download_via_ytdlp` is correctly bounded but 30 min is generous; consider

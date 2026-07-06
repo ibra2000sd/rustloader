@@ -28,6 +28,11 @@ pub enum QueueEvent {
         /// `Best` — I-6's corruption tolerance is untouched.
         #[serde(default)]
         output_format: crate::utils::OutputFormat,
+        /// Per-download "Ignore certificate errors (unsafe)" opt-in. Same
+        /// additive pattern as `output_format`: `serde(default)` (= `false`)
+        /// so pre-existing event-log lines rehydrate with validation ON.
+        #[serde(default)]
+        insecure_tls: bool,
     },
     /// A task started downloading
     TaskStarted {

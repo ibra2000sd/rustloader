@@ -39,6 +39,7 @@ async fn test_persistence_rehydration() {
             output_path: base_dir.join("test.mp4"),
             timestamp: Utc::now(),
             output_format: Default::default(),
+            insecure_tls: false,
         },
         QueueEvent::TaskStarted {
             task_id: task_id.clone(),
@@ -127,6 +128,7 @@ async fn test_persistence_corruption_resilience() {
         output_path: PathBuf::from("/tmp/video.mp4"),
         timestamp: Utc::now(),
         output_format: Default::default(),
+        insecure_tls: false,
     };
 
     let valid_json = serde_json::to_string(&valid_event).unwrap();
@@ -166,4 +168,95 @@ async fn test_persistence_corruption_resilience() {
     assert_eq!(tasks[0].id, task_id_valid);
 
     println!("corruption_test PASSED");
+}
+
+/// The per-download `insecure_tls` flag (like `output_format` before it) is
+/// an additive, `serde(default)` field on `TaskAdded`: an event-log line
+/// written by an app version that predates the field must still parse, and
+/// must rehydrate with certificate validation ON (`insecure_tls == false`).
+/// A flagged task must round-trip as flagged so retry/restart keeps it.
+#[tokio::test]
+async fn test_persistence_insecure_tls_backward_compat() {
+    let temp_dir = tempdir().expect("Failed to create temp dir");
+    let base_dir = temp_dir.path().to_path_buf();
+    let log_path = base_dir.join("events.jsonl");
+    tokio::fs::create_dir_all(&base_dir).await.unwrap();
+
+    // A "new" flagged event, verbatim.
+    let flagged = QueueEvent::TaskAdded {
+        task_id: "flagged-task".to_string(),
+        video_info: Box::new(VideoInfo {
+            title: "Flagged".into(),
+            ..Default::default()
+        }),
+        format: Box::new(Format::default()),
+        output_path: PathBuf::from("/tmp/flagged.mp4"),
+        timestamp: Utc::now(),
+        output_format: Default::default(),
+        insecure_tls: true,
+    };
+    let flagged_json = serde_json::to_string(&flagged).unwrap();
+    assert!(
+        flagged_json.contains("\"insecure_tls\":true"),
+        "flag must serialize: {flagged_json}"
+    );
+
+    // An "old" line: the same event with the field REMOVED from its JSON —
+    // byte-for-byte what a pre-field app version wrote.
+    let old = QueueEvent::TaskAdded {
+        task_id: "old-task".to_string(),
+        video_info: Box::new(VideoInfo {
+            title: "Old".into(),
+            ..Default::default()
+        }),
+        format: Box::new(Format::default()),
+        output_path: PathBuf::from("/tmp/old.mp4"),
+        timestamp: Utc::now(),
+        output_format: Default::default(),
+        insecure_tls: false,
+    };
+    let mut old_value: serde_json::Value =
+        serde_json::from_str(&serde_json::to_string(&old).unwrap()).unwrap();
+    let removed = old_value["TaskAdded"]
+        .as_object_mut()
+        .unwrap()
+        .remove("insecure_tls");
+    assert!(removed.is_some(), "test must actually strip the field");
+    let old_json = serde_json::to_string(&old_value).unwrap();
+
+    let mut file = tokio::fs::File::create(&log_path).await.unwrap();
+    file.write_all(old_json.as_bytes()).await.unwrap();
+    file.write_all(b"\n").await.unwrap();
+    file.write_all(flagged_json.as_bytes()).await.unwrap();
+    file.write_all(b"\n").await.unwrap();
+    file.flush().await.unwrap();
+    drop(file);
+
+    let event_log = Arc::new(EventLog::new(&base_dir).await.expect("Failed to open log"));
+    let engine = DownloadEngine::new(DownloadConfig {
+        segments: 1,
+        ..Default::default()
+    });
+    let org = FileOrganizer::new(OrganizationSettings::default())
+        .await
+        .unwrap();
+    let meta = MetadataManager::new(&base_dir);
+    let qm = QueueManager::new(1, engine, org, meta, event_log);
+
+    qm.rehydrate().await.expect("old lines must still parse");
+
+    let tasks = qm.get_all_tasks().await;
+    assert_eq!(tasks.len(), 2, "both lines must rehydrate");
+    let old_task = tasks.iter().find(|t| t.id == "old-task").unwrap();
+    assert!(
+        !old_task.insecure_tls,
+        "pre-field line must default to validation ON"
+    );
+    let flagged_task = tasks.iter().find(|t| t.id == "flagged-task").unwrap();
+    assert!(
+        flagged_task.insecure_tls,
+        "flagged task must stay flagged across restart"
+    );
+
+    println!("insecure_tls_backward_compat PASSED");
 }

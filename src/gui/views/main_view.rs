@@ -2,7 +2,9 @@
 
 use crate::gui::app::{DownloadTaskUI, Message};
 use crate::gui::components::{download_item, url_input};
-use iced::widget::{button, column, container, pick_list, row, scrollable, slider, text, Space};
+use iced::widget::{
+    button, checkbox, column, container, pick_list, row, scrollable, slider, text, Space,
+};
 use iced::{Alignment, Element, Length};
 
 /// Create the main view
@@ -15,6 +17,7 @@ pub fn main_view(
     url_error: Option<&str>,
     quality: &str,
     output_format: &str,
+    insecure_tls: bool,
     segments: usize,
     detected_url: Option<&str>,
     update_available: Option<&str>,
@@ -126,6 +129,18 @@ pub fn main_view(
                 .style(iced::theme::Container::Custom(Box::new(InfoTagStyle))),
             ]
             .spacing(12),
+            // Per-download TLS escape hatch (first-use feedback, 2026-07-06:
+            // a CDN with a hostname-mismatched cert). One-shot and honestly
+            // labelled unsafe — never a persisted or global setting, and
+            // bridge-initiated downloads ignore it (see app.rs).
+            checkbox(
+                "Ignore certificate errors (unsafe, next download only)",
+                insecure_tls
+            )
+            .on_toggle(Message::InsecureTlsToggled)
+            .text_size(12)
+            .size(16)
+            .spacing(8),
             // Honest trade-off hint for the selected format (B-GUI-005):
             // conversions happen after download via ffmpeg; MP4 on YouTube
             // means remuxing the (usually AV1/VP9) best streams, and an

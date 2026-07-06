@@ -181,6 +181,12 @@ pub struct YtDlpOptions {
     /// yt-dlp's `ExternalFD` — see `build_ytdlp_args`'s doc comment), so this
     /// stays opt-in until that's addressed.
     pub use_aria2c: bool,
+    /// Emit `--no-check-certificates` (verified against yt-dlp 2026.07.04's
+    /// own `--help`): suppress HTTPS certificate validation. Per-download
+    /// opt-in escape hatch for hosts with broken certs (hostname-mismatch
+    /// CDNs); NEVER a global default — see the unsafe-labelled checkbox and
+    /// `DownloadEngine::with_insecure_tls`.
+    pub no_check_certificates: bool,
 }
 
 /// Build the yt-dlp argument vector for the given options, URL and output path.
@@ -274,6 +280,10 @@ pub fn build_ytdlp_args(
     if aria2c_available {
         args.push("--downloader".to_string());
         args.push("aria2c".to_string());
+    }
+
+    if opts.no_check_certificates {
+        args.push("--no-check-certificates".to_string());
     }
 
     args.push("--newline".to_string());
@@ -419,6 +429,31 @@ impl DownloadEngine {
     pub fn with_ytdlp_options(mut self, options: YtDlpOptions) -> Self {
         self.ytdlp_options = options;
         self
+    }
+
+    /// A per-task copy of this engine that skips TLS certificate validation
+    /// on BOTH download paths: the native client accepts invalid certs
+    /// (`danger_accept_invalid_certs`, reqwest 0.12) and the yt-dlp path adds
+    /// `--no-check-certificates`. The user's per-download "Ignore certificate
+    /// errors (unsafe)" opt-in — the shared engine is never mutated, so every
+    /// unflagged task keeps full validation.
+    pub fn with_insecure_tls(&self) -> Self {
+        let client = Client::builder()
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+            .connect_timeout(CONNECT_TIMEOUT)
+            .danger_accept_invalid_certs(true)
+            .build()
+            .expect("Failed to create HTTP client");
+
+        Self {
+            client,
+            config: self.config.clone(),
+            ytdlp_options: YtDlpOptions {
+                no_check_certificates: true,
+                ..self.ytdlp_options.clone()
+            },
+            ytdlp_program: self.ytdlp_program.clone(),
+        }
     }
 
     /// Test-only: swap the spawned yt-dlp program for a stub so the yt-dlp
@@ -2129,6 +2164,38 @@ mod tests {
             args.windows(2).any(|w| w == ["--downloader", "aria2c"]),
             "expected --downloader aria2c when aria2c_available=true: {args:?}"
         );
+    }
+
+    #[test]
+    fn test_build_ytdlp_args_no_check_certificates_flag() {
+        // Flagged: the per-download unsafe-TLS opt-in emits exactly
+        // `--no-check-certificates` (verified against yt-dlp 2026.07.04).
+        let opts = YtDlpOptions {
+            no_check_certificates: true,
+            ..YtDlpOptions::default()
+        };
+        let args = build_ytdlp_args(&opts, "URL", "/out.mp4", false);
+        assert!(
+            args.iter().any(|a| a == "--no-check-certificates"),
+            "expected --no-check-certificates when opted in: {args:?}"
+        );
+
+        // Default: certificate validation stays ON — no such argument.
+        let args = build_ytdlp_args(&YtDlpOptions::default(), "URL", "/out.mp4", false);
+        assert!(
+            !args.iter().any(|a| a == "--no-check-certificates"),
+            "must not disable cert checks by default: {args:?}"
+        );
+    }
+
+    #[test]
+    fn test_with_insecure_tls_is_a_copy_not_a_mutation() {
+        // The insecure engine is a per-task COPY: the original engine's
+        // yt-dlp options must keep validating certificates.
+        let engine = DownloadEngine::new(DownloadConfig::default());
+        let insecure = engine.with_insecure_tls();
+        assert!(insecure.ytdlp_options.no_check_certificates);
+        assert!(!engine.ytdlp_options.no_check_certificates);
     }
 
     #[test]
