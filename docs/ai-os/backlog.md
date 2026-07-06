@@ -584,7 +584,7 @@ Source: internal audit 2026-06-30.
 
 ## P3 / later
 
-### F-EXT-001 — Browser-extension integration (extension → local bridge) · Phase 1 shipped-pending-tag (v0.10.0) · design-complete
+### F-EXT-001 — Browser-extension integration (extension → local bridge) · Phases 1–2 shipped (v0.11.0, tagged 2026-07-06) · design-complete
 IDM-style browser extension hands a URL (+ page cookies/headers + quality/
 format) to the running rustloader. Design spike **complete 2026-07-05**
 (base `f6de70a`): recommended bridge is a **loopback-only HTTP server inside
@@ -678,6 +678,36 @@ everywhere; cross-origin SecurityError on the maintainer's target sites).
 The corner pill (b) is the deliberate ceiling. Evidence:
 [`docs/spike-overlay-a-findings.md`](../spike-overlay-a-findings.md) — not
 to be re-litigated without evidence of a DIRECT-grading site population.**
+**Status roll-up (2026-07-06): v0.11.0 tagged (`f4c7834`) and released,
+shipping Phase 1 (v0.10.0) + Phase 2 (sniffer/popup/auto-pair, #65/#66) +
+extension icons/pairing link (#67) + the per-download insecure-TLS opt-in
+(#68) + the OFF-by-default corner-pill overlay prototype (#70); overlay
+strategy (a) investigated and ruled infeasible — evidence:
+[`docs/spike-overlay-a-findings.md`](../spike-overlay-a-findings.md). Still
+open under this item: Phase 3 (Firefox/Edge, Chrome Web Store + AMO
+publishing), download-stage cookies for cookie-gated direct media, and the
+TLS follow-ups above.**
+
+### F-EXT-002 — No in-app path to the extension: no install guidance, no browser detection · open · MEDIUM
+First-use gap surfaced by the 2026-07-06 real-world session — an unbuilt
+feature, not a regression. A new v0.11.0 user gets no in-app route to the
+browser extension: verified at `f4c7834`, `src/` contains no
+extension-install or onboarding code (every "install" string concerns
+yt-dlp/deno/aria2c — `main.rs:137-139`, `utils/depcheck.rs`), and no
+compatible-browser detection or prompt — the only Chrome/browser references
+are cookie decryption (`utils/cookies.rs` `SUPPORTED_BROWSERS`, feeding
+`--cookies-from-browser`), the bridge itself, and user-agent/update-check
+strings. First run says nothing about the extension; the user must find
+`extension/chrome/` (or the release-asset zip) on their own and load it
+unpacked by hand, and a user with no Chromium browser gets no message at
+all. Honest dependency: the extension is not on the Chrome Web Store or AMO
+yet, so a real "get the extension" store link — let alone auto-install — is
+**impossible today**; the full version of this item is gated on F-EXT-001
+Phase 3 (store publishing, `docs/browser-integration-design.md` "Phase 3 —
+multi-browser + store"). What's achievable pre-store: an in-app pointer
+(e.g. next to the bridge toggle in Settings) linking the release zip +
+load-unpacked steps, and optionally a browser-presence hint. Recorded as a
+gap; no specific flow is decided.
 
 ### F-EXTRACT-001 — Proxy-capture spike (res-downloader style) · open · investigate-first
 Exploratory spike for a local-proxy media capture ("any page that plays video",
@@ -712,6 +742,10 @@ caches tool downloads in `target/bundle-deps/` and skips the fetch when the
 cache exists — a rebuild weeks later silently ships a stale yt-dlp despite
 the "latest" URL; proposed fix (not done): version-check or cache-bust the
 yt-dlp cache in the script.
+**v0.11.0 note (2026-07-06):** the universal dmg for v0.11.0 is not yet
+built (the published v0.11.0 release carries per-arch tar.gz/zip + the
+extension zip, no dmg) — build it from the `v0.11.0` tag, and observation
+(4)'s stale-`bundle-deps`-cache caveat applies to that build.
 
 ### B-DL-003 (optional) — Reconsider the 1800s yt-dlp download timeout · open · SMALL
 `download_via_ytdlp` is correctly bounded but 30 min is generous; consider
@@ -760,6 +794,30 @@ call); (4) a Windows `.ico` if/when Windows bundle packaging exists (macOS
 `AppIcon.icns` already ships; no Windows packaging is in the repo today).
 A full-fidelity web-shell (Tauri) migration is a separate strategic decision.
 
+### F-GUI-004 — No system tray / background presence: closing the window kills the bridge · open · MEDIUM-LARGE
+First-use expectation gap surfaced by the 2026-07-06 real-world session — an
+unbuilt feature, not a regression. rustloader has no tray or background
+mode: `Cargo.toml` declares no tray crate (no `tray-icon`/`tao`/equivalent;
+grep for "tray" across `Cargo.toml` and `src/` returns nothing at
+`f4c7834`), and neither `src/main.rs` nor `src/gui/app.rs` handles
+window-close specially — `main.rs:37` runs a stock iced 0.12 application, so
+closing the window exits the process. The browser bridge is an iced
+subscription inside that process (`src/gui/app.rs:316-321` — the listener
+lives inside the subscription future), so the entire browser-integration
+premise ("the app is running and catches what the browser sends") holds only
+while the GUI window is open. That contradicts the IDM-style mental model
+the extension deliberately mimics: a user who closes the window expecting
+the catcher to stay resident silently loses it. Severity bound honestly:
+the bridge is OFF by default and window-scoped by design today, so this
+degrades an opt-in beta feature, not the core download flow — hence P3, with
+an explicit promotion trigger: revisit as P2 when the extension is
+store-published (F-EXT-001 Phase 3 / F-EXT-002) and background catching
+becomes a headline expectation. **Not a drive-by:** tray support is a real
+cross-platform surface — per-OS icon + menu, close-to-tray vs quit semantics
+(needs a setting), single-instance handling, and iced 0.12 has no built-in
+tray API — it deserves its own design pass before any implementation is
+picked. No approach is decided here.
+
 ### F-UPD-001 — Launch-time update check + non-intrusive banner (no auto-install) · closed (PR open) · SMALL-MEDIUM
 On launch, one async GET to the GitHub `releases/latest` API (which already
 excludes drafts/pre-releases) with a `User-Agent` and, when stored, an
@@ -802,6 +860,32 @@ Two pre-ship smoke findings in the native download path, both in
 Regression tests cover the extension-derivation matrix (incl. Content-Disposition
 parsing + octet-stream→`.bin`) and the directory creation. 2026-07-02, base
 `68c0ee0`, PR pending.
+
+### B-DOC-003 — Segments control: real but unexplained (size-capped, native-path-only, not quality) · open · SMALL
+Clarification recorded from the 2026-07-06 first-use session — the control
+works as designed; what's missing is that none of the design is surfaced to
+the user. Verified flow at `f4c7834`: the Settings slider
+(`src/gui/views/settings_view.rs:103`, range 4–32) →
+`Message::SegmentsChanged` (`src/gui/app.rs:976`) → persisted as
+`AppSettings.segments` (`app.rs:1200`, settings-table key `"segments"`) →
+`DownloadConfig { segments: settings.segments }` (`src/backend/actor.rs:73`)
+→ `calculate_segments(file_size, self.config.segments, output_path)`
+(`src/downloader/engine.rs:652`). **Wired, not decorative.** Three unsurfaced
+truths: (a) `calculate_segments` (`src/downloader/segment.rs:352`) caps the
+value by file size — 1 segment under 10 MB, ≤4 under 50 MB, ≤16 under
+500 MB, the full slider value only at ≥500 MB — so a setting of 32 rarely
+means 32; (b) it applies only to the native segmented engine — the yt-dlp
+path (`engine.rs:948` `download_via_ytdlp`) never reads `config.segments`
+(its progress events hardcode `DownloadProgress::new(100, 1)` /
+`segments_completed = 0`), so yt-dlp/HLS downloads — most browser-caught
+`.m3u8` — ignore the slider entirely; (c) it governs parallel-connection
+download speed, not video quality (quality is the separate Quality selector,
+B-GUI-003/B-GUI-004). The settings row today is a bare label + number
+(`settings_view.rs:94-106`) with no hint. **Fix shape (docs/UI copy only,
+not done here):** a hint/tooltip line next to the slider stating (a)–(c),
+in the same hint-line style B-GUI-005 added for the Format selector. The
+capping logic itself is behaving as designed and is explicitly NOT proposed
+for change here.
 
 ## Recently closed
 
