@@ -80,6 +80,10 @@ pub struct RustloaderApp {
     bridge_error: Option<String>,
     bridge_active: Option<BridgeRequest>,
     bridge_pending: VecDeque<BridgeRequest>,
+    // Single-use pairing window (design doc §8.2), shared with the server
+    // task inside the bridge subscription. Armed by the Settings "Pair"
+    // button; consumed by `GET /api/v1/pair`.
+    bridge_pairing: Arc<bridge::PairingState>,
 
     // Launch-time update check (utils::update_check; opt-out, notify-only).
     // `update_available` drives a dismissible banner whose Download button
@@ -247,6 +251,7 @@ pub enum Message {
     ClipboardMonitoringToggled(bool),
     BrowserBridgeToggled(bool),
     CopyBridgeToken,
+    ArmBridgePairing,
     SaveSettings,
     SettingsSaved(Result<(), String>),
 
@@ -307,7 +312,10 @@ impl RustloaderApp {
 /// listener lives inside this future, so removing the subscription (toggle
 /// OFF) closes the port; per-connection work is spawned and time-bounded in
 /// `bridge::serve`.
-fn bridge_subscription(token: String) -> Subscription<BridgeEvent> {
+fn bridge_subscription(
+    token: String,
+    pairing: Arc<bridge::PairingState>,
+) -> Subscription<BridgeEvent> {
     iced::subscription::channel("browser-bridge", 32, move |mut output| async move {
         use futures::SinkExt;
 
@@ -331,7 +339,7 @@ fn bridge_subscription(token: String) -> Subscription<BridgeEvent> {
         let _ = output.send(BridgeEvent::Started(port)).await;
 
         let (tx, mut rx) = mpsc::channel::<BridgeRequest>(32);
-        let serve = bridge::serve(listener, token, bridge::cookie_dir(), tx);
+        let serve = bridge::serve(listener, token, bridge::cookie_dir(), pairing, tx);
         futures::pin_mut!(serve);
         loop {
             tokio::select! {
@@ -457,6 +465,7 @@ impl Application for RustloaderApp {
             bridge_error: None,
             bridge_active: None,
             bridge_pending: VecDeque::new(),
+            bridge_pairing: Arc::new(bridge::PairingState::default()),
             check_updates_on_launch: settings.check_updates_on_launch,
             update_available: None,
             update_skip_version,
@@ -1023,6 +1032,22 @@ impl Application for RustloaderApp {
                 Command::none()
             }
 
+            Message::ArmBridgePairing => {
+                // Only meaningful while the bridge is up: with the toggle OFF
+                // there is no listener, so arming would just confuse (the
+                // Settings view only shows the button when ON, this guards
+                // the message itself).
+                if self.browser_bridge && self.bridge_token.is_some() {
+                    self.bridge_pairing.arm();
+                    self.status_message = format!(
+                        "Pairing window open for {}s — click “Pair automatically” in the \
+                         extension's options page",
+                        bridge::PAIRING_WINDOW.as_secs()
+                    );
+                }
+                Command::none()
+            }
+
             Message::BridgeEventReceived(event) => {
                 match event {
                     BridgeEvent::Started(port) => {
@@ -1273,7 +1298,22 @@ impl Application for RustloaderApp {
         // it the listener — nothing stays bound to the port.
         if self.browser_bridge {
             if let Some(token) = self.bridge_token.clone() {
-                subscriptions.push(bridge_subscription(token).map(Message::BridgeEventReceived));
+                subscriptions.push(
+                    bridge_subscription(token, self.bridge_pairing.clone())
+                        .map(Message::BridgeEventReceived),
+                );
+            }
+            // While a pairing window is open, tick once a second so the
+            // Settings countdown stays current (each message triggers a
+            // re-render; `Tick` itself is a no-op). The subscription is
+            // dropped as soon as the window closes or expires.
+            if matches!(
+                self.bridge_pairing.status(),
+                bridge::PairingStatus::Armed { .. }
+            ) {
+                subscriptions.push(
+                    iced::time::every(std::time::Duration::from_secs(1)).map(|_| Message::Tick),
+                );
             }
         }
         Subscription::batch(subscriptions)
@@ -1402,6 +1442,7 @@ impl Application for RustloaderApp {
                     self.bridge_token.as_deref(),
                     self.bridge_port,
                     self.bridge_error.as_deref(),
+                    self.bridge_pairing.status(),
                 )
             }
             View::History => {

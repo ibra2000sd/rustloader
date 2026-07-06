@@ -36,6 +36,10 @@ pub const BRIDGE_PORTS: &[u16] = &[46150, 46151, 46152, 46153, 46154];
 /// Bridge protocol version, reported by `/api/v1/ping`.
 pub const API_VERSION: u32 = 1;
 
+/// How long a pairing window stays open after the user clicks "Pair" in
+/// Settings (design doc §8.2 — the omniget-style single-use window).
+pub const PAIRING_WINDOW: std::time::Duration = std::time::Duration::from_secs(120);
+
 const MAX_HEAD_BYTES: usize = 16 * 1024;
 const MAX_BODY_BYTES: usize = 1024 * 1024;
 const CONNECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -66,6 +70,91 @@ pub enum BridgeEvent {
     Request(BridgeRequest),
     /// The server could not start (e.g. every port in the range is taken).
     Failed(String),
+}
+
+/// The single-use pairing window (design doc §8.2), shared between the GUI
+/// (which arms it from the Settings "Pair" button) and the server task (which
+/// consumes it on `GET /api/v1/pair`).
+///
+/// Semantics: armed only by an explicit user click; while armed and
+/// unexpired, the token is handed out **exactly once**, which also disarms
+/// the window. A malicious web page cannot *read* the token cross-origin
+/// (the response carries no CORS headers, so a page's fetch gets an opaque
+/// response); at worst it can burn the window, and the user re-arms.
+#[derive(Debug, Default)]
+pub struct PairingState {
+    inner: std::sync::Mutex<PairingInner>,
+}
+
+#[derive(Debug, Default)]
+struct PairingInner {
+    armed_until: Option<std::time::Instant>,
+    delivered: bool,
+}
+
+/// What the Settings UI shows next to the "Pair" button.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PairingStatus {
+    /// No window open (never armed, expired, or bridge just started).
+    Idle,
+    /// Window open; the extension can fetch the token for this many more
+    /// whole seconds.
+    Armed { seconds_left: u64 },
+    /// The token was fetched through a pairing window this session.
+    Delivered,
+}
+
+impl PairingState {
+    /// Open the pairing window for [`PAIRING_WINDOW`].
+    pub fn arm(&self) {
+        self.arm_for(PAIRING_WINDOW);
+    }
+
+    /// Open the pairing window for `window` (tests use short windows to
+    /// exercise expiry).
+    pub fn arm_for(&self, window: std::time::Duration) {
+        let mut inner = self.inner.lock().expect("pairing lock poisoned");
+        inner.armed_until = Some(std::time::Instant::now() + window);
+        inner.delivered = false;
+    }
+
+    /// Single-use grant: `true` exactly once per armed, unexpired window.
+    /// Granting disarms the window.
+    pub fn try_grant(&self) -> bool {
+        let mut inner = self.inner.lock().expect("pairing lock poisoned");
+        match inner.armed_until {
+            Some(deadline) if std::time::Instant::now() < deadline => {
+                inner.armed_until = None;
+                inner.delivered = true;
+                true
+            }
+            _ => {
+                // Expired windows read as Idle from now on.
+                inner.armed_until = None;
+                false
+            }
+        }
+    }
+
+    /// Current status for display. Reading is side-effect-free except that an
+    /// expired window collapses to `Idle`.
+    pub fn status(&self) -> PairingStatus {
+        let mut inner = self.inner.lock().expect("pairing lock poisoned");
+        if let Some(deadline) = inner.armed_until {
+            let now = std::time::Instant::now();
+            if now < deadline {
+                return PairingStatus::Armed {
+                    seconds_left: (deadline - now).as_secs(),
+                };
+            }
+            inner.armed_until = None;
+        }
+        if inner.delivered {
+            PairingStatus::Delivered
+        } else {
+            PairingStatus::Idle
+        }
+    }
 }
 
 /// Generate a 128-bit random pairing token as 32 lowercase hex chars.
@@ -114,6 +203,7 @@ pub async fn serve(
     listener: TcpListener,
     token: String,
     cookie_dir: PathBuf,
+    pairing: std::sync::Arc<PairingState>,
     tx: mpsc::Sender<BridgeRequest>,
 ) {
     let port = match listener.local_addr() {
@@ -130,11 +220,12 @@ pub async fn serve(
                 }
                 let token = token.clone();
                 let cookie_dir = cookie_dir.clone();
+                let pairing = pairing.clone();
                 let tx = tx.clone();
                 tokio::spawn(async move {
                     let _ = tokio::time::timeout(
                         CONNECTION_TIMEOUT,
-                        handle_connection(stream, port, token, cookie_dir, tx),
+                        handle_connection(stream, port, token, cookie_dir, pairing, tx),
                     )
                     .await;
                 });
@@ -197,10 +288,11 @@ async fn handle_connection(
     port: u16,
     token: String,
     cookie_dir: PathBuf,
+    pairing: std::sync::Arc<PairingState>,
     tx: mpsc::Sender<BridgeRequest>,
 ) {
     let response = match read_request(&mut stream).await {
-        Ok(req) => route(req, port, &token, &cookie_dir, &tx).await,
+        Ok(req) => route(req, port, &token, &cookie_dir, &pairing, &tx).await,
         Err(e) => e,
     };
     let _ = stream.write_all(response.as_bytes()).await;
@@ -303,6 +395,7 @@ async fn route(
     port: u16,
     token: &str,
     cookie_dir: &Path,
+    pairing: &PairingState,
     tx: &mpsc::Sender<BridgeRequest>,
 ) -> String {
     match req.host.as_deref() {
@@ -325,6 +418,20 @@ async fn route(
                     env!("CARGO_PKG_VERSION")
                 ),
             )
+        }
+        ("GET", "/api/v1/pair") => {
+            // Single-use pairing window (design doc §8.2): the token is
+            // handed out exactly once while the user-armed window is open.
+            // No Authorization required — fetching the token is the point —
+            // but the Host check above still applies, and an un-armed (or
+            // consumed, or expired) window always answers 403 without a
+            // token. `try_grant` is atomic, so two concurrent fetches can
+            // never both receive the token.
+            if pairing.try_grant() {
+                json_response(200, &format!(r#"{{"token":"{token}"}}"#))
+            } else {
+                json_response(403, r#"{"error":"pairing window is not open"}"#)
+            }
         }
         ("POST", "/api/v1/download") => {
             let Some(supplied) = bearer_token(req.authorization.as_deref()) else {
@@ -538,7 +645,12 @@ mod tests {
     /// never collide with a running app or each other).
     async fn spawn_test_server(
         token: &str,
-    ) -> (u16, mpsc::Receiver<BridgeRequest>, tempdir::TempDirGuard) {
+    ) -> (
+        u16,
+        mpsc::Receiver<BridgeRequest>,
+        std::sync::Arc<PairingState>,
+        tempdir::TempDirGuard,
+    ) {
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
             .await
             .expect("bind test listener");
@@ -551,8 +663,9 @@ mod tests {
         let dir = tempdir::TempDirGuard::new("rl-bridge-test");
         let cookie_dir = dir.path.clone();
         let token = token.to_string();
-        tokio::spawn(serve(listener, token, cookie_dir, tx));
-        (port, rx, dir)
+        let pairing = std::sync::Arc::new(PairingState::default());
+        tokio::spawn(serve(listener, token, cookie_dir, pairing.clone(), tx));
+        (port, rx, pairing, dir)
     }
 
     /// Minimal scoped temp dir so tests clean up after themselves.
@@ -611,7 +724,7 @@ mod tests {
 
     #[tokio::test]
     async fn ping_identifies_rustloader_without_leaking_token() {
-        let (port, _rx, _dir) = spawn_test_server("secret-token").await;
+        let (port, _rx, _pairing, _dir) = spawn_test_server("secret-token").await;
         let resp = raw_request(port, &get("/api/v1/ping", port, None)).await;
         assert!(resp.starts_with("HTTP/1.1 200"), "got: {resp}");
         assert!(resp.contains(r#""app":"rustloader""#));
@@ -627,7 +740,7 @@ mod tests {
 
     #[tokio::test]
     async fn download_rejects_missing_and_wrong_token() {
-        let (port, mut rx, _dir) = spawn_test_server("tok").await;
+        let (port, mut rx, _pairing, _dir) = spawn_test_server("tok").await;
         let body = r#"{"url":"https://example.com/v"}"#;
 
         let host = format!("127.0.0.1:{port}");
@@ -649,7 +762,7 @@ mod tests {
 
     #[tokio::test]
     async fn download_rejects_foreign_host_header() {
-        let (port, mut rx, _dir) = spawn_test_server("tok").await;
+        let (port, mut rx, _pairing, _dir) = spawn_test_server("tok").await;
         let resp = raw_request(
             port,
             &post(
@@ -667,7 +780,7 @@ mod tests {
 
     #[tokio::test]
     async fn download_rejects_non_http_url() {
-        let (port, mut rx, _dir) = spawn_test_server("tok").await;
+        let (port, mut rx, _pairing, _dir) = spawn_test_server("tok").await;
         let host = format!("127.0.0.1:{port}");
         let resp = raw_request(
             port,
@@ -686,7 +799,7 @@ mod tests {
 
     #[tokio::test]
     async fn download_accepts_valid_token_and_delivers_request_with_cookies() {
-        let (port, mut rx, dir) = spawn_test_server("tok").await;
+        let (port, mut rx, _pairing, dir) = spawn_test_server("tok").await;
         let host = format!("127.0.0.1:{port}");
         let body = r#"{
             "url": "https://example.com/watch?v=1",
@@ -714,7 +827,7 @@ mod tests {
 
     #[tokio::test]
     async fn oversized_body_is_rejected() {
-        let (port, mut rx, _dir) = spawn_test_server("tok").await;
+        let (port, mut rx, _pairing, _dir) = spawn_test_server("tok").await;
         let host = format!("127.0.0.1:{port}");
         // Declare a too-large body; the server must refuse on the header
         // alone without reading 2 MiB.
@@ -729,9 +842,82 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_path_is_404() {
-        let (port, _rx, _dir) = spawn_test_server("tok").await;
+        let (port, _rx, _pairing, _dir) = spawn_test_server("tok").await;
         let resp = raw_request(port, &get("/api/v1/other", port, None)).await;
         assert!(resp.starts_with("HTTP/1.1 404"), "got: {resp}");
+    }
+
+    #[test]
+    fn pairing_state_transitions() {
+        let pairing = PairingState::default();
+        assert_eq!(pairing.status(), PairingStatus::Idle);
+
+        pairing.arm();
+        assert!(matches!(pairing.status(), PairingStatus::Armed { .. }));
+
+        assert!(pairing.try_grant(), "armed window grants once");
+        assert_eq!(pairing.status(), PairingStatus::Delivered);
+        assert!(!pairing.try_grant(), "grant is single-use");
+
+        // Re-arming resets Delivered; an expired window reads Idle again.
+        pairing.arm_for(std::time::Duration::ZERO);
+        assert!(!pairing.try_grant(), "expired window never grants");
+        assert_eq!(pairing.status(), PairingStatus::Idle);
+    }
+
+    #[tokio::test]
+    async fn pair_endpoint_is_single_use_while_armed() {
+        let (port, _rx, pairing, _dir) = spawn_test_server("pair-secret").await;
+
+        // Not armed: no token, ever.
+        let resp = raw_request(port, &get("/api/v1/pair", port, None)).await;
+        assert!(resp.starts_with("HTTP/1.1 403"), "got: {resp}");
+        assert!(!resp.contains("pair-secret"), "token must not leak unarmed");
+
+        // Armed: the token comes out exactly once…
+        pairing.arm();
+        let resp = raw_request(port, &get("/api/v1/pair", port, None)).await;
+        assert!(resp.starts_with("HTTP/1.1 200"), "got: {resp}");
+        assert!(resp.contains(r#""token":"pair-secret""#), "got: {resp}");
+
+        // …and the second fetch is rejected without the token.
+        let resp = raw_request(port, &get("/api/v1/pair", port, None)).await;
+        assert!(resp.starts_with("HTTP/1.1 403"), "got: {resp}");
+        assert!(!resp.contains("pair-secret"));
+    }
+
+    #[tokio::test]
+    async fn pair_endpoint_rejects_expired_window() {
+        let (port, _rx, pairing, _dir) = spawn_test_server("pair-secret").await;
+
+        pairing.arm_for(std::time::Duration::from_millis(20));
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        let resp = raw_request(port, &get("/api/v1/pair", port, None)).await;
+        assert!(resp.starts_with("HTTP/1.1 403"), "got: {resp}");
+        assert!(
+            !resp.contains("pair-secret"),
+            "expired window must not leak"
+        );
+
+        // A fresh arm works again after an expiry.
+        pairing.arm();
+        let resp = raw_request(port, &get("/api/v1/pair", port, None)).await;
+        assert!(resp.starts_with("HTTP/1.1 200"), "got: {resp}");
+    }
+
+    #[tokio::test]
+    async fn pair_endpoint_rejects_foreign_host_even_when_armed() {
+        let (port, _rx, pairing, _dir) = spawn_test_server("pair-secret").await;
+        pairing.arm();
+        let req = format!("GET /api/v1/pair HTTP/1.1\r\nHost: evil.example.com:{port}\r\n\r\n");
+        let resp = raw_request(port, &req).await;
+        assert!(resp.starts_with("HTTP/1.1 403"), "got: {resp}");
+        assert!(!resp.contains("pair-secret"));
+        // The rebinding attempt must not consume the user's window.
+        assert!(
+            matches!(pairing.status(), PairingStatus::Armed { .. }),
+            "foreign-host request must not burn the window"
+        );
     }
 
     #[tokio::test]

@@ -19,6 +19,7 @@ pub fn settings_view(
     bridge_token: Option<&str>,
     bridge_port: Option<u16>,
     bridge_error: Option<&str>,
+    pairing_status: crate::bridge::PairingStatus,
 ) -> Element<'static, crate::gui::app::Message> {
     // Header with back button
     let header = row![
@@ -273,6 +274,31 @@ pub fn settings_view(
 
     if browser_bridge {
         if let Some(token) = bridge_token {
+            // Auto-pairing (single-use ~120 s window, design doc §8.2): the
+            // Pair button arms it; while armed the extension's "Pair
+            // automatically" fetches the token once via GET /api/v1/pair.
+            // Manual copy-paste stays as the fallback.
+            let pairing_line: Element<'static, crate::gui::app::Message> = match pairing_status {
+                crate::bridge::PairingStatus::Armed { seconds_left } => text(format!(
+                    "Pairing window open — {seconds_left}s left. Click “Pair automatically” \
+                         in the extension's options page."
+                ))
+                .size(11)
+                .style(iced::theme::Text::Color(crate::gui::theme::TEXT_SECONDARY))
+                .into(),
+                crate::bridge::PairingStatus::Delivered => {
+                    text("Token delivered to the extension. Use its “Test connection” to confirm.")
+                        .size(11)
+                        .style(iced::theme::Text::Color(crate::gui::theme::TEXT_SECONDARY))
+                        .into()
+                }
+                crate::bridge::PairingStatus::Idle => text(
+                    "Pair opens a 120-second one-time window the extension can fetch the token in.",
+                )
+                .size(11)
+                .style(iced::theme::Text::Color(crate::gui::theme::TEXT_SECONDARY))
+                .into(),
+            };
             bridge_section = bridge_section.push(
                 column![
                     text("Pairing token — paste it into the extension's options page:")
@@ -289,9 +315,16 @@ pub fn settings_view(
                             .style(iced::theme::Button::Custom(Box::new(
                                 crate::gui::theme::SecondaryButton
                             ))),
+                        button(text("Pair").size(13))
+                            .on_press(crate::gui::app::Message::ArmBridgePairing)
+                            .padding([6, 12])
+                            .style(iced::theme::Button::Custom(Box::new(
+                                crate::gui::theme::SecondaryButton
+                            ))),
                     ]
                     .spacing(12)
                     .align_items(Alignment::Center),
+                    pairing_line,
                 ]
                 .spacing(8),
             );
