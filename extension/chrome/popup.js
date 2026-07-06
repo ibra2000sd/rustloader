@@ -6,7 +6,7 @@
 // item through the bridge exactly like the context menu does — page cookies
 // included, loopback only.
 
-import { sendDownload } from "./bridge-client.js";
+import { discover, sendDownload } from "./bridge-client.js";
 import { collectCookies } from "./cookies.js";
 
 const listEl = document.getElementById("list");
@@ -14,6 +14,24 @@ const emptyEl = document.getElementById("empty");
 const statusEl = document.getElementById("status");
 const qualityEl = document.getElementById("quality");
 const formatEl = document.getElementById("format");
+
+document.getElementById("open-options").addEventListener("click", () => {
+  chrome.runtime.openOptionsPage();
+});
+
+// First-run discoverability: when the popup has nothing to show, say WHY —
+// unpaired or app-not-running — and point at the Settings/Pair link below,
+// instead of only suggesting to play a video.
+async function emptyStateText() {
+  const { bridge_token: token } = await chrome.storage.local.get("bridge_token");
+  if (!token) {
+    return "Not paired yet — open “⚙ Settings / Pair” below to connect to Rustloader.";
+  }
+  if ((await discover(token)) === null) {
+    return "Rustloader isn't reachable. Launch it and switch on Settings → Browser Integration (see “⚙ Settings / Pair” below).";
+  }
+  return null; // paired and reachable: keep the default play-the-video hint
+}
 
 function showStatus(message, isError) {
   statusEl.hidden = false;
@@ -59,10 +77,16 @@ async function download(item, tab, button) {
   }
 }
 
+async function showEmpty() {
+  emptyEl.hidden = false;
+  const reason = await emptyStateText();
+  if (reason) emptyEl.textContent = reason;
+}
+
 async function render() {
   const tab = await activeTab();
   if (!tab || tab.id == null) {
-    emptyEl.hidden = false;
+    await showEmpty();
     return;
   }
   const key = `tab-${tab.id}`;
@@ -70,7 +94,7 @@ async function render() {
   const items = stored[key] ?? [];
 
   if (items.length === 0) {
-    emptyEl.hidden = false;
+    await showEmpty();
     return;
   }
 
