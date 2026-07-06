@@ -615,6 +615,28 @@ adds the README "Browser integration (beta)" section and `RELEASING.md`, and
 carries the outreach draft (`docs/drafts/`). Ships to users when the
 maintainer merges #64 and pushes the `v0.10.0` tag. Remaining phases (sniffer,
 download-stage cookies, Firefox/Edge) stay open under this item.
+**Phase 2 built (PRs open, 2026-07-06; base `61ba62d` = v0.10.0):** two PRs.
+**PR #65** (app): the design doc §8.2 single-use ~120 s pairing window —
+`PairingState` + `GET /api/v1/pair` (token exactly once while armed, 403
+otherwise; foreign-Host requests don't burn the window), Settings **Pair**
+button with countdown/delivered indicator, 4 new tests, live curl E2E.
+**PR #66** (extension v0.2.0): observe-only `webRequest` sniffer with pure
+node-tested classification (`media-filter.js`, 11 tests), per-tab
+`storage.session` list + action-badge count, toolbar popup with
+quality/`OutputFormat` selection (protocol already carried both — verified
+against `DownloadBody`), context menu on video/audio elements, options-page
+**Pair automatically**; manifest adds only `webRequest`. Chrome API claims
+re-verified against developer.chrome.com 2026-07-06.
+**Phase-2 finding (decision pending):** for a bridge-initiated *direct-media*
+URL, the download stage never sees the request's cookies — empirically
+confirmed in isolation: (a) `get_direct_url` resolves via the settings-cookie
+extractor (`actor.rs`), so a cookie-gated direct URL 403s there even though
+extraction with the bridge cookie file succeeded; (b) the native engine's
+reqwest client sends no cookies at all; (c) the engine's yt-dlp path uses
+engine-level settings cookies fixed at startup. Public/URL-tokenized media
+(the common sniffed case) works end-to-end today. Fixing cookie-gated media
+means per-task cookie plumbing through StartDownload/queue/engine — high
+blast radius, deliberately NOT done; options reported to the maintainer.
 
 ### F-EXTRACT-001 — Proxy-capture spike (res-downloader style) · open · investigate-first
 Exploratory spike for a local-proxy media capture ("any page that plays video",
