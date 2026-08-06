@@ -42,7 +42,13 @@ pub enum RustloaderError {
 pub fn make_error_user_friendly(error: &str) -> String {
     let error_lower = error.to_lowercase();
 
-    if error_lower.contains("truncated") || error_lower.contains("incomplete") {
+    if error_lower.contains("playlist") {
+        // Checked first: a playlist link is a shape problem with the URL, not
+        // a fault with any video, and every later arm would mis-explain it.
+        "This link is a playlist, not a single video. Open one video from it and \
+         paste that link instead"
+            .to_string()
+    } else if error_lower.contains("truncated") || error_lower.contains("incomplete") {
         "Please enter a complete and valid URL".to_string()
     } else if error_lower.contains("invalid url") || error_lower.contains("malformed") {
         "This doesn't appear to be a valid video URL".to_string()

@@ -85,6 +85,21 @@ impl YtDlpExtractor {
         })
     }
 
+    /// Point the extractor at a stub binary, so tests can drive the real
+    /// subprocess path without a yt-dlp install. Mirrors the engine's
+    /// `with_ytdlp_program` seam.
+    ///
+    /// unix-gated with its callers: the stubs are shell scripts, and on
+    /// Windows an unused `#[cfg(test)]` item is a dead_code warning, which
+    /// `clippy -D warnings` turns into a CI failure.
+    #[cfg(all(test, unix))]
+    fn with_ytdlp_path(path: PathBuf) -> Self {
+        Self {
+            ytdlp_path: path,
+            cookies: crate::utils::CookieConfig::default(),
+        }
+    }
+
     /// Set the cookie source applied to every yt-dlp invocation (extraction,
     /// playlist, search, direct-URL). Used so authenticated sites like YouTube
     /// can extract when configured via CLI flag, GUI setting, or config.
@@ -102,6 +117,13 @@ impl YtDlpExtractor {
         cmd.args(self.cookies.to_args())
             .arg("--dump-json")
             .arg("--no-download")
+            // A URL that names both a video and a playlist (the shape you get
+            // from copying the address bar while watching from a playlist) is
+            // a request for THAT video. Without this, yt-dlp walks the whole
+            // playlist: it emits one JSON object per entry — which this
+            // function cannot parse — after spending the extraction timeout
+            // resolving every one of them.
+            .arg("--no-playlist")
             .arg("--no-warnings")
             .arg(url);
         let output = run_ytdlp_bounded(cmd).await?;
@@ -112,8 +134,28 @@ impl YtDlpExtractor {
             return Err(RustloaderError::ExtractionError(error_msg.to_string()).into());
         }
 
+        // `--dump-json` is one JSON object PER LINE, so the whole buffer is
+        // only valid JSON when there is exactly one entry. Parsing it wholesale
+        // turned a pure-playlist URL into a serde "trailing characters" error,
+        // which the friendly-error mapper could only render as the generic
+        // "Unable to process this URL".
         let json_str = String::from_utf8(output.stdout)?;
-        let mut video_info: VideoInfo = serde_json::from_str(&json_str)?;
+        let mut entries = json_str.lines().filter(|line| !line.trim().is_empty());
+
+        let Some(first) = entries.next() else {
+            return Err(RustloaderError::ExtractionError(
+                "yt-dlp returned no video information for this URL".to_string(),
+            )
+            .into());
+        };
+        if entries.next().is_some() {
+            return Err(RustloaderError::ExtractionError(
+                "This URL is a playlist, not a single video".to_string(),
+            )
+            .into());
+        }
+
+        let mut video_info: VideoInfo = serde_json::from_str(first)?;
         video_info.normalize_url();
 
         Ok(video_info)
@@ -459,5 +501,98 @@ mod tests {
                 println!("yt-dlp version: {}", String::from_utf8_lossy(&out.stdout));
             }
         }
+    }
+}
+
+// ============================================================
+// PLAYLIST-URL EXTRACTION
+// `--dump-json` prints one JSON object PER LINE. extract_info
+// parsed the whole buffer as a single object, so any URL that
+// resolved to more than one entry died with a serde error that
+// surfaced as the generic "Unable to process this URL".
+// ============================================================
+
+#[cfg(all(test, unix))]
+mod playlist_tests {
+    use super::*;
+
+    /// Stub yt-dlp: prints `stdout_body`, plus the args it was given to a
+    /// side file so a test can assert on the command line.
+    fn stub(dir: &std::path::Path, name: &str, stdout_body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = dir.join(name);
+        let args_file = dir.join("args.txt");
+        std::fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > {args}\ncat <<'JSON'\n{body}\nJSON\n",
+                args = args_file.display(),
+                body = stdout_body
+            ),
+        )
+        .expect("write stub");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        path
+    }
+
+    const ONE_VIDEO: &str =
+        r#"{"id":"abc","title":"Single video","webpage_url":"https://example.com/watch?v=abc"}"#;
+
+    #[tokio::test]
+    async fn a_single_video_still_extracts() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let extractor = YtDlpExtractor::with_ytdlp_path(stub(tmp.path(), "one.sh", ONE_VIDEO));
+
+        let info = extractor
+            .extract_info_impl("https://example.com/watch?v=abc")
+            .await
+            .expect("a single-entry dump must parse");
+
+        assert_eq!(info.title, "Single video");
+    }
+
+    #[tokio::test]
+    async fn a_multi_entry_dump_says_playlist_instead_of_failing_to_parse() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let two = format!(
+            "{ONE_VIDEO}\n{}",
+            r#"{"id":"def","title":"Second video","webpage_url":"https://example.com/watch?v=def"}"#
+        );
+        let extractor = YtDlpExtractor::with_ytdlp_path(stub(tmp.path(), "many.sh", &two));
+
+        let err = extractor
+            .extract_info_impl("https://example.com/playlist?list=xyz")
+            .await
+            .expect_err("a playlist must not be silently treated as one video")
+            .to_string();
+
+        assert!(
+            err.to_lowercase().contains("playlist"),
+            "the error must name the real cause, got: {err}"
+        );
+        assert!(
+            crate::utils::make_error_user_friendly(&err)
+                .to_lowercase()
+                .contains("playlist"),
+            "and it must survive the friendly-error mapper"
+        );
+    }
+
+    #[tokio::test]
+    async fn extraction_asks_yt_dlp_for_the_single_video() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let extractor = YtDlpExtractor::with_ytdlp_path(stub(tmp.path(), "args.sh", ONE_VIDEO));
+
+        extractor
+            .extract_info_impl("https://example.com/watch?v=abc&list=xyz")
+            .await
+            .expect("stub always succeeds");
+
+        let args = std::fs::read_to_string(tmp.path().join("args.txt")).expect("args recorded");
+        assert!(
+            args.lines().any(|a| a == "--no-playlist"),
+            "a video+playlist URL must be extracted as the video, got: {args:?}"
+        );
     }
 }
