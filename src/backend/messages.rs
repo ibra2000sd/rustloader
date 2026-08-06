@@ -53,6 +53,15 @@ pub enum BackendEvent {
         task_id: String,
         video_info: VideoInfo,
     },
+    /// Tasks recovered from the event log at startup.
+    ///
+    /// The Downloads view builds its rows from `DownloadStarted`, which is
+    /// emitted only for downloads started in the CURRENT session — so without
+    /// this, a task paused before a restart came back into the queue with no
+    /// row to represent it: invisible, and impossible to resume or cancel.
+    TasksRestored {
+        tasks: Vec<RestoredTask>,
+    },
     DownloadProgress {
         task_id: String,
         data: DownloadProgressData,
@@ -76,4 +85,16 @@ pub enum BackendEvent {
 
     // System
     Error(String),
+}
+
+/// One task rehydrated from the event log, in the shape the Downloads view
+/// needs to render a row for it.
+#[derive(Debug, Clone)]
+pub struct RestoredTask {
+    pub task_id: String,
+    pub title: String,
+    pub url: String,
+    /// Same string vocabulary as `TaskStatusUpdated` ("Paused", "Queued", …),
+    /// so a restored row and a live one are styled by identical logic.
+    pub status: String,
 }

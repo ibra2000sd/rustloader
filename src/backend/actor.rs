@@ -1,4 +1,4 @@
-use super::messages::{BackendCommand, BackendEvent};
+use super::messages::{BackendCommand, BackendEvent, RestoredTask};
 use crate::database::{DatabaseManager, DownloadRecord};
 use crate::downloader::{DownloadConfig, DownloadEngine};
 use crate::extractor::{Extractor, Format, HybridExtractor, VideoInfo, YtDlpExtractor};
@@ -27,6 +27,33 @@ fn task_status_db_fields(status: &TaskStatus) -> (String, Option<DateTime<Utc>>,
         TaskStatus::Failed(e) => ("Failed".to_string(), Some(Utc::now()), Some(e.clone())),
         TaskStatus::Cancelled => ("Cancelled".to_string(), Some(Utc::now()), None),
     }
+}
+
+/// The rows the Downloads view needs for tasks recovered from the event log:
+/// the ones the user can still act on. Terminal tasks are deliberately left
+/// out — those belong to the History view, not the live queue list.
+fn restored_tasks(tasks: Vec<DownloadTask>) -> Vec<RestoredTask> {
+    tasks
+        .into_iter()
+        .filter(|task| {
+            matches!(
+                task.status,
+                TaskStatus::Queued | TaskStatus::Paused | TaskStatus::Downloading
+            )
+        })
+        .map(|task| RestoredTask {
+            task_id: task.id,
+            // A row with a blank label is unusable; the URL is what the user
+            // pasted, so it is the honest fallback.
+            title: if task.video_info.title.trim().is_empty() {
+                task.video_info.url.clone()
+            } else {
+                task.video_info.title
+            },
+            url: task.video_info.url,
+            status: task_status_db_fields(&task.status).0,
+        })
+        .collect()
 }
 
 pub struct BackendActor {
@@ -149,6 +176,23 @@ impl BackendActor {
                 history.len()
             ),
             Err(e) => warn!("Failed to load download history: {}", e),
+        }
+
+        // Hand the GUI the tasks that came back from the event log. Terminal
+        // ones are the History view's business; these are the ones the user
+        // can still act on, and without a row they can be neither resumed nor
+        // cancelled — which made cross-session resume (F-DL-003) unreachable
+        // from the UI even though the queue and the `.partN` files were intact.
+        let restored = restored_tasks(self.queue_manager.get_all_tasks().await);
+        if !restored.is_empty() {
+            info!(
+                "Restoring {} unfinished task(s) to the queue view",
+                restored.len()
+            );
+            let _ = self
+                .sender
+                .send(BackendEvent::TasksRestored { tasks: restored })
+                .await;
         }
 
         // Spawn Queue Processor (independent loop)
@@ -635,6 +679,73 @@ mod tests {
         assert_eq!(status, "Cancelled");
         assert!(completed_at.is_some());
         assert!(error.is_none());
+    }
+
+    fn queued_task(id: &str, title: &str, status: TaskStatus) -> DownloadTask {
+        DownloadTask {
+            id: id.to_string(),
+            video_info: VideoInfo {
+                title: title.to_string(),
+                url: format!("https://example.com/{id}"),
+                ..Default::default()
+            },
+            format: Format::default(),
+            output_path: PathBuf::from(format!("/tmp/{id}.mp4")),
+            status,
+            progress: None,
+            added_at: Utc::now(),
+            output_format: OutputFormat::Best,
+            insecure_tls: false,
+        }
+    }
+
+    /// The regression: the Downloads view builds rows only from
+    /// DownloadStarted, which fires only for downloads started in the current
+    /// session, so a task paused before a restart came back into the queue
+    /// with no row — invisible, unresumable, uncancellable.
+    #[test]
+    fn restored_tasks_covers_everything_the_user_can_still_act_on() {
+        let restored = restored_tasks(vec![
+            queued_task("paused", "Paused video", TaskStatus::Paused),
+            queued_task("queued", "Queued video", TaskStatus::Queued),
+            queued_task("running", "Running video", TaskStatus::Downloading),
+        ]);
+
+        assert_eq!(restored.len(), 3);
+        assert_eq!(
+            restored
+                .iter()
+                .map(|t| t.status.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Paused", "Queued", "Downloading"],
+            "a restored row must carry its real status, not a default"
+        );
+    }
+
+    #[test]
+    fn restored_tasks_leaves_terminal_tasks_to_the_history_view() {
+        let restored = restored_tasks(vec![
+            queued_task("done", "Done", TaskStatus::Completed),
+            queued_task("failed", "Failed", TaskStatus::Failed("boom".to_string())),
+            queued_task("cancelled", "Cancelled", TaskStatus::Cancelled),
+            queued_task("paused", "Paused", TaskStatus::Paused),
+        ]);
+
+        assert_eq!(
+            restored
+                .iter()
+                .map(|t| t.task_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["paused"],
+            "finished downloads must not reappear in the live queue"
+        );
+    }
+
+    #[test]
+    fn a_restored_task_without_a_title_falls_back_to_its_url() {
+        let restored = restored_tasks(vec![queued_task("blank", "   ", TaskStatus::Paused)]);
+
+        assert_eq!(restored[0].title, "https://example.com/blank");
     }
 
     #[test]

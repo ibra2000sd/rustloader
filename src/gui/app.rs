@@ -666,6 +666,36 @@ impl Application for RustloaderApp {
                         self.active_downloads.push(task_ui);
                         self.status_message = format!("Added to queue: {}", video_info.title);
                     }
+                    BackendEvent::TasksRestored { tasks } => {
+                        let restored = tasks.len();
+                        for task in tasks {
+                            if self.active_downloads.iter().any(|t| t.id == task.task_id) {
+                                continue;
+                            }
+                            self.active_downloads.push(DownloadTaskUI {
+                                id: task.task_id,
+                                title: task.title,
+                                url: task.url,
+                                progress: 0.0,
+                                speed: 0.0,
+                                status: task.status,
+                                downloaded_mb: 0.0,
+                                total_mb: 0.0,
+                                eta_seconds: None,
+                                file_path: None,
+                                error_message: None,
+                                last_progress_at: Instant::now(),
+                                was_resumed_after_failure: false,
+                                error_dismissed: false,
+                            });
+                        }
+                        if restored > 0 {
+                            self.status_message = format!(
+                                "Restored {restored} unfinished download{} from the last session",
+                                if restored == 1 { "" } else { "s" }
+                            );
+                        }
+                    }
                     BackendEvent::DownloadProgress { task_id, data } => {
                         if let Some(task) =
                             self.active_downloads.iter_mut().find(|t| t.id == task_id)
