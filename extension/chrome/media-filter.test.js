@@ -126,3 +126,64 @@ test("malformed URLs never throw", () => {
   assert.equal(classify({ url: "not a url", contentType: "video/mp4" }).media, true);
   assert.equal(classify({ url: "not a url", contentType: "" }).media, false);
 });
+
+// ============================================================
+// RESPONSE STATUS
+// classify() saw only the URL and content-type, so an error
+// response with a media-looking URL was listed as downloadable,
+// counted on the badge, and only failed later inside the app.
+// ============================================================
+
+test("an error response is not media, however media-looking the URL", () => {
+  for (const statusCode of [403, 404, 410, 500]) {
+    assert.deepEqual(
+      classify({
+        url: "https://cdn.example.com/v/clip.mp4?token=expired",
+        contentType: "text/html",
+        statusCode,
+      }),
+      { media: false },
+      `status ${statusCode}`,
+    );
+  }
+});
+
+test("a redirect is not the payload", () => {
+  assert.deepEqual(
+    classify({
+      url: "https://cdn.example.com/v/master.m3u8",
+      contentType: "application/x-mpegURL",
+      statusCode: 302,
+    }),
+    { media: false },
+  );
+});
+
+test("a successful media response still classifies", () => {
+  assert.deepEqual(
+    classify({
+      url: "https://cdn.example.com/v/master.m3u8",
+      contentType: "application/x-mpegURL",
+      statusCode: 200,
+    }),
+    { media: true, kind: "hls" },
+  );
+  assert.deepEqual(
+    classify({
+      url: "https://cdn.example.com/v/clip.mp4",
+      contentType: "video/mp4",
+      statusCode: 206,
+    }),
+    { media: true, kind: "video" },
+  );
+});
+
+test("an absent status is treated as before, so callers without one still work", () => {
+  assert.deepEqual(
+    classify({
+      url: "https://cdn.example.com/v/master.m3u8",
+      contentType: "application/x-mpegURL",
+    }),
+    { media: true, kind: "hls" },
+  );
+});

@@ -75,6 +75,7 @@ chrome.webRequest.onHeadersReceived.addListener(
     const verdict = classify({
       url: details.url,
       contentType: contentTypeOf(details),
+      statusCode: details.statusCode,
     });
     if (!verdict.media) return;
 

@@ -57,7 +57,18 @@ function basenameOf(url) {
  * @returns {{media: true, kind: "hls"|"dash"|"video"|"audio"} |
  *           {media: false, reason: string}}
  */
-export function classify({ url, contentType }) {
+export function classify({ url, contentType, statusCode }) {
+  // Only a successful response carries media. A CDN answering 403/404 for an
+  // expired token still has a media-looking URL, and the extension branch
+  // below matches on the extension alone regardless of the error page's
+  // content-type — so error responses were listed as downloadable, counted on
+  // the badge, and only failed later, inside the app, with a confusing
+  // message. A redirect is not the payload either; the request it points at
+  // gets classified on its own.
+  if (statusCode !== undefined && !(statusCode >= 200 && statusCode < 300)) {
+    return { media: false };
+  }
+
   const type = normalizeContentType(contentType);
   const basename = basenameOf(url);
   const dot = basename.lastIndexOf(".");
