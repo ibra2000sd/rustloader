@@ -8,6 +8,7 @@
 )]
 
 use super::{EventLog, QueueEvent};
+use crate::downloader::merger::merging_temp_path;
 use crate::downloader::resume_guard::{remove_sidecar, sidecar_path};
 use crate::downloader::{DownloadEngine, DownloadProgress, PageFallback};
 use crate::extractor::{Format, VideoInfo};
@@ -515,6 +516,20 @@ impl QueueManager {
     /// are logged, never propagated: cleanup must not break cancel/remove.
     async fn cleanup_task_artifacts(output_path: &Path) {
         remove_sidecar(&sidecar_path(output_path)).await;
+
+        // A cancel during the merge leaves the merge temp behind (the merge
+        // writes there rather than the output, so it can't publish a
+        // truncated file).
+        let merge_temp = merging_temp_path(output_path);
+        match tokio::fs::remove_file(&merge_temp).await {
+            Ok(()) => debug!("Removed merge temp: {}", merge_temp.display()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => warn!(
+                "Failed to remove merge temp {}: {}",
+                merge_temp.display(),
+                e
+            ),
+        }
 
         // The segment count isn't known at this layer (the engine derives it
         // from the probed file size + config), so match

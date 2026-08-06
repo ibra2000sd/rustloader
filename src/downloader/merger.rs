@@ -6,6 +6,20 @@ use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, info, warn};
 
+/// Where the merge writes before it is published under `output_path`.
+///
+/// The merge truncates its target and rewrites it from the parts, so writing
+/// straight to the output means any interruption — a cancel, a crash — leaves
+/// a partial file under the real name that looks like a finished download.
+pub fn merging_temp_path(output_path: &Path) -> PathBuf {
+    let mut name = output_path.file_name().unwrap_or_default().to_os_string();
+    name.push(".merging");
+    match output_path.parent() {
+        Some(parent) => parent.join(&name),
+        None => PathBuf::from(&name),
+    }
+}
+
 /// Merge segments into a single file
 pub async fn merge_segments(
     segments: &[PathBuf],
