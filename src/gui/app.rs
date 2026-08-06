@@ -193,6 +193,31 @@ pub struct DownloadTaskUI {
     pub error_dismissed: bool,           // v0.7.0: User dismissed error display
 }
 
+/// Hand one command to the backend actor, turning a refusal into the sentence
+/// the user should read.
+///
+/// Free-standing rather than a method so it can be exercised against a real
+/// channel — full, and closed — without standing up the whole application.
+fn deliver_command(
+    sender: &mpsc::Sender<BackendCommand>,
+    command: BackendCommand,
+) -> Result<(), String> {
+    match sender.try_send(command) {
+        Ok(()) => Ok(()),
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            Err("Rustloader is busy and didn't take that — try again in a moment.".to_string())
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            error!("backend command channel is closed; the actor is not running");
+            Err(
+                "The download service isn't running, so that had no effect. Restart Rustloader — \
+                 if it persists, check that yt-dlp is installed."
+                    .to_string(),
+            )
+        }
+    }
+}
+
 /// Progress data transfer object
 #[derive(Debug, Clone)]
 pub struct DownloadProgressData {
@@ -287,13 +312,37 @@ impl RustloaderApp {
     /// held in `bridge_active` so `ExtractionCompleted` can apply its
     /// quality/format and clean up its cookie file.
     fn start_bridge_request(&mut self, req: BridgeRequest) {
-        self.is_extracting = true;
         self.status_message = format!("Extracting (from browser): {}", req.url);
-        let _ = self.backend_sender.try_send(BackendCommand::ExtractInfo {
+        // Only claim an extraction is in flight if the backend actually took
+        // the command: `is_extracting` is cleared solely by
+        // `ExtractionCompleted`, so setting it for a command that never
+        // arrived wedges the Download button on "Extracting..." for good.
+        if !self.send_command(BackendCommand::ExtractInfo {
             url: req.url.clone(),
             cookies_file: req.cookies_file.clone(),
-        });
+        }) {
+            return;
+        }
+        self.is_extracting = true;
         self.bridge_active = Some(req);
+    }
+
+    /// Hand a command to the backend actor, reporting failure rather than
+    /// swallowing it.
+    ///
+    /// Every one of these carries a user action — a Pause, a Cancel, a
+    /// Download. `try_send` fails when the actor never started (its
+    /// construction can fail: no yt-dlp, or event-log/organizer init trouble)
+    /// or when its queue is full, and discarding that error made the click do
+    /// nothing at all, with nothing said anywhere.
+    fn send_command(&mut self, command: BackendCommand) -> bool {
+        match deliver_command(&self.backend_sender, command) {
+            Ok(()) => true,
+            Err(message) => {
+                self.status_message = message;
+                false
+            }
+        }
     }
 
     /// Called when an extraction finishes (success or failure): delete the
@@ -530,15 +579,18 @@ impl Application for RustloaderApp {
 
             Message::DownloadButtonPressed => {
                 if !self.url_input.is_empty() && !self.is_extracting {
-                    self.is_extracting = true;
                     self.status_message = "Extracting video information...".to_string();
 
                     // Send extract command to backend
                     let url = self.url_input.clone();
-                    let _ = self.backend_sender.try_send(BackendCommand::ExtractInfo {
+                    // The flag is cleared only by `ExtractionCompleted`, so it
+                    // must not be raised for a command the backend never got.
+                    if self.send_command(BackendCommand::ExtractInfo {
                         url,
                         cookies_file: None,
-                    });
+                    }) {
+                        self.is_extracting = true;
+                    }
                 }
                 Command::none()
             }
@@ -618,18 +670,17 @@ impl Application for RustloaderApp {
                                 self.insecure_tls = false;
 
                                 // Send start command
-                                let _ =
-                                    self.backend_sender.try_send(BackendCommand::StartDownload {
-                                        video_info: Box::new(video_info),
-                                        output_path,
-                                        // No explicit format: the backend picks
-                                        // one honouring the quality choice
-                                        // (B-GUI-003 — it used to be ignored).
-                                        format_id: None,
-                                        quality,
-                                        output_format,
-                                        insecure_tls,
-                                    });
+                                self.send_command(BackendCommand::StartDownload {
+                                    video_info: Box::new(video_info),
+                                    output_path,
+                                    // No explicit format: the backend picks
+                                    // one honouring the quality choice
+                                    // (B-GUI-003 — it used to be ignored).
+                                    format_id: None,
+                                    quality,
+                                    output_format,
+                                    insecure_tls,
+                                });
                             }
                             Err(e) => {
                                 self.url_error = Some(make_error_user_friendly(&e));
@@ -733,44 +784,36 @@ impl Application for RustloaderApp {
 
             // Queue control
             Message::PauseDownload(task_id) => {
-                let _ = self
-                    .backend_sender
-                    .try_send(BackendCommand::PauseDownload(task_id));
+                self.send_command(BackendCommand::PauseDownload(task_id));
                 Command::none()
             }
 
             Message::ResumeDownload(task_id) => {
-                let _ = self
-                    .backend_sender
-                    .try_send(BackendCommand::ResumeDownload(task_id));
+                self.send_command(BackendCommand::ResumeDownload(task_id));
                 Command::none()
             }
 
             Message::CancelDownload(task_id) => {
                 // Optimistic UI update
                 self.active_downloads.retain(|t| t.id != task_id);
-                let _ = self
-                    .backend_sender
-                    .try_send(BackendCommand::CancelDownload(task_id));
+                self.send_command(BackendCommand::CancelDownload(task_id));
                 Command::none()
             }
 
             Message::RemoveCompleted(task_id) => {
                 self.active_downloads.retain(|t| t.id != task_id);
-                let _ = self
-                    .backend_sender
-                    .try_send(BackendCommand::RemoveTask(task_id));
+                self.send_command(BackendCommand::RemoveTask(task_id));
                 Command::none()
             }
 
             Message::ClearAllCompleted => {
                 self.active_downloads.retain(|t| t.status != "Completed");
-                let _ = self.backend_sender.try_send(BackendCommand::ClearCompleted);
+                self.send_command(BackendCommand::ClearCompleted);
                 Command::none()
             }
 
             Message::ResumeAll => {
-                let _ = self.backend_sender.try_send(BackendCommand::ResumeAll);
+                self.send_command(BackendCommand::ResumeAll);
                 Command::none()
             }
 
@@ -782,9 +825,7 @@ impl Application for RustloaderApp {
                         task.error_dismissed = false; // Reset dismissed state on retry
                     }
                 }
-                let _ = self
-                    .backend_sender
-                    .try_send(BackendCommand::ResumeDownload(task_id));
+                self.send_command(BackendCommand::ResumeDownload(task_id));
                 Command::none()
             }
 
@@ -795,12 +836,8 @@ impl Application for RustloaderApp {
                     let url = task.url.clone();
 
                     // Cancel and remove from backend
-                    let _ = self
-                        .backend_sender
-                        .try_send(BackendCommand::CancelDownload(task_id.clone()));
-                    let _ = self
-                        .backend_sender
-                        .try_send(BackendCommand::RemoveTask(task_id.clone()));
+                    self.send_command(BackendCommand::CancelDownload(task_id.clone()));
+                    self.send_command(BackendCommand::RemoveTask(task_id.clone()));
 
                     // Remove from UI
                     self.active_downloads.retain(|t| t.id != task_id);
@@ -810,7 +847,7 @@ impl Application for RustloaderApp {
                     self.status_message = "Task reset - re-adding...".to_string();
 
                     // Trigger extraction for the URL
-                    let _ = self.backend_sender.try_send(BackendCommand::ExtractInfo {
+                    self.send_command(BackendCommand::ExtractInfo {
                         url: self.url_input.clone(),
                         cookies_file: None,
                     });
@@ -829,12 +866,8 @@ impl Application for RustloaderApp {
             // v0.7.0: Restart Stalled - Pause + Resume to restart engine
             Message::RestartStalled(task_id) => {
                 // First pause, then resume to restart the engine
-                let _ = self
-                    .backend_sender
-                    .try_send(BackendCommand::PauseDownload(task_id.clone()));
-                let _ = self
-                    .backend_sender
-                    .try_send(BackendCommand::ResumeDownload(task_id));
+                self.send_command(BackendCommand::PauseDownload(task_id.clone()));
+                self.send_command(BackendCommand::ResumeDownload(task_id));
                 self.status_message = "Restarting stalled download...".to_string();
                 Command::none()
             }
@@ -1120,12 +1153,13 @@ impl Application for RustloaderApp {
                     // Same add path as DownloadButtonPressed: extraction via
                     // the backend actor, which then auto-starts the download
                     // (I-2: GUI never drives the engine directly).
-                    self.is_extracting = true;
                     self.status_message = "Extracting video information...".to_string();
-                    let _ = self.backend_sender.try_send(BackendCommand::ExtractInfo {
+                    if self.send_command(BackendCommand::ExtractInfo {
                         url,
                         cookies_file: None,
-                    });
+                    }) {
+                        self.is_extracting = true;
+                    }
                 }
                 Command::none()
             }
@@ -1769,5 +1803,53 @@ mod settings_tests {
         assert!(matches!(loaded.quality, VideoQuality::Best));
 
         std::fs::remove_file(&db_path).ok();
+    }
+}
+
+#[cfg(test)]
+mod command_delivery_tests {
+    use super::{deliver_command, BackendCommand};
+    use tokio::sync::mpsc;
+
+    /// Every one of these carries a user action. `let _ = try_send(...)` used
+    /// to discard the refusal, so a Pause, Cancel or Download click could do
+    /// nothing at all with nothing said anywhere.
+    #[tokio::test]
+    async fn a_delivered_command_reports_success_and_arrives() {
+        let (tx, mut rx) = mpsc::channel::<BackendCommand>(4);
+
+        assert!(deliver_command(&tx, BackendCommand::ClearCompleted).is_ok());
+        assert!(
+            matches!(rx.try_recv(), Ok(BackendCommand::ClearCompleted)),
+            "the command must actually reach the actor"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_full_queue_is_reported_not_swallowed() {
+        let (tx, _rx) = mpsc::channel::<BackendCommand>(1);
+        deliver_command(&tx, BackendCommand::ClearCompleted).expect("first fits");
+
+        let message = deliver_command(&tx, BackendCommand::ResumeAll)
+            .expect_err("a full queue must not look like success");
+
+        assert!(
+            message.to_lowercase().contains("busy"),
+            "the user needs to know it did not go through, got: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dead_backend_is_reported_not_swallowed() {
+        let (tx, rx) = mpsc::channel::<BackendCommand>(4);
+        drop(rx);
+
+        let message = deliver_command(&tx, BackendCommand::ClearCompleted)
+            .expect_err("a closed channel must not look like success");
+
+        assert!(
+            message.to_lowercase().contains("restart"),
+            "the message must tell the user what to do, got: {message}"
+        );
     }
 }
