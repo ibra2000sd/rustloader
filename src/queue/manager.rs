@@ -1006,7 +1006,7 @@ impl QueueManager {
 
         // v0.5.1: UPDATE the existing active_downloads entry (pre-registered in process_queue)
         // instead of inserting new. This completes the atomic transaction.
-        {
+        let placeholder_missing = {
             let mut active = self.active_downloads.lock().await;
 
             if let Some(handle) = active.get_mut(&task_id) {
@@ -1019,19 +1019,32 @@ impl QueueManager {
                     "✅ [DOWNLOAD] Updated active_downloads entry for: {}",
                     task_id
                 );
+                false
             } else {
-                // This should never happen - placeholder was inserted in process_queue
-                // If we get here, something is seriously wrong
-                error!("❌ [DOWNLOAD] CRITICAL: Task {} not found in active_downloads! Placeholder missing.", task_id);
-
-                // Rollback: Mark task as failed in queue
-                let mut queue = self.queue.lock().await;
-                if let Some(task_in_queue) = queue.iter_mut().find(|t| t.id == task_id) {
-                    task_in_queue.status =
-                        TaskStatus::Failed("Internal error: pre-registration failed".to_string());
-                }
-                return;
+                // The placeholder was inserted by process_queue, so it is gone
+                // only if pause/cancel removed it in the window since — rare,
+                // but reachable from the GUI.
+                true
             }
+        };
+
+        // I-5: the rollback needs the queue lock, so the active_downloads
+        // guard above must be released first — taking queue while holding
+        // active is the reverse order and deadlocks against every
+        // queue-then-active caller (process_queue, pause_task, cancel_task).
+        if placeholder_missing {
+            error!(
+                "❌ [DOWNLOAD] CRITICAL: Task {} not found in active_downloads! Placeholder missing.",
+                task_id
+            );
+
+            // Rollback: Mark task as failed in queue
+            let mut queue = self.queue.lock().await;
+            if let Some(task_in_queue) = queue.iter_mut().find(|t| t.id == task_id) {
+                task_in_queue.status =
+                    TaskStatus::Failed("Internal error: pre-registration failed".to_string());
+            }
+            return;
         }
 
         debug!(
@@ -1236,5 +1249,114 @@ impl DownloadTask {
             output_format: OutputFormat::Best,
             insecure_tls: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::downloader::DownloadConfig;
+    use crate::utils::OrganizationSettings;
+
+    async fn make_manager(base_dir: &Path) -> Arc<QueueManager> {
+        let event_log = Arc::new(EventLog::new(base_dir).await.expect("event log"));
+        let engine = DownloadEngine::new(DownloadConfig {
+            segments: 1,
+            ..Default::default()
+        });
+        let organizer = FileOrganizer::new(OrganizationSettings::default())
+            .await
+            .expect("file organizer");
+        let metadata = MetadataManager::new(base_dir);
+        Arc::new(QueueManager::new(1, engine, organizer, metadata, event_log))
+    }
+
+    fn probe_task(id: &str, output_path: PathBuf) -> DownloadTask {
+        DownloadTask {
+            id: id.to_string(),
+            video_info: VideoInfo {
+                title: "deadlock probe".to_string(),
+                ..Default::default()
+            },
+            // Port 1 on loopback refuses instantly: the engine task this
+            // spawns must not depend on the network to fail.
+            format: Format {
+                url: "http://127.0.0.1:1/never.mp4".to_string(),
+                ..Default::default()
+            },
+            output_path,
+            status: TaskStatus::Queued,
+            progress: None,
+            added_at: Utc::now(),
+            output_format: OutputFormat::Best,
+            insecure_tls: false,
+        }
+    }
+
+    /// `start_download`'s rollback runs when the placeholder `process_queue`
+    /// pre-registered is gone — i.e. pause/cancel removed it in the window
+    /// since. It used to take the queue lock while still holding
+    /// `active_downloads`, the reverse of I-5, which deadlocks against every
+    /// queue-then-active caller. Both tasks hang forever on a regression, so
+    /// the timeout is the assertion.
+    #[tokio::test]
+    async fn rollback_does_not_deadlock_against_a_queue_then_active_caller() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let manager = make_manager(tmp.path()).await;
+        let task = probe_task("deadlock-probe", tmp.path().join("never.mp4"));
+
+        // Deliberately NO placeholder in active_downloads, so start_download
+        // takes the rollback path.
+        manager.queue.lock().await.push_back(task.clone());
+
+        let counterpart = tokio::spawn({
+            let manager = Arc::clone(&manager);
+            async move {
+                let queue = manager.queue.lock().await;
+                // Hold the queue lock until the rollback is observably holding
+                // active_downloads — that interleaving is what deadlocks.
+                for _ in 0..100 {
+                    if manager.active_downloads.try_lock().is_err() {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                let _active = manager.active_downloads.lock().await;
+                drop(queue);
+            }
+        });
+
+        let rollback = tokio::spawn({
+            let manager = Arc::clone(&manager);
+            async move { manager.start_download(task).await }
+        });
+
+        let finished = tokio::time::timeout(Duration::from_secs(20), async {
+            let _ = rollback.await;
+            let _ = counterpart.await;
+        })
+        .await;
+
+        assert!(
+            finished.is_ok(),
+            "start_download's rollback deadlocked against a queue-then-active caller"
+        );
+
+        // The rollback writes `Failed`, but dropping its `cancel_tx` makes the
+        // already-spawned download task take its cancel branch and overwrite
+        // that with `Cancelled` — pre-existing, tracked separately. Either way
+        // the task must not be left mid-flight.
+        let queue = manager.queue.lock().await;
+        let status = queue
+            .iter()
+            .find(|t| t.id == "deadlock-probe")
+            .map(|t| t.status.clone());
+        assert!(
+            matches!(
+                status,
+                Some(TaskStatus::Failed(_)) | Some(TaskStatus::Cancelled)
+            ),
+            "rollback must leave the task in a terminal state, got {status:?}"
+        );
     }
 }
