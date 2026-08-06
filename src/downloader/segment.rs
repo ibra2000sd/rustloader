@@ -177,12 +177,12 @@ async fn download_segment_attempt(
         segment.id, range_start, segment.end, existing_bytes
     );
 
-    // Create range header for the remaining span of this segment
-    let range = if range_start == segment.end {
-        format!("bytes={}", range_start)
-    } else {
-        format!("bytes={}-{}", range_start, segment.end)
-    };
+    // Create range header for the remaining span of this segment. Both ends
+    // are inclusive, so a single remaining byte is `bytes=X-X` — a bare
+    // `bytes=X` is not a valid range spec (RFC 9110 requires the dash) and a
+    // lenient server reads it as "X to end of file", which appends the rest of
+    // the file onto this part.
+    let range = format!("bytes={}-{}", range_start, segment.end);
 
     // Send request with range header. The connect is bounded by the client's
     // connect timeout; the wait for response headers is bounded here so a
@@ -301,6 +301,22 @@ async fn download_segment_attempt(
 
     // Ensure file is flushed
     file.flush().await?;
+
+    // A clean stream EOF is not proof the segment is whole: a server that
+    // honors the range start but caps its length (206 with a shorter
+    // Content-Range/Content-Length) ends the stream normally, and returning
+    // Ok here would let the engine mark the segment complete and merge a
+    // short part — shifting every following byte in the output file with no
+    // error anywhere. The bytes already written stay on disk, so the retry
+    // resumes from them.
+    if downloaded != total_size {
+        return Err(anyhow::anyhow!(
+            "segment {} ended at {} of {} bytes; aborting attempt",
+            segment.id,
+            downloaded,
+            total_size
+        ));
+    }
 
     // Final progress update
     let elapsed = start_time.elapsed().as_secs_f64();
@@ -917,5 +933,229 @@ mod resume_tests {
             "stall abort must fire within a bounded window, took {:?}",
             elapsed
         );
+    }
+
+    /// Honors the range START but always stops `shortfall` bytes before the
+    /// end of the file, with a matching `Content-Length` and a clean stream
+    /// close — the "206 that is short but entirely self-consistent" case,
+    /// which produces no transport error at all.
+    async fn spawn_short_range_server(
+        body: Vec<u8>,
+        shortfall: usize,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let body = Arc::new(body);
+
+        let handle = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = match listener.accept().await {
+                    Ok(x) => x,
+                    Err(_) => break,
+                };
+                let body = Arc::clone(&body);
+
+                tokio::spawn(async move {
+                    let Some(req) = read_request(&mut socket).await else {
+                        return;
+                    };
+                    let start = requested_range_start(&req);
+
+                    let last = body.len().saturating_sub(1 + shortfall);
+                    let slice: &[u8] = if start > last {
+                        &[]
+                    } else {
+                        &body[start..=last]
+                    };
+
+                    let headers = format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {}-{}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        start,
+                        start + slice.len().saturating_sub(1),
+                        body.len(),
+                        slice.len()
+                    );
+                    if socket.write_all(headers.as_bytes()).await.is_err() {
+                        return;
+                    }
+                    let _ = socket.write_all(slice).await;
+                    let _ = socket.flush().await;
+                });
+            }
+        });
+
+        (format!("http://{}", addr), handle)
+    }
+
+    /// Serves the requested range in full and records every `Range` header it
+    /// received, so a test can assert on the exact range spec sent.
+    async fn spawn_range_recording_server(
+        body: Vec<u8>,
+        seen: Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let body = Arc::new(body);
+
+        let handle = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = match listener.accept().await {
+                    Ok(x) => x,
+                    Err(_) => break,
+                };
+                let body = Arc::clone(&body);
+                let seen = Arc::clone(&seen);
+
+                tokio::spawn(async move {
+                    let Some(req) = read_request(&mut socket).await else {
+                        return;
+                    };
+                    if let Some(spec) = req
+                        .split("range:")
+                        .nth(1)
+                        .and_then(|rest| rest.lines().next())
+                    {
+                        seen.lock()
+                            .expect("seen lock")
+                            .push(spec.trim().to_string());
+                    }
+
+                    let start = requested_range_start(&req);
+                    let slice: &[u8] = body.get(start..).unwrap_or(&[]);
+                    let headers = format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {}-{}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        start,
+                        start + slice.len().saturating_sub(1),
+                        body.len(),
+                        slice.len()
+                    );
+                    if socket.write_all(headers.as_bytes()).await.is_err() {
+                        return;
+                    }
+                    let _ = socket.write_all(slice).await;
+                    let _ = socket.flush().await;
+                });
+            }
+        });
+
+        (format!("http://{}", addr), handle)
+    }
+
+    async fn read_request(socket: &mut tokio::net::TcpStream) -> Option<String> {
+        let mut buf = [0u8; 8192];
+        let mut req = Vec::new();
+        loop {
+            let n = match socket.read(&mut buf).await {
+                Ok(0) | Err(_) => return None,
+                Ok(n) => n,
+            };
+            req.extend_from_slice(&buf[..n]);
+            if req.windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+        }
+        Some(String::from_utf8_lossy(&req).to_ascii_lowercase())
+    }
+
+    fn requested_range_start(request: &str) -> usize {
+        request
+            .split("range: bytes=")
+            .nth(1)
+            .and_then(|rest| rest.split('-').next())
+            .and_then(|start| start.trim().parse().ok())
+            .unwrap_or(0)
+    }
+
+    /// The regression: a self-consistent short `206` ended the stream cleanly,
+    /// so the attempt returned `Ok` and the engine merged a short part —
+    /// shifting every following byte of the output with no error raised.
+    #[tokio::test]
+    async fn test_short_range_response_is_not_reported_complete() {
+        let body: Vec<u8> = (0..40_000u32).map(|i| (i % 256) as u8).collect();
+        let shortfall = 1_000usize;
+        let (base_url, _server) = spawn_short_range_server(body.clone(), shortfall).await;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("out.mp4.part0");
+        let segment = Segment {
+            id: 0,
+            start: 0,
+            end: (body.len() - 1) as u64,
+            size: body.len() as u64,
+            path: path.clone(),
+        };
+
+        let client = Client::new();
+        let (tx, mut rx) = mpsc::channel(100);
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+
+        let result = download_segment(
+            &client,
+            &base_url,
+            &segment,
+            tx,
+            2,
+            Duration::from_millis(10),
+        )
+        .await;
+
+        // The load-bearing assertion: success must mean a whole segment.
+        if result.is_ok() {
+            let written = tokio::fs::metadata(&path).await.expect("part file").len();
+            assert_eq!(
+                written, segment.size,
+                "download_segment reported success with a short part file — \
+                 the merge would silently shift every following byte"
+            );
+        }
+        assert!(
+            result.is_err(),
+            "a server that never serves the last {shortfall} bytes must fail the segment"
+        );
+    }
+
+    /// A single remaining byte must be requested as `bytes=X-X`. A bare
+    /// `bytes=X` is not a valid range spec, and a lenient server reads it as
+    /// open-ended and appends the rest of the file onto the part.
+    #[tokio::test]
+    async fn test_single_remaining_byte_uses_a_closed_range() {
+        let body: Vec<u8> = (0..5_000u32).map(|i| (i % 256) as u8).collect();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (base_url, _server) =
+            spawn_range_recording_server(body.clone(), Arc::clone(&seen)).await;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("out.mp4.part0");
+        // Everything but the final byte is already on disk.
+        tokio::fs::write(&path, &body[..body.len() - 1])
+            .await
+            .expect("seed part file");
+
+        let segment = Segment {
+            id: 0,
+            start: 0,
+            end: (body.len() - 1) as u64,
+            size: body.len() as u64,
+            path: path.clone(),
+        };
+
+        let client = Client::new();
+        let (tx, mut rx) = mpsc::channel(100);
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+
+        download_segment_attempt(&client, &base_url, &segment, &tx)
+            .await
+            .expect("the last byte must be fetchable");
+
+        let last_byte = (body.len() - 1) as u64;
+        let specs = seen.lock().expect("seen lock").clone();
+        assert_eq!(
+            specs,
+            vec![format!("bytes={last_byte}-{last_byte}")],
+            "a one-byte remainder must be a closed range"
+        );
+
+        let written = tokio::fs::read(&path).await.expect("read part file");
+        assert_eq!(written, body, "part file must match the source exactly");
     }
 }
