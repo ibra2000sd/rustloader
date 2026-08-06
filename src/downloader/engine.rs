@@ -407,6 +407,52 @@ fn simple_temp_path(output_path: &Path) -> PathBuf {
     }
 }
 
+/// The first free name at or after `desired`: `clip.bin`, then
+/// `clip (1).bin`, `clip (2).bin`, …
+///
+/// Only ever applied to a *content-derived* name — one taken from
+/// `Content-Disposition` or the URL basename rather than chosen by the caller.
+/// Hosts hand out the same suggested name routinely (`export.bin` for every
+/// export, `/download?id=N` all resolving to one basename), and `rename`
+/// replaces the destination silently on unix, so publishing straight onto it
+/// destroys an earlier completed download with no error anywhere.
+async fn non_colliding_path(desired: &Path) -> PathBuf {
+    if !tokio::fs::try_exists(desired).await.unwrap_or(false) {
+        return desired.to_path_buf();
+    }
+
+    let parent = desired.parent();
+    let stem = desired.file_stem().unwrap_or_default().to_os_string();
+    let extension = desired.extension().map(|ext| ext.to_os_string());
+
+    for suffix in 1..=MAX_NAME_COLLISION_SUFFIX {
+        let mut name = stem.clone();
+        name.push(format!(" ({suffix})"));
+        if let Some(extension) = &extension {
+            name.push(".");
+            name.push(extension);
+        }
+        let candidate = match parent {
+            Some(parent) if !parent.as_os_str().is_empty() => parent.join(&name),
+            _ => PathBuf::from(&name),
+        };
+        if !tokio::fs::try_exists(&candidate).await.unwrap_or(false) {
+            return candidate;
+        }
+    }
+
+    // Every candidate taken: fall back to the caller's name rather than
+    // failing a finished transfer.
+    warn!(
+        "No free name near {:?} after {} attempts; publishing over it",
+        desired, MAX_NAME_COLLISION_SUFFIX
+    );
+    desired.to_path_buf()
+}
+
+/// How many `name (N).ext` candidates to try before giving up.
+const MAX_NAME_COLLISION_SUFFIX: u32 = 999;
+
 impl DownloadEngine {
     /// Create new download engine with configuration
     pub fn new(config: DownloadConfig) -> Self {
@@ -916,6 +962,7 @@ impl DownloadEngine {
         // caller's provisional name, so degrade to that rather than failing
         // a finished transfer.
         let final_path = if final_path != output_path {
+            let final_path = non_colliding_path(&final_path).await;
             match tokio::fs::rename(output_path, &final_path).await {
                 Ok(()) => final_path,
                 Err(e) => {
@@ -1349,6 +1396,11 @@ impl DownloadEngine {
         // Atomically publish the completed file under the final
         // (content-derived) name — the #37 temp→rename is exactly where the
         // corrected extension takes effect.
+        let final_path = &if final_path != output_path {
+            non_colliding_path(final_path).await
+        } else {
+            final_path.to_path_buf()
+        };
         tokio::fs::rename(&temp_path, final_path).await?;
 
         // Final progress update
@@ -3462,5 +3514,138 @@ mod tests {
             detail.contains("Requested format is not available"),
             "terminal Failed progress must carry the ERROR line, got: {detail}"
         );
+    }
+
+    // ============================================================
+    // CONTENT-DERIVED NAME COLLISIONS
+    // The final name can come from Content-Disposition or the URL
+    // basename — names the caller never chose, which different
+    // downloads from one host land on routinely. `rename` replaces
+    // the destination silently, so publishing destroyed whatever
+    // completed download was already there.
+    // ============================================================
+
+    #[tokio::test]
+    async fn test_simple_download_does_not_clobber_an_existing_file() {
+        let body: Vec<u8> = (0..64 * 1024_u32).map(|i| (i % 256) as u8).collect();
+        let (base_url, _server) = spawn_trickle_no_range_server(
+            body.clone(),
+            16 * 1024,
+            Duration::from_millis(1),
+            "application/octet-stream",
+        )
+        .await;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let output_path = tmp.path().join("7z2408.mp4");
+
+        // An earlier download already published under the content-derived name.
+        let existing = tmp.path().join("7z2408.exe");
+        tokio::fs::write(&existing, b"an earlier completed download")
+            .await
+            .expect("plant existing file");
+
+        let engine = DownloadEngine::default();
+        let (tx, mut rx) = mpsc::channel(100);
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+
+        let saved = engine
+            .download(&format!("{base_url}/7z2408-x64.exe"), &output_path, tx)
+            .await
+            .expect("download should succeed");
+
+        let preserved = tokio::fs::read(&existing).await.expect("read existing");
+        assert!(
+            preserved == b"an earlier completed download",
+            "the earlier download must survive untouched, found {} bytes",
+            preserved.len()
+        );
+        assert_eq!(
+            saved,
+            tmp.path().join("7z2408 (1).exe"),
+            "a taken content-derived name must be sidestepped, not overwritten"
+        );
+        assert_eq!(
+            tokio::fs::read(&saved).await.expect("read output"),
+            body,
+            "output must be byte-correct"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_segmented_download_does_not_clobber_an_existing_file() {
+        let body: Vec<u8> = (0..(12 * 1024 * 1024) as u32)
+            .map(|i| (i % 256) as u8)
+            .collect();
+        let (base_url, _served, _server) = spawn_ranged_media_server(body.clone()).await;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let output_path = tmp.path().join("out.mp4");
+
+        let existing = tmp.path().join("out.mp3");
+        tokio::fs::write(&existing, b"an earlier completed download")
+            .await
+            .expect("plant existing file");
+
+        let engine = DownloadEngine::new(DownloadConfig {
+            segments: 4,
+            retry_attempts: 2,
+            retry_delay: Duration::from_millis(5),
+            request_delay: Duration::from_millis(1),
+            ..Default::default()
+        });
+
+        let (tx, mut rx) = mpsc::channel(100);
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+
+        let saved = engine
+            .download(&format!("{base_url}/track.mp3"), &output_path, tx)
+            .await
+            .expect("download should succeed");
+
+        let preserved = tokio::fs::read(&existing).await.expect("read existing");
+        assert!(
+            preserved == b"an earlier completed download",
+            "the earlier download must survive untouched, found {} bytes",
+            preserved.len()
+        );
+        assert_eq!(
+            saved,
+            tmp.path().join("out (1).mp3"),
+            "a taken content-derived name must be sidestepped, not overwritten"
+        );
+        assert_eq!(
+            tokio::fs::read(&saved).await.expect("read output").len(),
+            body.len(),
+            "output must be complete"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_non_colliding_path_walks_past_taken_names() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let desired = tmp.path().join("clip.bin");
+
+        // Free name is returned unchanged.
+        assert_eq!(non_colliding_path(&desired).await, desired);
+
+        tokio::fs::write(&desired, b"x").await.expect("write");
+        assert_eq!(
+            non_colliding_path(&desired).await,
+            tmp.path().join("clip (1).bin")
+        );
+
+        tokio::fs::write(tmp.path().join("clip (1).bin"), b"x")
+            .await
+            .expect("write");
+        assert_eq!(
+            non_colliding_path(&desired).await,
+            tmp.path().join("clip (2).bin")
+        );
+
+        // Extensionless names keep their shape.
+        let bare = tmp.path().join("clip");
+        tokio::fs::write(&bare, b"x").await.expect("write");
+        assert_eq!(non_colliding_path(&bare).await, tmp.path().join("clip (1)"));
     }
 }
