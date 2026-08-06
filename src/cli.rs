@@ -511,3 +511,49 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod shared_sanitizer_tests {
+    use super::sanitize_filename;
+
+    /// The GUI used to carry its own stripped-down copy: no NUL, no control
+    /// characters, no trim, no length cap and — the visible one — no
+    /// empty-title fallback, so a blank title produced `format!("{}.mp4", "")`
+    /// = `.mp4`, a hidden dotfile in the user's Downloads folder.
+    #[test]
+    fn a_blank_title_never_produces_a_hidden_dotfile() {
+        for blank in ["", "   ", "...", " . "] {
+            let name = format!("{}.mp4", sanitize_filename(blank));
+            assert!(
+                !name.starts_with('.'),
+                "{blank:?} produced the hidden file {name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn control_characters_and_separators_are_replaced() {
+        let out = sanitize_filename("a/b\\c:d\0e\nf");
+        assert!(
+            !out.contains(['/', '\\', ':', '\0', '\n']),
+            "unsafe characters survived: {out:?}"
+        );
+    }
+
+    /// A component over the filesystem's 255-byte limit fails the write with
+    /// ENAMETOOLONG, which no error mapper recognises — so the user is told
+    /// the URL is bad.
+    #[test]
+    fn a_very_long_title_is_capped() {
+        let out = sanitize_filename(&"a".repeat(1_000));
+        assert!(out.len() <= 180, "expected a cap, got {} chars", out.len());
+    }
+
+    /// The cap counts characters, so it can never split a multi-byte one.
+    #[test]
+    fn a_long_non_ascii_title_stays_valid() {
+        let out = sanitize_filename(&"مرحبا".repeat(100));
+        assert!(out.chars().count() <= 180);
+        assert!(out.chars().all(|c| "مرحبا".contains(c)));
+    }
+}

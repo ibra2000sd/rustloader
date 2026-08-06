@@ -70,10 +70,15 @@ pub fn make_error_user_friendly(error: &str) -> String {
         || error_lower.contains("removed")
     {
         "This video is not available or has been removed".to_string()
+    } else if error_lower.contains("age") && error_lower.contains("restricted") {
+        // Before the private/restricted arm below: anything containing
+        // "restricted" matched that first, so yt-dlp's age-gate errors
+        // ("age-restricted", "confirm your age") were reported as a private
+        // video — the wrong remedy, since an age gate can work with cookies
+        // configured and a private video cannot.
+        "This video is age-restricted and cannot be downloaded".to_string()
     } else if error_lower.contains("private") || error_lower.contains("restricted") {
         "This video is private or restricted".to_string()
-    } else if error_lower.contains("age") && error_lower.contains("restricted") {
-        "This video is age-restricted and cannot be downloaded".to_string()
     } else if error_lower.contains("geo") || error_lower.contains("region") {
         "This video is not available in your region".to_string()
     } else if error_lower.contains("copyright") {
@@ -125,6 +130,32 @@ mod tests {
             "yt-dlp extraction timed out after 60s (subprocess killed)"
         )
         .contains("check your internet"));
+    }
+
+    /// The age arm sat AFTER `private || restricted`, so anything containing
+    /// "restricted" — which every age-gate message does — was reported as a
+    /// private video. Wrong remedy: an age gate can work once cookies are
+    /// configured, a private video cannot.
+    #[test]
+    fn friendly_reports_age_gates_as_age_gates_not_as_private() {
+        for raw in [
+            "ERROR: [youtube] abc: Sign in to confirm your age. This video may be age-restricted",
+            "This video is age restricted",
+        ] {
+            let msg = make_error_user_friendly(raw);
+            assert!(
+                msg.contains("age-restricted"),
+                "expected an age-gate message for {raw:?}, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn friendly_still_reports_plain_private_videos_as_private() {
+        assert_eq!(
+            make_error_user_friendly("ERROR: [youtube] abc: Private video"),
+            "This video is private or restricted"
+        );
     }
 
     #[test]

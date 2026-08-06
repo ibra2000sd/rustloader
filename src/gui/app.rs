@@ -9,6 +9,7 @@ use crate::gui::clipboard;
 use crate::gui::clipboard_monitor::ClipboardWatch;
 use std::time::Instant;
 // DownloadProgressData defined below
+use crate::cli::sanitize_filename;
 use crate::queue::TaskStatus;
 use crate::utils::config::{AppSettings, OutputFormat, VideoQuality};
 use crate::utils::update_check::{self, UpdateInfo};
@@ -1497,16 +1498,6 @@ impl Application for RustloaderApp {
             )))
             .into()
     }
-}
-
-/// Sanitize filename for filesystem
-fn sanitize_filename(name: &str) -> String {
-    name.chars()
-        .map(|c| match c {
-            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
-            _ => c,
-        })
-        .collect()
 }
 
 /// Build the `Command` that (re)loads download history from the `downloads`
