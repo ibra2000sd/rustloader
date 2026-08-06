@@ -248,6 +248,8 @@ pub enum Message {
     // Settings
     DownloadLocationChanged(String),
     BrowseDownloadLocation,
+    /// The folder the async picker returned (`None` = the user cancelled).
+    DownloadLocationPicked(Option<String>),
     MaxConcurrentChanged(usize),
     SegmentsChanged(usize),
     QualityChanged(String),
@@ -962,8 +964,26 @@ impl Application for RustloaderApp {
             }
 
             Message::BrowseDownloadLocation => {
-                if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                    self.download_location = path.to_string_lossy().to_string();
+                // `pick_folder()` blocks until the dialog closes. Called here,
+                // it blocks `update()` — and with it the whole iced event
+                // loop: the window stops repainting, and no BackendEvent is
+                // processed, so the 100-slot event channel fills at the
+                // monitor's polling rate and the actor then blocks on `send`.
+                // The async dialog hands the choice back as a normal message.
+                Command::perform(
+                    async {
+                        rfd::AsyncFileDialog::new()
+                            .pick_folder()
+                            .await
+                            .map(|folder| folder.path().to_string_lossy().to_string())
+                    },
+                    Message::DownloadLocationPicked,
+                )
+            }
+
+            Message::DownloadLocationPicked(picked) => {
+                if let Some(path) = picked {
+                    self.download_location = path;
                 }
                 Command::none()
             }
@@ -1038,7 +1058,22 @@ impl Application for RustloaderApp {
                     // on the port after that.
                     self.bridge_port = None;
                     self.bridge_error = None;
-                    self.status_message = "Browser bridge stopped".to_string();
+                    // Drop what the extension queued but that has not started
+                    // yet. Without this, a request waiting behind an in-flight
+                    // extraction is picked up by `finish_bridge_request` once
+                    // that finishes, so a browser-initiated download begins
+                    // AFTER the user switched browser integration off.
+                    let dropped = self.bridge_pending.len();
+                    for request in self.bridge_pending.drain(..) {
+                        if let Some(cookies) = request.cookies_file.as_deref() {
+                            let _ = std::fs::remove_file(cookies);
+                        }
+                    }
+                    self.status_message = if dropped > 0 {
+                        format!("Browser bridge stopped — {dropped} queued request(s) discarded")
+                    } else {
+                        "Browser bridge stopped".to_string()
+                    };
                 }
                 Command::none()
             }
