@@ -20,6 +20,7 @@ pub fn settings_view(
     bridge_port: Option<u16>,
     bridge_error: Option<&str>,
     pairing_status: crate::bridge::PairingStatus,
+    quality: &str,
 ) -> Element<'static, crate::gui::app::Message> {
     // Header with back button
     let header = row![
@@ -120,16 +121,19 @@ pub fn settings_view(
     .spacing(20);
 
     // Quality section
-    let quality_options = vec!["Best Available", "1080p", "720p", "480p"];
+    // Owned strings, matching the main view's picker: the selection is derived
+    // from the live setting, so it cannot be a `&'static str`.
+    let quality_options: Vec<String> = ["Best Available", "1080p", "720p", "480p"]
+        .iter()
+        .map(|option| option.to_string())
+        .collect();
     let quality_section = column![
         text("Quality")
             .size(16)
             .style(iced::theme::Text::Color(crate::gui::theme::TEXT_PRIMARY)),
-        pick_list(
-            quality_options,
-            Some("Best Available"), // Simplified for UI demo, real app would match current
-            |quality| crate::gui::app::Message::QualityChanged(quality.to_string()),
-        )
+        pick_list(quality_options, Some(quality.to_string()), |quality| {
+            crate::gui::app::Message::QualityChanged(quality.to_string())
+        },)
         .width(Length::Fill)
         .padding(10),
     ]

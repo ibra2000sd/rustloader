@@ -232,6 +232,21 @@ impl VideoQuality {
             VideoQuality::Specific(_) => "Custom",
         }
     }
+
+    /// The label as it appears in the quality dropdowns.
+    ///
+    /// Distinct from [`as_str`]: a `pick_list` shows a selection only when it
+    /// equals one of its options, and the options are "480p"-style strings, so
+    /// `as_str`'s "Custom" renders as a blank box. Both the main view and
+    /// Settings use this, so the two can never disagree about what is
+    /// selected.
+    pub fn display_label(&self) -> String {
+        match self {
+            VideoQuality::Best => "Best Available".to_string(),
+            VideoQuality::Worst => "Worst Available".to_string(),
+            VideoQuality::Specific(height) => format!("{height}p"),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -295,5 +310,46 @@ mod tests {
                 "{f:?} must be exactly one of best/remux/audio"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod quality_label_tests {
+    use super::VideoQuality;
+
+    /// The Settings picker used to be hardcoded to "Best Available", and
+    /// `as_str` returns "Custom" for a specific height — a value matching no
+    /// dropdown option, which iced renders as an empty box. Both views now
+    /// take their label from here.
+    #[test]
+    fn every_quality_matches_a_dropdown_option() {
+        let options = ["Best Available", "Worst Available", "1080p", "720p", "480p"];
+
+        for quality in [
+            VideoQuality::Best,
+            VideoQuality::Worst,
+            VideoQuality::Specific("1080".to_string()),
+            VideoQuality::Specific("720".to_string()),
+            VideoQuality::Specific("480".to_string()),
+        ] {
+            let label = quality.display_label();
+            assert!(
+                options.contains(&label.as_str()),
+                "{quality:?} renders as {label:?}, which matches no picker option"
+            );
+        }
+    }
+
+    #[test]
+    fn a_specific_height_is_not_reported_as_custom() {
+        assert_eq!(
+            VideoQuality::Specific("480".to_string()).display_label(),
+            "480p"
+        );
+        assert_ne!(
+            VideoQuality::Specific("480".to_string()).display_label(),
+            VideoQuality::Best.display_label(),
+            "a chosen height must not be shown as Best Available"
+        );
     }
 }

@@ -1484,14 +1484,7 @@ impl Application for RustloaderApp {
         let content = match self.current_view {
             View::Main => {
                 use crate::gui::views::main_view;
-                // "{h}p" matches the pick_list option strings ("480p", …), so
-                // the dropdown shows the actual selection — it used to say
-                // "Custom", which matches no option and rendered blank.
-                let quality_str = match &self.quality {
-                    VideoQuality::Best => "Best Available".to_string(),
-                    VideoQuality::Worst => "Worst Available".to_string(),
-                    VideoQuality::Specific(h) => format!("{h}p"),
-                };
+                let quality_str = self.quality.display_label();
                 main_view(
                     &self.url_input,
                     &self.active_downloads,
@@ -1521,6 +1514,7 @@ impl Application for RustloaderApp {
                     self.bridge_port,
                     self.bridge_error.as_deref(),
                     self.bridge_pairing.status(),
+                    &self.quality.display_label(),
                 )
             }
             View::History => {
