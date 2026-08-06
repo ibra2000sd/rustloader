@@ -674,6 +674,72 @@ impl QueueManager {
         }
     }
 
+    /// Spawn the task that folds engine progress into the queue — the only
+    /// thing the monitor reads — and, while the download is still live, into
+    /// its active-downloads snapshot.
+    fn spawn_progress_handler(
+        &self,
+        task_id: String,
+        mut progress_rx: mpsc::Receiver<DownloadProgress>,
+    ) -> JoinHandle<()> {
+        let queue = Arc::clone(&self.queue);
+        let active_downloads = Arc::clone(&self.active_downloads);
+        debug!("📡 [PROGRESS] Spawning progress receiver for: {}", task_id);
+        tokio::spawn(async move {
+            debug!("📡 [PROGRESS] Progress receiver started for: {}", task_id);
+            loop {
+                match progress_rx.recv().await {
+                    Some(progress) => {
+                        debug!(
+                            "🔁 [PROGRESS] Received for {}: {:.2}%",
+                            task_id,
+                            progress.percentage() as f32
+                        );
+
+                        // Update task progress in the queued snapshot
+                        // LOCKING: We need to update the Master List (Queue) with progress
+                        let mut queue = queue.lock().await;
+                        if let Some(t) = queue.iter_mut().find(|t| t.id == task_id) {
+                            t.progress = Some(progress.clone());
+                        }
+                        drop(queue); // release queue lock immediately
+
+                        // CRITICAL: Also update the active_downloads snapshot so the monitor
+                        // (which reads active downloads) will see progress updates.
+                        let mut active = active_downloads.lock().await;
+                        if let Some(handle) = active.get_mut(&task_id) {
+                            handle.task.progress = Some(progress.clone());
+                            debug!("✅ [PROGRESS] Updated active_downloads for: {}", task_id);
+                        } else {
+                            // No entry: the task has been cancelled or removed,
+                            // or its completion already tidied up. Inserting a
+                            // placeholder here — as this used to — resurrects a
+                            // handle with dummy tasks and a stale `Downloading`
+                            // snapshot that nothing can ever clear
+                            // (`clear_completed` retains on Completed), leaking
+                            // it for the process lifetime and keeping
+                            // `start()`'s has_work permanently true.
+                            //
+                            // Nothing needs it: the monitor reads the QUEUE via
+                            // `get_all_tasks`, which the branch above already
+                            // updated, and never looks at active_downloads.
+                            debug!(
+                                "📡 [PROGRESS] No active entry for {} (cancelled, removed, or already finished)",
+                                task_id
+                            );
+                        }
+                        // active lock dropped at end of scope
+                    }
+                    None => {
+                        debug!("📡 [PROGRESS] progress_rx closed (None) for: {}", task_id);
+                        break;
+                    }
+                }
+            }
+            debug!("📡 [PROGRESS] Progress receiver ended for: {}", task_id);
+        })
+    }
+
     /// Start downloading a task
     async fn start_download(&self, mut task: DownloadTask) {
         debug!("\n🎬 [QUEUE] ========== start_download CALLED ==========");
@@ -748,88 +814,7 @@ impl QueueManager {
 
         // Handle progress updates - spawn the receiver FIRST so the channel is ready
         // before the engine attempts to send progress messages.
-        let queue_clone_for_progress = Arc::clone(&self.queue);
-        let task_id_for_progress = task_id.clone();
-        // snapshot of the task to use when inserting a placeholder into active_downloads
-        let task_snapshot_for_progress = task_for_handle.clone();
-        // Clone the active_downloads Arc into the progress handler so it can update
-        // the active snapshot when progress arrives.
-        let active_downloads_clone_for_progress = Arc::clone(&active_downloads_clone);
-        debug!(
-            "📡 [PROGRESS] Spawning progress receiver for: {}",
-            task_id_for_progress
-        );
-        let progress_handler = tokio::spawn(async move {
-            debug!(
-                "📡 [PROGRESS] Progress receiver started for: {}",
-                task_id_for_progress
-            );
-            loop {
-                match progress_rx.recv().await {
-                    Some(progress) => {
-                        debug!(
-                            "🔁 [PROGRESS] Received for {}: {:.2}%",
-                            task_id_for_progress,
-                            progress.percentage() as f32
-                        );
-
-                        // Update task progress in the queued snapshot
-                        // LOCKING: We need to update the Master List (Queue) with progress
-                        let mut queue = queue_clone_for_progress.lock().await;
-                        if let Some(t) = queue.iter_mut().find(|t| t.id == task_id_for_progress) {
-                            t.progress = Some(progress.clone());
-                        }
-                        drop(queue); // release queue lock immediately
-
-                        // CRITICAL: Also update the active_downloads snapshot so the monitor
-                        // (which reads active downloads) will see progress updates.
-                        let mut active = active_downloads_clone_for_progress.lock().await;
-                        if let Some(handle) = active.get_mut(&task_id_for_progress) {
-                            handle.task.progress = Some(progress.clone());
-                            debug!(
-                                "✅ [PROGRESS] Updated active_downloads for: {}",
-                                task_id_for_progress
-                            );
-                        } else {
-                            // If no active handle exists yet (race), insert a placeholder
-                            // so the monitor can see the task snapshot with progress.
-                            let (dummy_cancel_tx, _dummy_cancel_rx) = mpsc::channel::<()>(1);
-                            let dummy_join = tokio::spawn(async {});
-                            let dummy_progress_handle = tokio::spawn(async {});
-                            active.insert(
-                                task_id_for_progress.clone(),
-                                DownloadHandle {
-                                    task_id: task_id_for_progress.clone(),
-                                    join_handle: dummy_join,
-                                    progress_handle: dummy_progress_handle,
-                                    cancel_tx: dummy_cancel_tx,
-                                    task: task_snapshot_for_progress.clone(),
-                                },
-                            );
-                            if let Some(h) = active.get_mut(&task_id_for_progress) {
-                                h.task.progress = Some(progress.clone());
-                            }
-                            debug!(
-                                "✅ [PROGRESS] Inserted placeholder active_downloads for: {}",
-                                task_id_for_progress
-                            );
-                        }
-                        // active lock dropped at end of scope
-                    }
-                    None => {
-                        debug!(
-                            "📡 [PROGRESS] progress_rx closed (None) for: {}",
-                            task_id_for_progress
-                        );
-                        break;
-                    }
-                }
-            }
-            debug!(
-                "📡 [PROGRESS] Progress receiver ended for: {}",
-                task_id_for_progress
-            );
-        });
+        let progress_handler = self.spawn_progress_handler(task_id.clone(), progress_rx);
 
         debug!("   - Progress receiver spawned and waiting");
 
@@ -1236,5 +1221,86 @@ impl DownloadTask {
             output_format: OutputFormat::Best,
             insecure_tls: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod phantom_entry_tests {
+    use super::*;
+    use crate::downloader::DownloadConfig;
+    use crate::utils::OrganizationSettings;
+
+    async fn make_manager(base_dir: &Path) -> Arc<QueueManager> {
+        let event_log = Arc::new(EventLog::new(base_dir).await.expect("event log"));
+        let engine = DownloadEngine::new(DownloadConfig {
+            segments: 1,
+            ..Default::default()
+        });
+        let organizer = FileOrganizer::new(OrganizationSettings::default())
+            .await
+            .expect("file organizer");
+        let metadata = MetadataManager::new(base_dir);
+        Arc::new(QueueManager::new(1, engine, organizer, metadata, event_log))
+    }
+
+    fn task(id: &str, output_path: PathBuf) -> DownloadTask {
+        DownloadTask {
+            id: id.to_string(),
+            video_info: VideoInfo {
+                title: "probe".to_string(),
+                ..Default::default()
+            },
+            format: Format::default(),
+            output_path,
+            status: TaskStatus::Downloading,
+            progress: None,
+            added_at: Utc::now(),
+            output_format: OutputFormat::Best,
+            insecure_tls: false,
+        }
+    }
+
+    /// The progress handler's "no active entry yet (race)" branch inserted a
+    /// placeholder holding dummy tasks and a stale Downloading snapshot.
+    /// Nothing could ever remove it — `clear_completed` retains on Completed —
+    /// so it leaked for the process lifetime and kept `start()`'s has_work
+    /// permanently true. It is reached on an ordinary completion race and on
+    /// every cancel/remove, not just at startup.
+    #[tokio::test]
+    async fn a_late_progress_event_does_not_resurrect_a_finished_task() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let manager = make_manager(tmp.path()).await;
+        let finished = task("gone", tmp.path().join("out.mp4"));
+
+        manager.queue.lock().await.push_back(finished.clone());
+
+        let (progress_tx, progress_rx) = mpsc::channel::<DownloadProgress>(8);
+        let handler = manager.spawn_progress_handler("gone".to_string(), progress_rx);
+
+        // The engine emits one last update after the task left active_downloads.
+        progress_tx
+            .send(DownloadProgress::new(1_000, 1))
+            .await
+            .expect("send progress");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        assert!(
+            manager.active_downloads.lock().await.is_empty(),
+            "a late progress event must not put a finished task back into active_downloads"
+        );
+
+        // The queue — what the monitor actually reads — still got the update.
+        let queue = manager.queue.lock().await;
+        assert!(
+            queue
+                .iter()
+                .find(|t| t.id == "gone")
+                .expect("task still queued")
+                .progress
+                .is_some(),
+            "the progress itself must still reach the queue"
+        );
+        drop(queue);
+        handler.abort();
     }
 }
