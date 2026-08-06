@@ -713,6 +713,10 @@ impl Application for RustloaderApp {
                                 eta_seconds: None,
                                 file_path: None,
                                 error_message: None,
+                                // Byte counts live in the engine, not the event
+                                // log, so a restored row starts at zero and
+                                // fills in once the task is resumed.
+                                downloaded_bytes: 0,
                                 last_progress_at: Instant::now(),
                                 was_resumed_after_failure: false,
                                 error_dismissed: false,
