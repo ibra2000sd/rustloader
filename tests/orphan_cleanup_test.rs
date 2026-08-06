@@ -51,6 +51,9 @@ fn make_task(id: &str, output_path: PathBuf) -> DownloadTask {
 struct PlantedFiles {
     parts: Vec<PathBuf>,
     sidecar: PathBuf,
+    /// What an interrupted merge leaves behind: the merge writes here and
+    /// renames into place, so a cancel mid-merge strands this file.
+    merge_temp: PathBuf,
     decoys: Vec<PathBuf>,
 }
 
@@ -72,6 +75,9 @@ fn plant_artifacts(output_path: &Path) -> PlantedFiles {
     let sidecar = dir.join(format!("{name}.rustloader-resume"));
     std::fs::write(&sidecar, b"{}").expect("write sidecar");
 
+    let merge_temp = dir.join(format!("{name}.merging"));
+    std::fs::write(&merge_temp, b"half-merged bytes").expect("write merge temp");
+
     let decoys = vec![
         output_path.to_path_buf(),
         dir.join(format!("{name}.partial")),
@@ -84,6 +90,7 @@ fn plant_artifacts(output_path: &Path) -> PlantedFiles {
     PlantedFiles {
         parts,
         sidecar,
+        merge_temp,
         decoys,
     }
 }
@@ -96,6 +103,11 @@ fn assert_artifacts_gone(planted: &PlantedFiles) {
         !planted.sidecar.exists(),
         "resume sidecar should be gone: {:?}",
         planted.sidecar
+    );
+    assert!(
+        !planted.merge_temp.exists(),
+        "merge temp should be gone: {:?}",
+        planted.merge_temp
     );
     for decoy in &planted.decoys {
         assert!(decoy.exists(), "decoy must be untouched: {decoy:?}");
@@ -110,6 +122,11 @@ fn assert_artifacts_remain(planted: &PlantedFiles) {
         planted.sidecar.exists(),
         "resume sidecar must remain: {:?}",
         planted.sidecar
+    );
+    assert!(
+        planted.merge_temp.exists(),
+        "merge temp must survive a pause: {:?}",
+        planted.merge_temp
     );
     for decoy in &planted.decoys {
         assert!(decoy.exists(), "decoy must be untouched: {decoy:?}");

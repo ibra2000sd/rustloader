@@ -7,7 +7,9 @@
     unused_assignments
 )]
 
-use crate::downloader::merger::{cleanup_segments, merge_segments, MergeProgress};
+use crate::downloader::merger::{
+    cleanup_segments, merge_segments, merging_temp_path, MergeProgress,
+};
 // progress types already imported above
 use crate::downloader::progress::{
     DownloadProgress, DownloadStatus, StallDetector, STALL_ABORT_TIMEOUT, STALL_DETECTION_SECONDS,
@@ -866,34 +868,39 @@ impl DownloadEngine {
         // Create channel for merge progress
         let (merge_progress_tx, mut merge_progress_rx) = mpsc::channel::<MergeProgress>(10);
 
-        // Spawn merge task
         let segments_paths: Vec<PathBuf> = segments.iter().map(|s| s.path.clone()).collect();
-        let segments_paths_clone = segments_paths.clone();
-        let output_path_clone = output_path.to_path_buf();
-        let merge_task = tokio::spawn(async move {
-            merge_segments(
-                &segments_paths_clone,
-                &output_path_clone,
-                Some(merge_progress_tx),
-            )
-            .await
-        });
 
-        // Process merge progress
-        while let Some(merge_progress) = merge_progress_rx.recv().await {
-            // Update progress
-            progress.downloaded_bytes = merge_progress.total_bytes;
-            progress.segments_completed = merge_progress.segment_index + 1;
+        // Merge into a temp beside the output and publish with a rename, so an
+        // interrupted merge can never leave a truncated file under the real
+        // name — the same shape `download_simple` uses (B-DL-005). Merging in
+        // place meant a cancel mid-merge left a plausible-looking, corrupt
+        // media file that no cleanup removes.
+        let merge_target = merging_temp_path(output_path);
 
-            if let Err(e) = progress_tx.send(progress.clone()).await {
-                warn!("Failed to send merge progress: {}", e);
-                break;
+        // Deliberately NOT a `tokio::spawn`: the merge must not outlive this
+        // future. Pause/cancel abort the task awaiting it, and a detached
+        // merge would keep writing — racing the queue's artifact cleanup, and
+        // letting a prompt resume start a second merge over the first.
+        let merge_fut = merge_segments(&segments_paths, &merge_target, Some(merge_progress_tx));
+        tokio::pin!(merge_fut);
+
+        let merge_result = loop {
+            tokio::select! {
+                result = &mut merge_fut => break result,
+                Some(merge_progress) = merge_progress_rx.recv() => {
+                    progress.downloaded_bytes = merge_progress.total_bytes;
+                    progress.segments_completed = merge_progress.segment_index + 1;
+
+                    if let Err(e) = progress_tx.send(progress.clone()).await {
+                        warn!("Failed to send merge progress: {}", e);
+                    }
+                }
             }
-        }
+        };
 
-        // Wait for merge to complete
-        if let Err(e) = merge_task.await? {
+        if let Err(e) = merge_result {
             error!("Merge failed: {}", e);
+            let _ = tokio::fs::remove_file(&merge_target).await;
 
             let mut failed_progress = progress.clone();
             failed_progress.failed(e.to_string());
@@ -903,6 +910,20 @@ impl DownloadEngine {
             }
 
             return Err(e);
+        }
+
+        if let Err(e) = tokio::fs::rename(&merge_target, output_path).await {
+            error!("Failed to publish the merged file: {}", e);
+            let _ = tokio::fs::remove_file(&merge_target).await;
+
+            let mut failed_progress = progress.clone();
+            failed_progress.failed(e.to_string());
+
+            if let Err(e) = progress_tx.send(failed_progress).await {
+                warn!("Failed to send merge failed progress: {}", e);
+            }
+
+            return Err(e.into());
         }
 
         // Clean up segment files
@@ -3461,6 +3482,72 @@ mod tests {
         assert!(
             detail.contains("Requested format is not available"),
             "terminal Failed progress must carry the ERROR line, got: {detail}"
+        );
+    }
+
+    // ============================================================
+    // MERGE ATOMICITY
+    // The merge ran in a detached `tokio::spawn` writing straight
+    // into the output path, so a pause/cancel mid-merge left a
+    // truncated file under the real name — and the detached writer
+    // raced the queue's artifact cleanup and any prompt resume.
+    // ============================================================
+
+    /// Pause and cancel stop a download by aborting the task awaiting it, so
+    /// nothing may survive that abort and publish a file for a download the
+    /// user cancelled.
+    #[tokio::test]
+    async fn test_abort_during_merge_leaves_no_file_under_the_output_name() {
+        let body: Vec<u8> = (0..(24 * 1024 * 1024) as u32)
+            .map(|i| (i % 256) as u8)
+            .collect();
+        let (base_url, _served, _server) = spawn_ranged_media_server(body).await;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let output_path = tmp.path().join("out.mp4");
+        let merge_temp = merging_temp_path(&output_path);
+
+        let engine = DownloadEngine::new(DownloadConfig {
+            segments: 4,
+            retry_attempts: 2,
+            retry_delay: Duration::from_millis(5),
+            request_delay: Duration::from_millis(1),
+            ..Default::default()
+        });
+
+        let (tx, mut rx) = mpsc::channel(100);
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+
+        let handle = tokio::spawn({
+            let output_path = output_path.clone();
+            let url = format!("{base_url}/movie.mp4");
+            async move { engine.download(&url, &output_path, tx).await }
+        });
+
+        // The merge is the only thing that creates either path, so their
+        // appearance marks it as genuinely under way — in this build (temp)
+        // and in the pre-fix one (straight to the output).
+        let started = tokio::time::timeout(Duration::from_secs(60), async {
+            while !merge_temp.exists() && !output_path.exists() {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await;
+        assert!(started.is_ok(), "the merge never started");
+
+        // What pause/cancel do to a running download.
+        handle.abort();
+
+        // Outlive any writer that survived the abort.
+        tokio::time::sleep(Duration::from_secs(3)).await;
+
+        assert!(
+            !output_path.exists(),
+            "a download aborted during the merge must not publish a file under \
+             the output name — found {} bytes there",
+            std::fs::metadata(&output_path)
+                .map(|m| m.len())
+                .unwrap_or(0)
         );
     }
 }
