@@ -73,6 +73,23 @@ impl Default for OrganizationSettings {
     }
 }
 
+/// Largest byte index `<= max` that `s` can be split at.
+///
+/// Filename limits are byte limits, but slicing a `str` mid-character panics —
+/// and titles are arbitrary user text, so the byte cap lands inside a
+/// multi-byte character for any Arabic/CJK/emoji title of the wrong length.
+/// (`str::floor_char_boundary` is still unstable.)
+fn floor_char_boundary(s: &str, max: usize) -> usize {
+    if max >= s.len() {
+        return s.len();
+    }
+    let mut cut = max;
+    while cut > 0 && !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    cut
+}
+
 impl FileOrganizer {
     /// Initialize organizer with user settings
     pub async fn new(settings: OrganizationSettings) -> Result<Self> {
@@ -392,11 +409,12 @@ impl FileOrganizer {
             if let Some(dot_pos) = sanitized.rfind('.') {
                 let extension = &sanitized[dot_pos..];
                 if extension.len() < 10 {
-                    let name_part = &sanitized[..200 - extension.len()];
-                    return format!("{}{}", name_part, extension);
+                    let cut = floor_char_boundary(&sanitized, 200 - extension.len());
+                    return format!("{}{}", &sanitized[..cut], extension);
                 }
             }
-            sanitized = sanitized[..200].to_string();
+            let cut = floor_char_boundary(&sanitized, 200);
+            sanitized = sanitized[..cut].to_string();
         }
 
         sanitized
@@ -407,7 +425,8 @@ impl FileOrganizer {
         if title.len() <= max_len {
             title.to_string()
         } else {
-            format!("{}...", &title[..max_len.saturating_sub(3)])
+            let cut = floor_char_boundary(title, max_len.saturating_sub(3));
+            format!("{}...", &title[..cut])
         }
     }
 
@@ -472,6 +491,82 @@ impl FileOrganizer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ============================================================
+    // NON-ASCII TITLE TRUNCATION
+    // The length caps slice at fixed byte offsets, which used to
+    // panic ("byte index N is not a char boundary") on any
+    // Arabic/CJK/emoji title whose cap landed mid-character. The
+    // panic fired inside the spawned download task, after the file
+    // was already downloaded, leaving the task stuck on Downloading.
+    // ============================================================
+
+    /// 201 bytes of 3-byte characters: the 200-byte cap lands inside the 67th.
+    #[test]
+    fn sanitize_filename_truncates_cjk_without_panicking() {
+        let name = "视".repeat(67);
+
+        let out = FileOrganizer::sanitize_filename(&name);
+
+        assert!(
+            out.len() <= 200,
+            "must respect the byte cap, got {}",
+            out.len()
+        );
+        assert!(
+            out.chars().all(|c| c == '视'),
+            "must not corrupt characters"
+        );
+        assert!(!out.is_empty());
+    }
+
+    /// Same, on the extension-preserving branch: the cap becomes 196, which
+    /// also lands mid-character.
+    #[test]
+    fn sanitize_filename_truncates_cjk_and_keeps_the_extension() {
+        let name = format!("{}.mp4", "视".repeat(80));
+
+        let out = FileOrganizer::sanitize_filename(&name);
+
+        assert!(out.ends_with(".mp4"), "extension must survive, got {out}");
+        assert!(
+            out.len() <= 200,
+            "must respect the byte cap, got {}",
+            out.len()
+        );
+    }
+
+    /// `truncate_title`'s cap (max_len - 3) lands inside a 2-byte character
+    /// for Arabic text.
+    #[test]
+    fn truncate_title_cuts_arabic_on_a_char_boundary() {
+        let title = "ب".repeat(100);
+
+        let out = FileOrganizer::truncate_title(&title, 150);
+
+        assert!(
+            out.ends_with("..."),
+            "truncation marker expected, got {out}"
+        );
+        assert!(out.len() <= 150, "must respect max_len, got {}", out.len());
+        assert!(out.trim_end_matches('.').chars().all(|c| c == 'ب'));
+    }
+
+    /// An emoji title is 4-byte characters — every cap offset that is not a
+    /// multiple of 4 used to panic.
+    #[test]
+    fn sanitize_filename_truncates_emoji_without_panicking() {
+        let name = "🎬".repeat(60);
+
+        let out = FileOrganizer::sanitize_filename(&name);
+
+        assert!(
+            out.len() <= 200,
+            "must respect the byte cap, got {}",
+            out.len()
+        );
+        assert!(out.chars().all(|c| c == '🎬'));
+    }
 
     #[test]
     fn test_sanitize_filename() {
