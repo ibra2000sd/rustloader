@@ -205,6 +205,31 @@ impl QueueManager {
         let task_output_format = task.output_format.clone();
         let task_insecure_tls = task.insecure_tls;
 
+        // LOG EVENT — before the task is visible to the scheduler.
+        //
+        // `start()` polls the queue every 500ms and logs TaskStarted as soon
+        // as it picks a task up. With the push first, that could reach the log
+        // ahead of this line; a crash in that window leaves a log whose
+        // TaskStarted names an id no TaskAdded ever introduced, which
+        // `rehydrate` drops (get_mut on a missing entry is a no-op) — so the
+        // task comes back as plain Queued and the next launch auto-starts it,
+        // exactly what I-6 forbids.
+        if let Err(e) = self
+            .event_log
+            .log(QueueEvent::TaskAdded {
+                task_id: task_id.clone(),
+                video_info: Box::new(log_video_info),
+                format: Box::new(log_format),
+                output_path: log_output_path,
+                timestamp: Utc::now(),
+                output_format: task_output_format,
+                insecure_tls: task_insecure_tls,
+            })
+            .await
+        {
+            error!("Failed to log TaskAdded event: {}", e);
+        }
+
         // Add to queue
         {
             let mut queue = self.queue.lock().await;
@@ -226,23 +251,6 @@ impl QueueManager {
         debug!("✅ [QUEUE] add_task completed for: {}", task_id);
 
         debug!("✅ [QUEUE] add_task completed for: {}", task_id);
-
-        // LOG EVENT
-        if let Err(e) = self
-            .event_log
-            .log(QueueEvent::TaskAdded {
-                task_id: task_id.clone(),
-                video_info: Box::new(log_video_info),
-                format: Box::new(log_format),
-                output_path: log_output_path,
-                timestamp: Utc::now(),
-                output_format: task_output_format,
-                insecure_tls: task_insecure_tls,
-            })
-            .await
-        {
-            error!("Failed to log TaskAdded event: {}", e);
-        }
 
         Ok(task_id)
     }
@@ -1039,15 +1047,12 @@ impl QueueManager {
             task_id
         );
 
+        // TaskStarted is logged by `process_queue`, the only caller, BEFORE it
+        // gets here — deliberately, so a start that dies on the way in is
+        // still recorded as started and rehydrates as Paused rather than
+        // Queued (I-6's no-auto-blast rule). Logging it again here appended a
+        // second identical event for every single start.
         info!("Started download for task {}", task_id);
-
-        let _ = self
-            .event_log
-            .log(QueueEvent::TaskStarted {
-                task_id: task_id.to_string(),
-                timestamp: Utc::now(),
-            })
-            .await;
     }
 
     /// Update task status in queue
@@ -1236,5 +1241,110 @@ impl DownloadTask {
             output_format: OutputFormat::Best,
             insecure_tls: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod event_log_tests {
+    use super::*;
+    use crate::downloader::DownloadConfig;
+    use crate::utils::OrganizationSettings;
+
+    async fn make_manager(base_dir: &Path) -> (QueueManager, Arc<EventLog>) {
+        let event_log = Arc::new(EventLog::new(base_dir).await.expect("event log"));
+        let engine = DownloadEngine::new(DownloadConfig {
+            segments: 1,
+            ..Default::default()
+        });
+        let organizer = FileOrganizer::new(OrganizationSettings::default())
+            .await
+            .expect("file organizer");
+        let metadata = MetadataManager::new(base_dir);
+        (
+            QueueManager::new(1, engine, organizer, metadata, Arc::clone(&event_log)),
+            event_log,
+        )
+    }
+
+    fn probe_task(id: &str, output_path: PathBuf) -> DownloadTask {
+        DownloadTask {
+            id: id.to_string(),
+            video_info: VideoInfo {
+                title: "probe".to_string(),
+                url: "https://example.com/page".to_string(),
+                ..Default::default()
+            },
+            // Port 1 on loopback refuses instantly: the engine this spawns
+            // must not need the network to finish.
+            format: Format {
+                url: "http://127.0.0.1:1/never.mp4".to_string(),
+                ..Default::default()
+            },
+            output_path,
+            status: TaskStatus::Queued,
+            progress: None,
+            added_at: Utc::now(),
+            output_format: OutputFormat::Best,
+            insecure_tls: false,
+        }
+    }
+
+    /// The regression: `process_queue` logged TaskStarted and then
+    /// `start_download` — its only caller — logged an identical one, so the
+    /// append-only log grew at twice the real rate and stopped being
+    /// one-event-per-transition.
+    #[tokio::test]
+    async fn starting_a_task_appends_exactly_one_task_started() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (manager, event_log) = make_manager(tmp.path()).await;
+
+        manager
+            .add_task(probe_task("once", tmp.path().join("out.mp4")))
+            .await
+            .expect("add task");
+        manager.process_queue().await;
+
+        let events = event_log.read_events().await.expect("read events");
+        let started = events
+            .iter()
+            .filter(|event| {
+                matches!(event, QueueEvent::TaskStarted { task_id, .. } if task_id == "once")
+            })
+            .count();
+
+        assert_eq!(started, 1, "one start must append one TaskStarted");
+    }
+
+    /// I-6: a TaskStarted whose id was never introduced by a TaskAdded is
+    /// dropped by `rehydrate`, so the task returns as plain Queued and the
+    /// next launch auto-starts it. TaskAdded must therefore be durable before
+    /// the scheduler can ever see the task.
+    #[tokio::test]
+    async fn task_added_is_logged_before_task_started() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (manager, event_log) = make_manager(tmp.path()).await;
+
+        manager
+            .add_task(probe_task("ordered", tmp.path().join("out.mp4")))
+            .await
+            .expect("add task");
+        manager.process_queue().await;
+
+        let events = event_log.read_events().await.expect("read events");
+        let position = |find: fn(&QueueEvent) -> bool| events.iter().position(find);
+
+        let added = position(
+            |e| matches!(e, QueueEvent::TaskAdded { task_id, .. } if task_id == "ordered"),
+        )
+        .expect("TaskAdded must be logged");
+        let started = position(
+            |e| matches!(e, QueueEvent::TaskStarted { task_id, .. } if task_id == "ordered"),
+        )
+        .expect("TaskStarted must be logged");
+
+        assert!(
+            added < started,
+            "TaskAdded (at {added}) must precede TaskStarted (at {started})"
+        );
     }
 }
