@@ -22,6 +22,7 @@
 
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
@@ -43,6 +44,13 @@ pub const PAIRING_WINDOW: std::time::Duration = std::time::Duration::from_secs(1
 const MAX_HEAD_BYTES: usize = 16 * 1024;
 const MAX_BODY_BYTES: usize = 1024 * 1024;
 const CONNECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How many connections may be in flight at once.
+///
+/// The paired extension opens one at a time; this only exists so a local
+/// process cannot hold thousands of `CONNECTION_TIMEOUT`-long tasks open by
+/// connecting in a loop.
+const MAX_CONCURRENT_CONNECTIONS: usize = 16;
 
 /// A download request accepted by the bridge, handed to the GUI.
 ///
@@ -210,6 +218,8 @@ pub async fn serve(
         Ok(addr) => addr.port(),
         Err(_) => 0,
     };
+    let connections = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
+
     loop {
         match listener.accept().await {
             Ok((stream, peer)) => {
@@ -218,11 +228,24 @@ pub async fn serve(
                 if !peer.ip().is_loopback() {
                     continue;
                 }
+                // Cap concurrency: every accepted connection lives up to
+                // CONNECTION_TIMEOUT, so an unbounded spawn lets any local
+                // process pile up thousands of live tasks just by connecting
+                // in a loop. Over the cap, the connection is closed at once
+                // rather than queued — a legitimate extension opens one at a
+                // time, so refusing is honest and self-limiting.
+                let Ok(permit) = Arc::clone(&connections).try_acquire_owned() else {
+                    tracing::warn!(
+                        "bridge: refusing connection, {MAX_CONCURRENT_CONNECTIONS} already in flight"
+                    );
+                    continue;
+                };
                 let token = token.clone();
                 let cookie_dir = cookie_dir.clone();
                 let pairing = pairing.clone();
                 let tx = tx.clone();
                 tokio::spawn(async move {
+                    let _permit = permit;
                     let _ = tokio::time::timeout(
                         CONNECTION_TIMEOUT,
                         handle_connection(stream, port, token, cookie_dir, pairing, tx),
@@ -443,7 +466,14 @@ async fn route(
             let body: DownloadBody = match serde_json::from_slice(&req.body) {
                 Ok(b) => b,
                 Err(e) => {
-                    return json_response(400, &format!(r#"{{"error":"bad json: {e}"}}"#));
+                    // serde renders offending input verbatim (`invalid type:
+                    // string "a\"b"`), so interpolating it raw emits invalid
+                    // JSON and the client sees a parse failure instead of the
+                    // reason.
+                    return json_response(
+                        400,
+                        &format!(r#"{{"error":{}}}"#, json_string(&format!("bad json: {e}"))),
+                    );
                 }
             };
             let url = body.url.trim().to_string();
@@ -511,12 +541,24 @@ pub fn write_netscape_cookies(path: &Path, cookies: &[CookieRecord]) -> std::io:
             clean(&c.value),
         ));
     }
-    std::fs::write(path, out)?;
+    // Create it private, rather than writing at the umask default (commonly
+    // 0644) and narrowing afterwards: this file holds the page's live session
+    // cookies, and the old order left a window — plus an error path, if the
+    // chmod itself failed — where another local user could read it.
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(out.as_bytes())?;
     }
+    #[cfg(not(unix))]
+    std::fs::write(path, out)?;
     Ok(())
 }
 
@@ -540,6 +582,29 @@ fn status_text(code: u16) -> &'static str {
         500 => "Internal Server Error",
         _ => "Error",
     }
+}
+
+/// Encode `value` as a JSON string literal, quotes included.
+///
+/// Error text is arbitrary — serde prints the offending input verbatim, and a
+/// control character or a quote in it would otherwise produce a response the
+/// client cannot parse at all, hiding the very reason it was sent.
+fn json_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 fn json_response(code: u16, body: &str) -> String {
@@ -693,6 +758,76 @@ mod tests {
                 let _ = std::fs::remove_dir_all(&self.path);
             }
         }
+    }
+
+    /// A serde error renders the offending input verbatim, so a body shaped
+    /// to put a quote inside it used to be interpolated straight into the
+    /// response — emitting invalid JSON, which the extension fails to parse,
+    /// hiding the very reason the 400 was sent.
+    #[tokio::test]
+    async fn a_bad_json_error_response_is_still_parseable_json() {
+        let (port, _rx, _pairing, _dir) = spawn_test_server("tok").await;
+        let host = format!("127.0.0.1:{port}");
+
+        // `cookies` must be a sequence; a string here makes serde quote it
+        // back at us, embedded quotes and all.
+        let body = r#"{"url":"https://example.com/v","cookies":"a\"b"}"#;
+        let resp = raw_request(
+            port,
+            &post("/api/v1/download", port, &host, Some("tok"), body),
+        )
+        .await;
+
+        assert!(resp.starts_with("HTTP/1.1 400"), "got: {resp}");
+        let payload = resp.split("\r\n\r\n").nth(1).expect("response has a body");
+        let parsed: serde_json::Value = serde_json::from_str(payload)
+            .unwrap_or_else(|e| panic!("error body must be parseable JSON ({e}): {payload}"));
+        assert!(
+            parsed["error"]
+                .as_str()
+                .expect("error is a string")
+                .contains("bad json"),
+            "the client must still learn why: {parsed}"
+        );
+    }
+
+    #[test]
+    fn json_string_escapes_quotes_backslashes_and_controls() {
+        assert_eq!(json_string(r#"a"b"#), r#""a\"b""#);
+        assert_eq!(json_string(r"a\b"), r#""a\\b""#);
+        assert_eq!(json_string("a\nb"), r#""a\nb""#);
+        assert_eq!(json_string("a\u{1}b"), r#""a\u0001b""#);
+        // Non-ASCII is valid JSON as-is; no need to escape it.
+        assert_eq!(json_string("مرحبا"), "\"مرحبا\"");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cookie_files_are_created_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("cookies.txt");
+        write_netscape_cookies(
+            &path,
+            &[CookieRecord {
+                name: "sid".to_string(),
+                value: "secret".to_string(),
+                domain: ".example.com".to_string(),
+                path: "/".to_string(),
+                secure: true,
+                http_only: true,
+                expires: None,
+            }],
+        )
+        .expect("write cookies");
+
+        let mode = std::fs::metadata(&path).expect("stat").permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "live session cookies must never be group/world readable, even briefly"
+        );
     }
 
     async fn raw_request(port: u16, request: &str) -> String {
