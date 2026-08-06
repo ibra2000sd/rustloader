@@ -398,6 +398,22 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// queue's cancel/remove artifact cleanup, the resume-guard's stale-part
 /// discard) covers this file without learning a new pattern. The two paths
 /// never run concurrently for the same output, so the shared name is safe.
+/// Bytes per second between two cumulative readings.
+///
+/// The aggregate can go DOWN: a resume whose `Range` the server ignored
+/// truncates that part file, so the segment's next reading restarts near zero
+/// while the sum was captured a second earlier. A plain `a - b` underflows
+/// there — a debug-build panic that kills the progress task (freezing progress
+/// for the rest of the download and making the stall watchdog fire on a
+/// transfer that is fine), and in release a wrapped ~1.8e19 B/s reported to the
+/// GUI.
+fn throughput(total_downloaded: u64, last_downloaded: u64, elapsed_secs: f64) -> f64 {
+    if elapsed_secs <= 0.0 {
+        return 0.0;
+    }
+    total_downloaded.saturating_sub(last_downloaded) as f64 / elapsed_secs
+}
+
 fn simple_temp_path(output_path: &Path) -> PathBuf {
     let mut name = output_path.file_name().unwrap_or_default().to_os_string();
     name.push(".part0");
@@ -765,11 +781,7 @@ impl DownloadEngine {
                 let now = std::time::Instant::now();
                 if now.duration_since(last_update_time) >= Duration::from_secs(1) {
                     let elapsed = now.duration_since(last_update_time).as_secs_f64();
-                    let speed = if elapsed > 0.0 {
-                        (total_downloaded - last_downloaded) as f64 / elapsed
-                    } else {
-                        0.0
-                    };
+                    let speed = throughput(total_downloaded, last_downloaded, elapsed);
 
                     // Send progress update
                     let mut progress = DownloadProgress::new(file_size, segments_count);
@@ -804,6 +816,16 @@ impl DownloadEngine {
             let mut reported = false;
             loop {
                 ticker.tick().await;
+                // The only other way out is a failed send, and a send is only
+                // attempted on a fresh stall transition — so once a stall has
+                // been reported and progress stays frozen, nothing ever ends
+                // this loop. Its `.abort()` lives in the download future, which
+                // pause/cancel kills, so pausing an already-stalled download
+                // (the natural reaction) leaked this task, its progress sender
+                // and its Arc for the life of the process.
+                if stall_tx.is_closed() {
+                    break;
+                }
                 let downloaded: u64 = { stall_progress.lock().await.iter().sum() };
                 if detector.record(downloaded) {
                     // Progress resumed; allow a fresh stall report later.
@@ -3397,6 +3419,38 @@ mod tests {
             )
             .await
             .expect_err("non-remux postprocessing failure must stay a failure");
+    }
+
+    // ============================================================
+    // AGGREGATE THROUGHPUT
+    // The per-tick delta is a u64 subtraction over a sum that can
+    // REGRESS: a resume whose Range was ignored truncates that part
+    // file, so the segment restarts near zero.
+    // ============================================================
+
+    #[test]
+    fn throughput_is_bytes_per_second_over_the_interval() {
+        assert_eq!(throughput(3_000, 1_000, 2.0), 1_000.0);
+        assert_eq!(throughput(1_024, 0, 1.0), 1_024.0);
+    }
+
+    /// The regression: `(total - last)` underflowed, panicking the progress
+    /// task in debug (freezing progress for the rest of the download, and
+    /// making the stall watchdog fire on a transfer that was fine) and
+    /// reporting a wrapped ~1.8e19 B/s in release.
+    #[test]
+    fn a_regressing_total_reports_zero_rather_than_underflowing() {
+        assert_eq!(
+            throughput(500, 5_000, 1.0),
+            0.0,
+            "a truncated part file must not produce a nonsense speed"
+        );
+    }
+
+    #[test]
+    fn a_zero_or_negative_interval_reports_zero() {
+        assert_eq!(throughput(5_000, 0, 0.0), 0.0);
+        assert_eq!(throughput(5_000, 0, -1.0), 0.0);
     }
 
     // ============================================================
