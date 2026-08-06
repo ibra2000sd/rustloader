@@ -21,37 +21,60 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = PING_TIMEOUT_MS) 
 }
 
 /**
- * Ping one port. Resolves to `{port, version, paired}` when a Rustloader
- * bridge answers there, or `null` for anything else (other app, no listener).
- * Never sends the token anywhere except this loopback origin.
+ * Ask one port who it is, WITHOUT sending the token. Resolves to
+ * `{port, version}` when something claiming to be a Rustloader bridge answers,
+ * or `null` for anything else (other app, no listener).
+ *
+ * Discovery probes ports the app may never have used, and anything local can
+ * hold one of them, so the token must not ride along on a probe — a stranger
+ * on 46150 would collect it (and then every page cookie we later send).
+ * `/api/v1/ping` deliberately answers unauthenticated for exactly this.
  */
-export async function ping(port, token) {
+export async function identify(port) {
   try {
-    const headers = token ? { Authorization: `Bearer ${token}` } : {};
-    const resp = await fetchWithTimeout(
-      `http://127.0.0.1:${port}/api/v1/ping`,
-      { headers },
-    );
+    const resp = await fetchWithTimeout(`http://127.0.0.1:${port}/api/v1/ping`);
     if (!resp.ok) return null;
     const body = await resp.json();
     if (body.app !== "rustloader") return null;
-    return { port, version: body.version, paired: body.paired === true };
+    return { port, version: body.version };
   } catch {
     return null;
   }
 }
 
 /**
- * Find the port Rustloader's bridge is listening on: the cached port first,
- * then the whole range in parallel. Resolves to a ping result or `null`.
+ * Whether `token` is the one the bridge on `port` expects. Only ever call this
+ * for a port `identify` has already vouched for, so the token goes to a single
+ * endpoint that speaks the protocol rather than to the whole scan range.
  */
-export async function discover(token) {
+export async function isPaired(port, token) {
+  if (!token) return false;
+  try {
+    const resp = await fetchWithTimeout(`http://127.0.0.1:${port}/api/v1/ping`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!resp.ok) return false;
+    const body = await resp.json();
+    return body.app === "rustloader" && body.paired === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Find the port Rustloader's bridge is listening on: the cached port first,
+ * then the whole range in parallel. Resolves to `{port, version}` or `null`.
+ *
+ * Takes no token — see `identify`. Pass the result's `port` to `isPaired` when
+ * the caller needs to know whether the stored token still matches.
+ */
+export async function discover() {
   const { bridge_port: cached } = await chrome.storage.local.get("bridge_port");
   if (cached) {
-    const hit = await ping(cached, token);
+    const hit = await identify(cached);
     if (hit) return hit;
   }
-  const results = await Promise.all(BRIDGE_PORTS.map((p) => ping(p, token)));
+  const results = await Promise.all(BRIDGE_PORTS.map((p) => identify(p)));
   const found = results.find((r) => r !== null) ?? null;
   if (found) await chrome.storage.local.set({ bridge_port: found.port });
   return found;
@@ -67,7 +90,7 @@ export async function discover(token) {
  * `{ok: false, reason: "not_running"|"window_closed", message}`.
  */
 export async function autoPair() {
-  const pings = await Promise.all(BRIDGE_PORTS.map((p) => ping(p)));
+  const pings = await Promise.all(BRIDGE_PORTS.map((p) => identify(p)));
   const found = pings.find((r) => r !== null);
   if (!found) {
     return {
@@ -118,7 +141,7 @@ export async function sendDownload(payload) {
       message: "Not paired: open the extension options and paste the token from Rustloader's Settings.",
     };
   }
-  const found = await discover(token);
+  const found = await discover();
   if (!found) {
     return {
       ok: false,
