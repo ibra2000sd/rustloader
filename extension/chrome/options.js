@@ -1,7 +1,7 @@
 // Rustloader Companion — options page logic (F-EXT-001 Phase 1).
 // SPDX-License-Identifier: MIT (same license as rustloader itself).
 
-import { autoPair, discover } from "./bridge-client.js";
+import { autoPair, discover, isPaired } from "./bridge-client.js";
 
 const tokenInput = document.getElementById("token");
 const statusBox = document.getElementById("status");
@@ -71,13 +71,13 @@ document.getElementById("test").addEventListener("click", async () => {
   }
   await chrome.storage.local.set({ bridge_token: token });
   showStatus("ok", "Looking for Rustloader…");
-  const found = await discover(token);
+  const found = await discover();
   if (!found) {
     showStatus(
       "warn",
       "Rustloader isn't reachable. Launch the app and switch on Settings → Browser Integration, then test again.",
     );
-  } else if (!found.paired) {
+  } else if (!(await isPaired(found.port, token))) {
     showStatus(
       "warn",
       `Found Rustloader ${found.version} on port ${found.port}, but it rejected this token. Re-copy it from Settings → Browser Integration.`,

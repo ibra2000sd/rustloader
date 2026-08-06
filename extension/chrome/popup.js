@@ -27,7 +27,7 @@ async function emptyStateText() {
   if (!token) {
     return "Not paired yet — open “⚙ Settings / Pair” below to connect to Rustloader.";
   }
-  if ((await discover(token)) === null) {
+  if ((await discover()) === null) {
     return "Rustloader isn't reachable. Launch it and switch on Settings → Browser Integration (see “⚙ Settings / Pair” below).";
   }
   return null; // paired and reachable: keep the default play-the-video hint
