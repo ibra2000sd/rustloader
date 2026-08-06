@@ -88,7 +88,11 @@ impl YtDlpExtractor {
     /// Point the extractor at a stub binary, so tests can drive the real
     /// subprocess path without a yt-dlp install. Mirrors the engine's
     /// `with_ytdlp_program` seam.
-    #[cfg(test)]
+    ///
+    /// unix-gated with its callers: the stubs are shell scripts, and on
+    /// Windows an unused `#[cfg(test)]` item is a dead_code warning, which
+    /// `clippy -D warnings` turns into a CI failure.
+    #[cfg(all(test, unix))]
     fn with_ytdlp_path(path: PathBuf) -> Self {
         Self {
             ytdlp_path: path,
@@ -508,13 +512,12 @@ mod tests {
 // surfaced as the generic "Unable to process this URL".
 // ============================================================
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod playlist_tests {
     use super::*;
 
     /// Stub yt-dlp: prints `stdout_body`, plus the args it was given to a
     /// side file so a test can assert on the command line.
-    #[cfg(unix)]
     fn stub(dir: &std::path::Path, name: &str, stdout_body: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
 
@@ -536,7 +539,6 @@ mod playlist_tests {
     const ONE_VIDEO: &str =
         r#"{"id":"abc","title":"Single video","webpage_url":"https://example.com/watch?v=abc"}"#;
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn a_single_video_still_extracts() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -550,7 +552,6 @@ mod playlist_tests {
         assert_eq!(info.title, "Single video");
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn a_multi_entry_dump_says_playlist_instead_of_failing_to_parse() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -578,7 +579,6 @@ mod playlist_tests {
         );
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn extraction_asks_yt_dlp_for_the_single_video() {
         let tmp = tempfile::tempdir().expect("tempdir");
