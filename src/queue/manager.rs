@@ -482,10 +482,24 @@ impl QueueManager {
             output_path
         };
 
-        // Remove from active downloads
+        // Remove from active downloads, stopping the download the way
+        // `cancel_task` does. Dropping the handle alone is not enough: the
+        // progress handler keeps running, and its "no active entry yet" branch
+        // re-inserts a placeholder on the next progress event — a phantom
+        // `Downloading` entry for a task that no longer exists, which
+        // `clear_completed` (Completed-only) can never remove.
         {
             let mut active = self.active_downloads.lock().await;
-            active.remove(task_id);
+            if let Some(handle) = active.remove(task_id) {
+                if let Err(e) = handle.cancel_tx.send(()).await {
+                    warn!(
+                        "Failed to send cancel signal to removed task {}: {}",
+                        task_id, e
+                    );
+                }
+                handle.join_handle.abort();
+                handle.progress_handle.abort();
+            }
         }
 
         info!("Removed task {} from queue and active downloads", task_id);
@@ -1236,5 +1250,113 @@ impl DownloadTask {
             output_format: OutputFormat::Best,
             insecure_tls: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod remove_task_tests {
+    use super::*;
+    use crate::downloader::DownloadConfig;
+    use crate::utils::OrganizationSettings;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    async fn make_manager(base_dir: &Path) -> QueueManager {
+        let event_log = Arc::new(EventLog::new(base_dir).await.expect("event log"));
+        let engine = DownloadEngine::new(DownloadConfig {
+            segments: 1,
+            ..Default::default()
+        });
+        let organizer = FileOrganizer::new(OrganizationSettings::default())
+            .await
+            .expect("file organizer");
+        let metadata = MetadataManager::new(base_dir);
+        QueueManager::new(1, engine, organizer, metadata, event_log)
+    }
+
+    fn task(id: &str, output_path: PathBuf) -> DownloadTask {
+        DownloadTask {
+            id: id.to_string(),
+            video_info: VideoInfo {
+                title: "t".to_string(),
+                ..Default::default()
+            },
+            format: Format::default(),
+            output_path,
+            status: TaskStatus::Downloading,
+            progress: None,
+            added_at: Utc::now(),
+            output_format: OutputFormat::Best,
+            insecure_tls: false,
+        }
+    }
+
+    /// A handle whose two tasks tick a counter forever, standing in for the
+    /// real download and progress-handler tasks: if they are still ticking
+    /// after the removal, they were never aborted.
+    fn ticking(counter: Arc<AtomicUsize>) -> JoinHandle<()> {
+        tokio::spawn(async move {
+            loop {
+                counter.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+    }
+
+    /// `remove_task` used to drop the handle without aborting anything, unlike
+    /// its `cancel_task` sibling. The download only stopped as a side effect of
+    /// `cancel_tx` dropping, while the progress handler kept running — and its
+    /// placeholder-insert branch then resurrected a permanent phantom entry.
+    #[tokio::test]
+    async fn remove_stops_the_download_and_progress_tasks() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let manager = make_manager(tmp.path()).await;
+        let removed = task("remove-me", tmp.path().join("video.mp4"));
+
+        manager.queue.lock().await.push_back(removed.clone());
+
+        let download_ticks = Arc::new(AtomicUsize::new(0));
+        let progress_ticks = Arc::new(AtomicUsize::new(0));
+        let (cancel_tx, _cancel_rx) = mpsc::channel::<()>(1);
+        manager.active_downloads.lock().await.insert(
+            "remove-me".to_string(),
+            DownloadHandle {
+                task_id: "remove-me".to_string(),
+                join_handle: ticking(Arc::clone(&download_ticks)),
+                progress_handle: ticking(Arc::clone(&progress_ticks)),
+                cancel_tx,
+                task: removed,
+            },
+        );
+
+        // Let both tasks actually get going, so a later freeze means "aborted"
+        // rather than "never started".
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            download_ticks.load(Ordering::SeqCst) > 0 && progress_ticks.load(Ordering::SeqCst) > 0,
+            "both stand-in tasks must be running before the removal"
+        );
+
+        manager.remove_task("remove-me").await.expect("remove task");
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let download_at_removal = download_ticks.load(Ordering::SeqCst);
+        let progress_at_removal = progress_ticks.load(Ordering::SeqCst);
+
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        assert_eq!(
+            download_ticks.load(Ordering::SeqCst),
+            download_at_removal,
+            "removing a task must stop its download"
+        );
+        assert_eq!(
+            progress_ticks.load(Ordering::SeqCst),
+            progress_at_removal,
+            "removing a task must stop its progress handler, or it re-inserts a phantom entry"
+        );
+        assert!(
+            manager.active_downloads.lock().await.is_empty(),
+            "the removed task must leave no active entry behind"
+        );
     }
 }
