@@ -64,6 +64,16 @@
   `;
 
   /** Inline download-arrow icon — no web_accessible_resources needed. */
+  /// Only act on a click the browser generated from a real user gesture.
+  ///
+  /// The page shares this document: without the check it can dispatch its own
+  /// click events (or call `.click()`) on the overlay's controls and make
+  /// Rustloader fetch URLs of its choosing, with no user involvement at all.
+  /// `isTrusted` is set by the browser and cannot be forged from page script.
+  function isRealClick(event) {
+    return event instanceof Event && event.isTrusted === true;
+  }
+
   function iconSvg() {
     const NS = "http://www.w3.org/2000/svg";
     const svg = document.createElementNS(NS, "svg");
@@ -97,7 +107,10 @@
     // everything inside).
     host.style.cssText =
       "position:fixed;bottom:16px;right:16px;z-index:2147483647;";
-    const root = host.attachShadow({ mode: "open" });
+    // Closed: page script cannot reach in through `.shadowRoot` to find and
+    // synthesise clicks on the controls. Not a boundary on its own — the page
+    // can still remove the host — but it removes the easy handle.
+    const root = host.attachShadow({ mode: "closed" });
 
     const style = document.createElement("style");
     style.textContent = CSS;
@@ -108,7 +121,10 @@
     pillEl.title = "Media detected — download with Rustloader";
     countEl = document.createElement("span");
     pillEl.append(iconSvg(), countEl);
-    pillEl.addEventListener("click", togglePanel);
+    pillEl.addEventListener("click", (event) => {
+      if (!isRealClick(event)) return;
+      togglePanel();
+    });
 
     panelEl = document.createElement("div");
     panelEl.className = "panel";
@@ -167,7 +183,10 @@
       const button = document.createElement("button");
       button.type = "button";
       button.textContent = "Download";
-      button.addEventListener("click", () => download(item.url, button));
+      button.addEventListener("click", (event) => {
+        if (!isRealClick(event)) return;
+        download(item.url, button);
+      });
       row.append(kind, name, button);
       listEl.append(row);
     }
