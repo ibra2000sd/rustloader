@@ -35,7 +35,11 @@ With Rustloader running:
 - **Toolbar popup** — when a page plays video/audio, the icon shows a per-tab
   count of detected streams (HLS/DASH manifests and direct video/audio,
   segment noise filtered out). Open the popup, pick a quality/format if you
-  want one, and click **Download** on an item.
+  want one, and click **Download** on an item. **Pause capture on this tab**
+  (bottom of the popup) stops detection for that tab and discards what was
+  found there; reloading the page (or navigating, or closing the tab)
+  re-enables it automatically. The pause is per-tab and in-memory only — a
+  persistent per-site exclusion is a tracked follow-up.
 - **Right-click** any page, link, or video/audio element →
   **Download with Rustloader**. The icon flashes **✓** when the app accepted
   the request or **!** when something failed — the Options page shows the
@@ -48,8 +52,9 @@ With Rustloader running:
   logged-in/age-gated content extracts correctly. Cookies are sent **only**
   to Rustloader at `127.0.0.1`, never anywhere else.
 - `storage` — the pairing token and the cached bridge port
-  (`storage.local`), and the per-tab detected-media list
-  (`storage.session`, in-memory only, gone when the browser closes).
+  (`storage.local`), and the per-tab detected-media list plus the per-tab
+  capture-pause flag (`storage.session`, in-memory only, gone when the
+  browser closes).
 - `webRequest` (observational — MV3 extensions cannot block/modify) —
   seeing response content-types so media can be detected. Nothing is
   altered, redirected, or sent anywhere; matching URLs are kept per-tab and
@@ -74,11 +79,11 @@ This is a prototype pending a maintainer decision; it may be removed.
 
 ## Development
 
-The sniffer's URL/content-type filtering and the overlay's visibility
-decision are pure modules with node tests:
+The sniffer's URL/content-type filtering, its capture-pause gate, and the
+overlay's visibility decision are pure modules with node tests:
 
 ```
-node --test extension/chrome/media-filter.test.js extension/chrome/overlay-logic.test.js
+node --test extension/chrome/media-filter.test.js extension/chrome/capture-gate.test.js extension/chrome/overlay-logic.test.js
 ```
 
 (`package.json` here only marks the directory as ES modules for node; Chrome

@@ -12,11 +12,17 @@
 // when the tab closes).
 
 import { classify } from "./media-filter.js";
+import { shouldCapture } from "./capture-gate.js";
 
 /** Cap per tab so a pathological page can't grow storage without bound. */
 const MAX_PER_TAB = 50;
 
 const tabKey = (tabId) => `tab-${tabId}`;
+/** Per-tab pause flag (popup's "Pause capture on this tab"). Lives next to
+ * the detection list in storage.session and dies with it: the main_frame
+ * reset below removes both, so a reload (or any navigation) re-enables
+ * capture without further bookkeeping. */
+const pauseKey = (tabId) => `paused-${tabId}`;
 
 // storage.session read-modify-write is racy under concurrent events; a
 // module-level promise chain serialises them. (If the worker is suspended
@@ -36,7 +42,7 @@ function contentTypeOf(details) {
 }
 
 async function resetTab(tabId) {
-  await chrome.storage.session.remove(tabKey(tabId));
+  await chrome.storage.session.remove([tabKey(tabId), pauseKey(tabId)]);
   try {
     await chrome.action.setBadgeText({ tabId, text: "" });
   } catch {
@@ -46,7 +52,10 @@ async function resetTab(tabId) {
 
 async function recordDetection(tabId, item) {
   const key = tabKey(tabId);
-  const stored = await chrome.storage.session.get(key);
+  const stored = await chrome.storage.session.get([key, pauseKey(tabId)]);
+  // The gate reads the pause flag inside the serialised chain, so a pause
+  // written through the chain (see the onMessage handler) is never raced.
+  if (!shouldCapture({ paused: stored[pauseKey(tabId)] })) return;
   const list = stored[key] ?? [];
   if (list.some((m) => m.url === item.url)) return;
   list.push(item);
@@ -91,5 +100,39 @@ chrome.webRequest.onHeadersReceived.addListener(
 );
 
 chrome.tabs.onRemoved.addListener((tabId) => {
-  serialised(() => chrome.storage.session.remove(tabKey(tabId)));
+  serialised(() =>
+    chrome.storage.session.remove([tabKey(tabId), pauseKey(tabId)]),
+  );
+});
+
+// Per-tab pause, toggled from the popup. Runs inside the serialised chain
+// so it cannot interleave with an in-flight recordDetection
+// read-modify-write. Pausing also discards the tab's detections: that
+// clears the badge here, empties the popup list, and hides the corner
+// overlay (its only feed is this same storage.session list — see
+// overlay-host.js). Resuming just drops the flag; capture restarts with the
+// page's next media request.
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type !== "sniffer-set-paused") return false;
+  // Popup/extension pages only: a tab-attached sender is a content script,
+  // which must not be able to pause tabs.
+  if (sender.tab || typeof message.tabId !== "number" || message.tabId < 0) {
+    return false;
+  }
+  const { tabId } = message;
+  serialised(async () => {
+    if (message.paused === true) {
+      await chrome.storage.session.set({ [pauseKey(tabId)]: true });
+      await chrome.storage.session.remove(tabKey(tabId));
+      try {
+        await chrome.action.setBadgeText({ tabId, text: "" });
+      } catch {
+        // The tab may already be gone; the badge is per-tab and auto-clears.
+      }
+    } else {
+      await chrome.storage.session.remove(pauseKey(tabId));
+    }
+    sendResponse({ ok: true });
+  });
+  return true; // async sendResponse
 });
