@@ -508,6 +508,19 @@ impl BackendActor {
     ) {
         let mut last_statuses = std::collections::HashMap::new();
 
+        // Seed from the rehydrated queue (`rehydrate` has already run by the
+        // time this is spawned). Those statuses are history, not transitions
+        // that just happened: without the baseline, the first poll diffs every
+        // rehydrated task against the `Queued` default and re-fires
+        // DownloadCompleted/DownloadFailed for downloads that finished
+        // sessions ago — announcing them in the status bar and, worse,
+        // rewriting each history row's `completed_at` with the launch time on
+        // every start. Tasks created later are deliberately NOT seeded, so
+        // their real transitions still fire, however fast they arrive.
+        for task in qm.get_all_tasks().await {
+            last_statuses.insert(task.id.clone(), task.status.clone());
+        }
+
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await; // Faster updates?
 
@@ -823,5 +836,122 @@ mod tests {
         let f =
             BackendActor::select_format(&vi, Some("137".to_string()), &specific("480")).unwrap();
         assert_eq!(f.format_id, "137");
+    }
+
+    // ============================================================
+    // MONITOR BASELINE ON RESTART
+    // `last_statuses` started empty, so the first poll diffed every
+    // rehydrated task against the `Queued` default and treated a
+    // download that finished sessions ago as a transition that had
+    // just happened.
+    // ============================================================
+
+    #[tokio::test]
+    async fn rehydrated_terminal_tasks_neither_refire_events_nor_rewrite_history() {
+        use crate::database::initialize_database;
+        use crate::queue::QueueEvent;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let task_id = "finished-last-week";
+        let output_path = tmp.path().join("video.mp4");
+
+        // A download that completed in an earlier session, as the event log
+        // records it.
+        let event_log = Arc::new(EventLog::new(tmp.path()).await.expect("event log"));
+        event_log
+            .log(QueueEvent::TaskAdded {
+                task_id: task_id.to_string(),
+                video_info: Box::new(VideoInfo {
+                    title: "old download".to_string(),
+                    url: "https://example.com/page".to_string(),
+                    ..Default::default()
+                }),
+                format: Box::new(Format::default()),
+                output_path: output_path.clone(),
+                timestamp: Utc::now(),
+                output_format: OutputFormat::Best,
+                insecure_tls: false,
+            })
+            .await
+            .expect("log TaskAdded");
+        event_log
+            .log(QueueEvent::TaskCompleted {
+                task_id: task_id.to_string(),
+                output_path: output_path.clone(),
+                timestamp: Utc::now(),
+            })
+            .await
+            .expect("log TaskCompleted");
+
+        let organizer = FileOrganizer::new(OrganizationSettings::default())
+            .await
+            .expect("file organizer");
+        let queue_manager = Arc::new(QueueManager::new(
+            1,
+            DownloadEngine::new(DownloadConfig::default()),
+            organizer,
+            MetadataManager::new(tmp.path()),
+            Arc::clone(&event_log),
+        ));
+        queue_manager.rehydrate().await.expect("rehydrate");
+
+        // Its history row, carrying the real completion time.
+        let db_path = tmp.path().join("history.db");
+        let pool = initialize_database(&format!("sqlite://{}?mode=rwc", db_path.display()))
+            .await
+            .expect("init db");
+        let db_manager = Arc::new(DatabaseManager::new(pool));
+        let finished_at = Utc::now() - chrono::Duration::days(7);
+        db_manager
+            .save_download(&DownloadRecord {
+                id: task_id.to_string(),
+                url: "https://example.com/page".to_string(),
+                title: "old download".to_string(),
+                output_path: output_path.clone(),
+                file_size: Some(1_000_000),
+                status: "Completed".to_string(),
+                created_at: finished_at,
+                completed_at: Some(finished_at),
+                error_message: None,
+            })
+            .await
+            .expect("seed history row");
+
+        let (tx, mut rx) = mpsc::channel(64);
+        let monitor = tokio::spawn(BackendActor::monitor_loop(
+            Arc::clone(&queue_manager),
+            tx,
+            Arc::clone(&db_manager),
+        ));
+
+        // Several 100ms poll ticks.
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        monitor.abort();
+
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, BackendEvent::DownloadCompleted { .. })),
+            "a download that finished in an earlier session must not be announced again, got {} event(s)",
+            events.len()
+        );
+
+        let history = db_manager
+            .get_all_downloads()
+            .await
+            .expect("get_all_downloads");
+        let row = history
+            .iter()
+            .find(|r| r.id == task_id)
+            .expect("history row present");
+        assert_eq!(
+            row.completed_at.map(|t| t.timestamp()),
+            Some(finished_at.timestamp()),
+            "the recorded completion time must survive a restart, not become the launch time"
+        );
     }
 }
