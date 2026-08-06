@@ -8,7 +8,9 @@ use clap::Parser;
 use iced::Application;
 use rustloader::cli::Cli;
 use rustloader::gui;
-use std::process::Command;
+use std::io::Read;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 fn main() -> Result<()> {
     // Must run before anything reads PATH or spawns a subprocess (the yt-dlp
@@ -100,6 +102,58 @@ fn setup_bundled_tools_path() {
     }
 }
 
+/// Upper bound on a single `--version` probe. Generous enough for a cold
+/// binary (macOS scans a freshly installed one on first execution), short
+/// enough that a wedged candidate can't hold the window shut for long.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Run `path --version` and return its trimmed stdout, giving up — and
+/// killing the child — after `limit`.
+///
+/// I-1 requires every spawned binary to be awaited under an upper bound with a
+/// guaranteed kill. This runs before any Tokio runtime exists, so the bound is
+/// a `try_wait` poll loop rather than a timeout future. Without it a yt-dlp
+/// that never answers (cold-start scan on a slow volume, a dead network mount,
+/// a broken Python shim) hangs `main` before the window is created, and the
+/// app simply never opens.
+fn probe_version_bounded(path: &str, limit: Duration) -> Option<String> {
+    let mut child = Command::new(path)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+
+    let deadline = Instant::now() + limit;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    return None;
+                }
+                break;
+            }
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                eprintln!(
+                    "WARNING: `{} --version` did not answer within {}s; giving up on it",
+                    path,
+                    limit.as_secs()
+                );
+                return None;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+            Err(_) => return None,
+        }
+    }
+
+    let mut stdout = String::new();
+    child.stdout.take()?.read_to_string(&mut stdout).ok()?;
+    Some(stdout.trim().to_string())
+}
+
 /// Locate yt-dlp, then emit (non-blocking) dependency health warnings.
 ///
 /// Returns the warnings so the GUI can also surface them as a banner.
@@ -119,13 +173,10 @@ fn check_ytdlp_installed() -> Vec<String> {
 
     let mut ytdlp_version: Option<String> = None;
     for path in &possible_paths {
-        if let Ok(output) = Command::new(path).arg("--version").output() {
-            if output.status.success() {
-                let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                println!("✓ yt-dlp found at: {} (version {})", path, version);
-                ytdlp_version = Some(version);
-                break;
-            }
+        if let Some(version) = probe_version_bounded(path, PROBE_TIMEOUT) {
+            println!("✓ yt-dlp found at: {} (version {})", path, version);
+            ytdlp_version = Some(version);
+            break;
         }
     }
 
@@ -152,4 +203,72 @@ fn check_ytdlp_installed() -> Vec<String> {
     }
 
     warnings
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Write an executable stub script and return its path.
+    #[cfg(unix)]
+    fn stub(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write stub");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod stub");
+        path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_returns_the_reported_version() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = stub(tmp.path(), "ok-yt-dlp.sh", "echo 2026.07.04");
+
+        let version = probe_version_bounded(path.to_str().expect("utf-8"), PROBE_TIMEOUT);
+
+        assert_eq!(version.as_deref(), Some("2026.07.04"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_returns_none_for_a_failing_binary() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = stub(tmp.path(), "broken-yt-dlp.sh", "exit 1");
+
+        assert_eq!(
+            probe_version_bounded(path.to_str().expect("utf-8"), PROBE_TIMEOUT),
+            None
+        );
+    }
+
+    /// The regression: a probe that never answers used to hang `main` before
+    /// the window was created, so the app never opened.
+    #[cfg(unix)]
+    #[test]
+    fn probe_gives_up_on_a_binary_that_never_answers() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = stub(tmp.path(), "hanging-yt-dlp.sh", "sleep 60");
+
+        let limit = Duration::from_millis(300);
+        let started = Instant::now();
+        let version = probe_version_bounded(path.to_str().expect("utf-8"), limit);
+        let elapsed = started.elapsed();
+
+        assert_eq!(version, None, "a hung probe must not report a version");
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "probe must return near its {limit:?} bound, took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn probe_returns_none_when_the_binary_does_not_exist() {
+        assert_eq!(
+            probe_version_bounded("definitely-not-a-real-yt-dlp-binary", PROBE_TIMEOUT),
+            None
+        );
+    }
 }
