@@ -1001,6 +1001,11 @@ impl DownloadEngine {
         debug!("🔧 [YT-DLP] Args: {:?}", args);
         let mut cmd = AsyncCommand::new(&self.ytdlp_program);
         cmd.args(&args);
+        // Pause/cancel stops a download by aborting the task that awaits this
+        // future (`queue::manager`'s `join_handle.abort()`); without
+        // `kill_on_drop` the dropped `Child` leaves yt-dlp running, so the
+        // transfer continues to completion behind a UI that says "Paused".
+        cmd.kill_on_drop(true);
         // Combine stderr and stdout to capture all output
         cmd.stderr(Stdio::piped());
         cmd.stdout(Stdio::piped());
@@ -3461,6 +3466,83 @@ mod tests {
         assert!(
             detail.contains("Requested format is not available"),
             "terminal Failed progress must carry the ERROR line, got: {detail}"
+        );
+    }
+
+    // ============================================================
+    // PAUSE/CANCEL MUST STOP THE YT-DLP CHILD
+    // (the engine used to spawn yt-dlp without `kill_on_drop`, so
+    // aborting the task that awaits the download left the process
+    // running and the transfer finished behind a "Paused" UI)
+    // ============================================================
+
+    /// Drives the real subprocess path with a stub yt-dlp (a shell script,
+    /// hence unix-only) that sleeps and only then writes a marker file, then
+    /// aborts the awaiting task exactly as `QueueManager::pause_task` does.
+    /// The marker must never appear: its absence proves the child stopped
+    /// rather than running to completion in the background.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_abort_kills_the_ytdlp_child_process() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let started = tmp.path().join("started");
+        let finished = tmp.path().join("finished");
+        let stub = tmp.path().join("fake-yt-dlp.sh");
+
+        // Touch `started` immediately, `finished` only after the sleep — so a
+        // killed stub leaves `started` present and `finished` absent.
+        std::fs::write(
+            &stub,
+            format!(
+                "#!/bin/sh\ntouch {started}\nsleep 5\ntouch {finished}\n",
+                started = started.display(),
+                finished = finished.display()
+            ),
+        )
+        .expect("write stub");
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod stub");
+
+        let engine = DownloadEngine::new(DownloadConfig::default())
+            .with_ytdlp_program(stub.to_str().expect("utf-8 stub path"));
+        let (tx, _rx) = mpsc::channel::<DownloadProgress>(64);
+        let output_path = tmp.path().join("out.mp4");
+
+        let handle = tokio::spawn(async move {
+            engine
+                .download_via_ytdlp(
+                    "https://example.com/watch?v=test123",
+                    None,
+                    &OutputFormat::Best,
+                    &output_path,
+                    tx,
+                )
+                .await
+        });
+
+        // Wait for the stub to actually be running before aborting, so the
+        // test exercises the kill path rather than a not-yet-spawned child.
+        let spawned = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !started.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await;
+        assert!(spawned.is_ok(), "stub yt-dlp never started");
+
+        // What pause/cancel do to a running download.
+        handle.abort();
+
+        // Outlive the stub's sleep: if the child survived the abort it would
+        // write the marker within this window.
+        tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+
+        assert!(
+            !finished.exists(),
+            "yt-dlp kept running after the download task was aborted — \
+             pause/cancel does not stop the transfer"
         );
     }
 }
