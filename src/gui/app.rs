@@ -188,9 +188,37 @@ pub struct DownloadTaskUI {
     pub eta_seconds: Option<u64>,
     pub file_path: Option<String>, // Path to the downloaded file
     pub error_message: Option<String>,
+    /// Raw byte count behind `downloaded_mb`, kept because stall detection
+    /// needs an exact "did this advance?" comparison.
+    pub downloaded_bytes: u64,
     pub last_progress_at: Instant,       // v0.6.0: For stall detection
     pub was_resumed_after_failure: bool, // v0.6.0: Track retry attempts
     pub error_dismissed: bool,           // v0.7.0: User dismissed error display
+}
+
+impl DownloadTaskUI {
+    /// Fold a progress snapshot into this row.
+    ///
+    /// The stall clock only moves when bytes actually moved. The monitor
+    /// re-sends the task's last snapshot on every poll, so a frozen download
+    /// still produces a steady stream of identical progress events —
+    /// refreshing the clock on arrival kept `last_progress_at` permanently
+    /// fresh, making the Stalled state, its label, and its Restart button
+    /// unreachable.
+    fn apply_progress(&mut self, data: &DownloadProgressData) {
+        let advanced = data.downloaded > self.downloaded_bytes;
+
+        self.progress = data.progress;
+        self.speed = data.speed;
+        self.downloaded_bytes = data.downloaded;
+        self.downloaded_mb = data.downloaded as f64 / (1024.0 * 1024.0);
+        self.total_mb = data.total as f64 / (1024.0 * 1024.0);
+        self.eta_seconds = data.eta;
+
+        if advanced {
+            self.last_progress_at = Instant::now();
+        }
+    }
 }
 
 /// Progress data transfer object
@@ -659,6 +687,7 @@ impl Application for RustloaderApp {
                             eta_seconds: None,
                             file_path: None,
                             error_message: None,
+                            downloaded_bytes: 0,
                             last_progress_at: Instant::now(),
                             was_resumed_after_failure: false,
                             error_dismissed: false,
@@ -707,12 +736,7 @@ impl Application for RustloaderApp {
                             // and never set the status here.
                             if !matches!(task.status.as_str(), "Completed" | "Failed" | "Cancelled")
                             {
-                                task.progress = data.progress;
-                                task.speed = data.speed;
-                                task.downloaded_mb = data.downloaded as f64 / (1024.0 * 1024.0);
-                                task.total_mb = data.total as f64 / (1024.0 * 1024.0);
-                                task.eta_seconds = data.eta;
-                                task.last_progress_at = Instant::now(); // stall detection
+                                task.apply_progress(&data);
                             }
                         }
                     }
@@ -1799,5 +1823,95 @@ mod settings_tests {
         assert!(matches!(loaded.quality, VideoQuality::Best));
 
         std::fs::remove_file(&db_path).ok();
+    }
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::{DownloadProgressData, DownloadTaskUI};
+    use std::time::{Duration, Instant};
+
+    fn row(downloaded: u64, last_progress_at: Instant) -> DownloadTaskUI {
+        DownloadTaskUI {
+            id: "t".to_string(),
+            title: "t".to_string(),
+            url: "https://example.com/v".to_string(),
+            progress: 0.4,
+            speed: 1024.0,
+            status: "Downloading".to_string(),
+            downloaded_mb: downloaded as f64 / (1024.0 * 1024.0),
+            total_mb: 10.0,
+            eta_seconds: Some(30),
+            file_path: None,
+            error_message: None,
+            downloaded_bytes: downloaded,
+            last_progress_at,
+            was_resumed_after_failure: false,
+            error_dismissed: false,
+        }
+    }
+
+    fn snapshot(downloaded: u64) -> DownloadProgressData {
+        DownloadProgressData {
+            progress: 0.4,
+            speed: 1024.0,
+            downloaded,
+            total: 10 * 1024 * 1024,
+            eta: Some(30),
+        }
+    }
+
+    /// The regression: the monitor re-sends the task's last snapshot on every
+    /// poll, so a frozen download still delivers a steady stream of identical
+    /// progress events. Treating each arrival as progress kept the stall clock
+    /// permanently fresh and made the Stalled state unreachable.
+    #[test]
+    fn repeated_identical_snapshots_do_not_refresh_the_stall_clock() {
+        let stalled_since = Instant::now() - Duration::from_secs(45);
+        let mut task = row(5_000, stalled_since);
+
+        for _ in 0..50 {
+            task.apply_progress(&snapshot(5_000));
+        }
+
+        assert_eq!(
+            task.last_progress_at, stalled_since,
+            "an unchanged snapshot must not count as progress"
+        );
+        assert!(
+            task.last_progress_at.elapsed() > Duration::from_secs(30),
+            "the row must still read as stalled"
+        );
+    }
+
+    #[test]
+    fn advancing_bytes_refresh_the_stall_clock() {
+        let stalled_since = Instant::now() - Duration::from_secs(45);
+        let mut task = row(5_000, stalled_since);
+
+        task.apply_progress(&snapshot(6_000));
+
+        assert!(
+            task.last_progress_at > stalled_since,
+            "real progress must reset the stall clock"
+        );
+        assert!(task.last_progress_at.elapsed() < Duration::from_secs(5));
+        assert_eq!(task.downloaded_bytes, 6_000);
+    }
+
+    /// A resumed download re-reports from a lower offset; that is movement,
+    /// but not forward movement, so it must not mask a stall on its own.
+    #[test]
+    fn a_regressing_snapshot_does_not_refresh_the_stall_clock() {
+        let stalled_since = Instant::now() - Duration::from_secs(45);
+        let mut task = row(5_000, stalled_since);
+
+        task.apply_progress(&snapshot(1_000));
+
+        assert_eq!(task.last_progress_at, stalled_since);
+        assert_eq!(
+            task.downloaded_bytes, 1_000,
+            "the displayed byte count still follows the engine"
+        );
     }
 }
